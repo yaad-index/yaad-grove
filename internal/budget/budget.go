@@ -100,8 +100,9 @@ func (m *Meter) Allow() bool {
 // Record adds a completed call's actual token usage to the current period and
 // persists the meter. It rolls the period first if it has elapsed; a negative
 // count is treated as zero. Accounting is post-call because exact usage is only
-// known then — so the pre-call Allow blocks the next call after the ceiling is
-// crossed, bounding overspend to at most one in-flight call.
+// known then — so the pre-call Allow blocks further calls once the ceiling is
+// crossed, bounding overspend to the in-flight call concurrency at that moment
+// (one for a serial caller).
 func (m *Meter) Record(tokens int64) error {
 	if tokens < 0 {
 		tokens = 0
