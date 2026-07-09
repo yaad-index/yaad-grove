@@ -13,11 +13,13 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"time"
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
+	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
@@ -49,12 +51,35 @@ type ServeCmd struct {
 
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
 
+	// The global spend ceiling (ADR 0006): the hard cost backstop the model-call
+	// path consults before every call. Conservative default so the bot is
+	// cost-capped out of the box; raise it to the real budget. A non-positive
+	// ceiling/period is refused (cost-safety cannot be zeroed off).
+	SpendCeiling int64         `name:"spend-ceiling" default:"1000000" help:"Global token budget per spend-period — the cost backstop across all users. Conservative default; raise to your budget."`
+	SpendPeriod  time.Duration `name:"spend-period" default:"24h" help:"Window the spend-ceiling accumulates over before it resets."`
+	BudgetDB     string        `name:"budget-db" default:"./budget.db" help:"Path to the persisted spend-meter database (survives restarts)." type:"path"`
+
 	TelegramGroups []string `name:"telegram-allowed-groups" help:"Group chat ids that count as 'the community' the bot serves (Telegram)."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
 // behavior is not yet implemented.
 func (c *ServeCmd) Run(log *slog.Logger) error {
+	// The spend ceiling is built first: cost-safety must exist before any
+	// model-call path (ADR 0006). It fails closed on a non-positive ceiling/period,
+	// and its meter is persisted so a restart cannot reset the budget. The
+	// model-call path (a later unit) consults meter.Allow before each call and
+	// meter.Record after.
+	budgetStore, err := budget.OpenBolt(c.BudgetDB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = budgetStore.Close() }()
+	meter, err := budget.New(budget.Config{Ceiling: c.SpendCeiling, Period: c.SpendPeriod}, budgetStore)
+	if err != nil {
+		return err
+	}
+
 	m := model.New(model.Config{
 		BaseURL: c.ModelBaseURL,
 		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
@@ -78,6 +103,9 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"model", c.ModelName,
 		"vault_dir", c.VaultDir,
 		"default_tier", c.DefaultTier,
+		"spend_ceiling_tokens", c.SpendCeiling,
+		"spend_period", c.SpendPeriod.String(),
+		"spend_remaining_tokens", meter.Remaining(),
 	)
 	_ = engine
 	return fmt.Errorf("serve: %w", core.ErrNotImplemented)

@@ -24,6 +24,17 @@ serve:
   model-base-url: https://api.openai.com/v1
   model-name: gpt-4o-mini
 
+  # Global spend ceiling — the hard cost backstop (ADR 0006). A token budget the
+  # model-call path consults before every call; when it is reached, calls are
+  # refused (not queued) until the window resets. This is the outer bound the
+  # per-user rate limit defers to. The meter is persisted (budget-db) so a restart
+  # cannot reset it. Defaults are deliberately conservative so the bot is
+  # cost-capped out of the box — raise spend-ceiling to your real budget. A
+  # non-positive value is refused (cost-safety cannot be turned off by zeroing it).
+  spend-ceiling: 1000000    # max tokens per spend-period
+  spend-period: 24h         # window the ceiling accumulates over, then resets
+  budget-db: ./budget.db    # persisted spend-meter (survives restarts)
+
   # Tier applied to users without a per-user override.
   default-tier: default
 
