@@ -1,0 +1,40 @@
+# yaad-grove example configuration.
+#
+# Config layers as file < env < flag. Copy to config.yaml (git-ignored) or
+# /etc/yaad-grove/config.yaml and adjust. Secrets are NOT set here — they come
+# from the environment:
+#   YAADGROVE_MODEL_API_KEY    OpenAI-compatible API key
+#   YAADGROVE_TELEGRAM_TOKEN   Telegram bot token
+
+log-level: info
+
+serve:
+  # Curated vault the bot grounds on (markdown + YAML frontmatter). This is the
+  # answering source of truth — never the quarantined chatter log.
+  vault-dir: ./vault
+
+  # Scope statement / system prompt that bounds the bot and drives refusal.
+  # Keep it specific: it is half of the grounding guarantee.
+  scope: >
+    You answer questions about <this community> using only the provided vault
+    context and tool results. If something is outside that scope, say so and
+    decline rather than guessing.
+
+  # OpenAI-compatible model endpoint. Any compatible gateway works.
+  model-base-url: https://api.openai.com/v1
+  model-name: gpt-4o-mini
+
+  # Tier applied to users without a per-user override.
+  default-tier: default
+
+# --- Planned config (Phase 1 build; not yet read by the scaffold) ---
+#
+# tools:                 # external MCP servers whose tools this bot may call
+#   - name: example
+#     command: some-mcp-server
+#     args: ["--flag"]
+#
+# telegram:
+#   allowed-groups: ["-1001234567890"]   # which groups count as "the community"
+#
+# admins: ["<platform-user-id>"]         # who may configure the bot live
