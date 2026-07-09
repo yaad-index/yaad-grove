@@ -27,14 +27,16 @@ serve:
   # Tier applied to users without a per-user override.
   default-tier: default
 
+  # Telegram group chat ids that count as "the community" the bot serves.
+  # Membership in one of these groups is the access boundary for the group
+  # surface (DMs are gated separately by admin approval).
+  telegram-allowed-groups: []
+
 # --- Planned config (Phase 1 build; not yet read by the scaffold) ---
 #
 # tools:                 # external MCP servers whose tools this bot may call
 #   - name: example
 #     command: some-mcp-server
 #     args: ["--flag"]
-#
-# telegram:
-#   allowed-groups: ["-1001234567890"]   # which groups count as "the community"
 #
 # admins: ["<platform-user-id>"]         # who may configure the bot live

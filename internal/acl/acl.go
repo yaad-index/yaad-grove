@@ -98,11 +98,15 @@ func NewGate(store Store, defaultTier Tier) *Gate {
 	return &Gate{store: store, defTier: defaultTier}
 }
 
-// Check resolves the layered policy for q.User on q.Surface and returns the
-// decision. It never lets an unconsented user's content through.
+// Check resolves the layered policy for a user on a given surface and returns
+// the decision. It deliberately takes only the user and surface, never the
+// message text: the gate never needs content to decide, so ADR 0002's "record
+// nothing the user said" guarantee is enforced here at the type level rather
+// than by convention — the gate literally cannot see, let alone retain, what
+// the user wrote.
 //
 // Scaffold: structure only. The order is fixed above; each step reads/writes
 // the Record via the Store.
-func (g *Gate) Check(ctx context.Context, q core.Query) (Decision, error) {
+func (g *Gate) Check(ctx context.Context, user core.User, surface core.Surface) (Decision, error) {
 	return DecideRefuse, core.ErrNotImplemented
 }

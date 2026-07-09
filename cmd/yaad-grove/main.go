@@ -48,6 +48,8 @@ type ServeCmd struct {
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
 
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
+
+	TelegramGroups []string `name:"telegram-allowed-groups" help:"Group chat ids that count as 'the community' the bot serves (Telegram)."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -67,7 +69,8 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	_ = acl.NewGate(nil, acl.Tier(c.DefaultTier))
 
 	var tp transport.Transport = telegram.New(telegram.Config{
-		Token: os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
+		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
+		AllowedGroups: c.TelegramGroups,
 	})
 
 	log.Info("yaad-grove serve (scaffold)",
