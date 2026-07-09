@@ -64,11 +64,30 @@ type Reply struct {
 	Refused bool
 }
 
+// Usage is the token accounting for a model call — what the global spend meter
+// (ADR 0006) records. An OpenAI-compatible response reports these in its `usage`
+// field.
+type Usage struct {
+	PromptTokens     int
+	CompletionTokens int
+	TotalTokens      int
+}
+
+// Completion is a model call's result: the generated text plus the token usage.
+// Usage travels with the text so the model-call path can Record actual spend
+// against the ceiling (ADR 0006) — the meter needs the real usage, known only
+// from the response.
+type Completion struct {
+	Text  string
+	Usage Usage
+}
+
 // Model is an OpenAI-compatible chat completion model. The engine depends only
 // on this interface; the concrete client (endpoint, key, model name from
-// config) lives in internal/model and can be any OpenAI-shaped provider.
+// config) lives in internal/model and can be any OpenAI-shaped provider. Complete
+// returns the generated text and the call's token usage (ADR 0006).
 type Model interface {
-	Complete(ctx context.Context, system, user string) (string, error)
+	Complete(ctx context.Context, system, user string) (Completion, error)
 }
 
 // Chunk is a retrieved piece of the curated vault, with its source for
