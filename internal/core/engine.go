@@ -13,6 +13,7 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 )
 
 // ErrNotImplemented marks scaffold stubs that have structure but no behavior
@@ -133,12 +134,65 @@ func New(model Model, retriever Retriever, tools Tools, scope string) *Engine {
 	return &Engine{model: model, retriever: retriever, tools: tools, scope: scope}
 }
 
-// Answer grounds q on retrieved context and tool results and returns a Reply,
-// or a refusal when out of scope.
+// RefusalToken is the sentinel the scope/system prompt instructs the model to
+// emit — alone — when the retrieved context does not support an answer (ADR
+// 0008). Answer detects it and returns a refusal instead of the model's text.
+const RefusalToken = "%%OUT_OF_SCOPE%%"
+
+// outOfScopeReply is the fixed user-facing text for a refusal (both the empty-
+// grounding short-circuit and the model-signalled sentinel), so a refusal never
+// leaks prompt internals.
+const outOfScopeReply = "That's outside what I can answer from my curated sources."
+
+// Answer grounds q on the retrieved vault context and returns a Reply, or a
+// refusal when it can't be grounded (ADR 0008). The flow: retrieve -> if nothing
+// grounds it, refuse without a model call -> else assemble the grounded prompt
+// (scope + chunks) and complete -> if the model signals out-of-scope, refuse.
 //
-// Scaffold: structure only. The Phase-1 flow will be
-// retrieve -> assemble grounded prompt (scope + chunks + tool results) ->
-// model.Complete -> refuse-if-unsupported.
+// The engine depends only on its interfaces (ADR 0001): the spend ceiling is
+// applied by a metered Model decorator (ADR 0006/0008), and the consent gate runs
+// ahead of Answer at the runtime boundary (ADR 0007) — neither lives here.
+//
+// Tool calls are a documented seam: the engine carries a Tools registry, but the
+// MCP call loop lands with the transport/tools unit; Answer is retrieval-grounded
+// for now.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
-	return Reply{}, ErrNotImplemented
+	chunks, err := e.retriever.Retrieve(ctx, q.Text)
+	if err != nil {
+		return Reply{}, err
+	}
+	// Empty-grounding short-circuit: nothing to ground on -> refuse without
+	// spending a model call.
+	if len(chunks) == 0 {
+		return Reply{Text: outOfScopeReply, Refused: true}, nil
+	}
+
+	completion, err := e.model.Complete(ctx, groundedSystemPrompt(e.scope, chunks), q.Text)
+	if err != nil {
+		return Reply{}, err
+	}
+	// Model-signalled refusal: the scope prompt asks the model to emit the
+	// sentinel when the context can't answer.
+	if strings.Contains(completion.Text, RefusalToken) {
+		return Reply{Text: outOfScopeReply, Refused: true}, nil
+	}
+	return Reply{Text: completion.Text}, nil
+}
+
+// groundedSystemPrompt assembles the scope statement, the refusal contract, and
+// the retrieved chunks (each tagged with its Source for citation) into the system
+// message (ADR 0008). Plain, deterministic assembly — chunks in the order the
+// retriever ranked them.
+func groundedSystemPrompt(scope string, chunks []Chunk) string {
+	var b strings.Builder
+	b.WriteString(strings.TrimSpace(scope))
+	b.WriteString("\n\nAnswer using ONLY the CONTEXT below, and cite the [source] tags you rely on. " +
+		"If the context does not contain the answer, reply with exactly " + RefusalToken + " and nothing else.\n\n" +
+		"CONTEXT:\n")
+	for _, c := range chunks {
+		b.WriteString("\n[" + c.Source + "]\n")
+		b.WriteString(strings.TrimSpace(c.Text))
+		b.WriteString("\n")
+	}
+	return b.String()
 }
