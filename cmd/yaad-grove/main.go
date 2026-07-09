@@ -23,6 +23,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
+	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/tools"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 	"github.com/yaad-index/yaad-grove/internal/transport/telegram"
@@ -80,11 +81,14 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 
-	m := model.New(model.Config{
+	// The model is wrapped with the spend meter (ADR 0006/0008): the engine sees a
+	// metered core.Model, so the ceiling is enforced on the model-call path while
+	// core stays free of budget.
+	m := runtime.MeterModel(meter, model.New(model.Config{
 		BaseURL: c.ModelBaseURL,
 		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
 		Model:   c.ModelName,
-	})
+	}))
 	retriever := retrieval.New(c.VaultDir, 8)
 	registry := tools.New(nil) // MCP servers come from config in Phase 1
 	engine := core.New(m, retriever, registry, c.Scope)
