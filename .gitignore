@@ -1,0 +1,22 @@
+# Build output
+/yaad-grove
+/dist/
+*.exe
+
+# Go test / coverage artifacts
+*.test
+*.out
+coverage.*
+
+# Persistent store (bbolt) database files
+*.db
+
+# Local secrets and env — never commit
+*.env
+.env
+*.key
+*.pem
+
+# Box-local deployment config / secrets — never commit
+config.yaml
+secrets/
