@@ -40,9 +40,12 @@ meter, not needed for the backstop.
   spending), the same fail-safe as an out-of-scope query.
 - **Post-call accounting.** After a call returns, the path `Record(tokens)`s the
   response's actual token usage into the meter. Accounting is post-call because
-  exact usage is only known then; the pre-call gate therefore blocks the *next*
-  call after the ceiling is crossed, which bounds overspend to at most one
-  in-flight call — acceptable for a backstop.
+  exact usage is only known then; the pre-call gate blocks further calls once the
+  ceiling is crossed. Because usage is recorded only after a call returns, calls
+  already in flight when the ceiling is crossed still complete, so overspend is
+  bounded by the number of concurrently in-flight calls at that moment — one for
+  a serial caller, at most the in-flight concurrency otherwise. Acceptable for a
+  backstop.
 - **Fixed period, rolling reset.** The meter accumulates over a configured period
   (e.g. daily or monthly) and resets when the period elapses. A fixed budget
   window is the operator-legible model ("N tokens per day").
@@ -77,7 +80,8 @@ meter is the one global aggregate.
   the bbolt store (ADR 0005) serves production — so swapping it is not an engine
   change.
 - It is a backstop, not a billing ledger: token-granular, single global figure,
-  and overspend bounded to at most one in-flight call past the ceiling (a coarse
-  backstop, not a precise cutoff — the right trade for a safety limiter).
-  Currency conversion (a configured price multiply) and per-model pricing are
-  deliberate Phase-1 non-goals, layerable later behind the same meter.
+  and overspend bounded by the in-flight call concurrency at the moment the
+  ceiling is crossed (one for serial calls) — a coarse backstop, not a precise
+  cutoff, which is the right trade for a safety limiter. Currency conversion (a
+  configured price multiply) and per-model pricing are deliberate Phase-1
+  non-goals, layerable later behind the same meter.
