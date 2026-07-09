@@ -63,6 +63,10 @@ type Reply struct {
 	// tool surface + scoped prompt + refusal leave the model nowhere to
 	// freelance from.
 	Refused bool
+	// Silent is true when there is deliberately no outbound message — the runtime
+	// sets it for the throttled-unconsented case (acl.DecideSilent, ADR 0007), and
+	// a transport skips Send when it is set.
+	Silent bool
 }
 
 // Usage is the token accounting for a model call — what the global spend meter
