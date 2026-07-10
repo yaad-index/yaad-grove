@@ -38,13 +38,28 @@ func (m *memStore) Put(_ context.Context, r acl.Record) error {
 	return nil
 }
 
-// failStore errors on Get — for the fail-closed test.
+func (m *memStore) Update(_ context.Context, id string, mutate func(*acl.Record) error) error {
+	rec, ok := m.recs[id]
+	if !ok {
+		rec = acl.Record{UserID: id}
+	}
+	if err := mutate(&rec); err != nil {
+		return err
+	}
+	m.recs[id] = rec
+	return nil
+}
+
+// failStore errors on Get/Update — for the fail-closed tests.
 type failStore struct{}
 
 func (failStore) Get(context.Context, string) (acl.Record, error) {
 	return acl.Record{}, errors.New("boom")
 }
 func (failStore) Put(context.Context, acl.Record) error { return nil }
+func (failStore) Update(context.Context, string, func(*acl.Record) error) error {
+	return errors.New("boom")
+}
 
 func check(t *testing.T, g *acl.Gate, id string, surface core.Surface) acl.Decision {
 	t.Helper()

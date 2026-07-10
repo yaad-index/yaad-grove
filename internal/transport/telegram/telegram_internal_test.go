@@ -216,6 +216,54 @@ func TestCallbackResolvesAndAnswers(t *testing.T) {
 	assert.Equal(t, "echo done", answeredText, "the handler's Notice is the toast")
 }
 
+// A callback reply carrying Text edits the originating message to that status
+// line (best-effort, after answering the toast); an empty Text edits nothing.
+func TestCallbackEditsMessageOnStatus(t *testing.T) {
+	var answered, edited bool
+	var editChat, editText string
+	var editMsgID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/answerCallbackQuery"):
+			answered = true
+		case strings.HasSuffix(r.URL.Path, "/editMessageText"):
+			edited = true
+			editChat = r.FormValue("chat_id")
+			editMsgID = r.FormValue("message_id")
+			editText = r.FormValue("text")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, pending.NewMemoryStore(time.Minute))
+	running(t, a, srv.URL)
+
+	cq := &models.CallbackQuery{
+		ID:      "cq1",
+		From:    models.User{ID: 42},
+		Message: models.MaybeInaccessibleMessage{Message: &models.Message{ID: 7, Chat: models.Chat{ID: 555, Type: models.ChatTypePrivate}}},
+		Data:    "tok",
+	}
+
+	// Reply with a status line -> message edited to it.
+	a.handleCallback(context.Background(), func(context.Context, transport.Inbound) (core.Reply, error) {
+		return core.Reply{Notice: "Done ✓", Text: "Set target to trusted."}, nil
+	}, cq)
+	assert.True(t, answered)
+	require.True(t, edited, "a status line edits the message")
+	assert.Equal(t, "555", editChat)
+	assert.Equal(t, "7", editMsgID)
+	assert.Equal(t, "Set target to trusted.", editText)
+
+	// Reply with no status line -> no edit.
+	edited = false
+	a.handleCallback(context.Background(), func(context.Context, transport.Inbound) (core.Reply, error) {
+		return core.Reply{Notice: "Done ✓"}, nil
+	}, cq)
+	assert.False(t, edited, "no status line means no edit")
+}
+
 // A callback from a non-allowed group is dropped, but the click is still
 // acknowledged (empty answer) so the client spinner clears.
 func TestCallbackNonAllowedGroupDropped(t *testing.T) {

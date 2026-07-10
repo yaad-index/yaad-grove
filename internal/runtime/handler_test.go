@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -71,7 +72,7 @@ func TestHandlerDecisionMapping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gate := &mockGate{decision: tc.decision}
 			engine := &mockEngine{reply: core.Reply{Text: "engine answer"}}
-			reply, err := runtime.NewHandler(gate, engine, nil)(context.Background(), inbound)
+			reply, err := runtime.NewHandler(gate, engine, nil, nil, nil)(context.Background(), inbound)
 			require.NoError(t, err)
 
 			assert.True(t, gate.called, "gate is always checked first")
@@ -100,7 +101,7 @@ func TestHandlerDecisionMapping(t *testing.T) {
 func TestHandlerGateErrorFailsClosed(t *testing.T) {
 	gate := &mockGate{err: errors.New("store down")}
 	engine := &mockEngine{}
-	reply, err := runtime.NewHandler(gate, engine, nil)(context.Background(), inbound)
+	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil)(context.Background(), inbound)
 	require.NoError(t, err, "a gate error is handled, not surfaced as a crash")
 	assert.True(t, reply.Refused)
 	assert.False(t, engine.called, "engine not reached on a gate failure")
@@ -110,7 +111,7 @@ func TestHandlerGateErrorFailsClosed(t *testing.T) {
 func TestHandlerOverBudgetGraceful(t *testing.T) {
 	gate := &mockGate{decision: acl.DecideServe}
 	engine := &mockEngine{err: budget.ErrOverBudget}
-	reply, err := runtime.NewHandler(gate, engine, nil)(context.Background(), inbound)
+	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil)(context.Background(), inbound)
 	require.NoError(t, err, "over-budget is degraded gracefully")
 	assert.Contains(t, reply.Text, "capacity")
 	assert.True(t, reply.Refused)
@@ -120,11 +121,11 @@ func TestHandlerOverBudgetGraceful(t *testing.T) {
 func TestHandlerAnswerErrorPropagates(t *testing.T) {
 	gate := &mockGate{decision: acl.DecideServe}
 	engine := &mockEngine{err: errors.New("boom")}
-	_, err := runtime.NewHandler(gate, engine, nil)(context.Background(), inbound)
+	_, err := runtime.NewHandler(gate, engine, nil, nil, nil)(context.Background(), inbound)
 	assert.Error(t, err)
 }
 
-// callbackInbound is a button-click inbound carrying token.
+// callbackInbound is a button-click inbound (user u1) carrying token.
 func callbackInbound(token string) transport.Inbound {
 	return transport.Inbound{
 		User:    core.User{ID: "u1"},
@@ -135,42 +136,220 @@ func callbackInbound(token string) transport.Inbound {
 	}
 }
 
-// A button click takes the callback path: it resolves the token to an ephemeral
-// Notice and never touches the gate or the engine. Each token state maps to its
-// own toast, and the fresh->consumed transition is honored.
-func TestHandlerCallbackResolution(t *testing.T) {
-	store := pending.NewMemoryStore(testTTL)
-	token, err := store.Put(context.Background(), core.Action{Verb: "echo", Label: "Echo"})
+// mockAuthz records the re-authorization call and returns a canned verdict.
+type mockAuthz struct {
+	authorized bool
+	err        error
+	called     bool
+	gotMinTier acl.Tier
+}
+
+func (m *mockAuthz) Authorize(_ context.Context, _ core.User, minTier acl.Tier) (bool, error) {
+	m.called = true
+	m.gotMinTier = minTier
+	return m.authorized, m.err
+}
+
+// spyVerb counts validate/execute calls so a test can prove which stages ran.
+type spyVerb struct {
+	execCalls     int
+	validateCalls int
+	gotSubject    core.User
+	gotParams     map[string]string
+	execErr       error
+	validateErr   error
+	status        string
+}
+
+func (s *spyVerb) verb(minTier acl.Tier) runtime.Verb {
+	return runtime.Verb{
+		MinTier:  minTier,
+		Validate: func(map[string]string) error { s.validateCalls++; return s.validateErr },
+		Execute: func(_ context.Context, subj core.User, p map[string]string) (string, error) {
+			s.execCalls++
+			s.gotSubject, s.gotParams = subj, p
+			return s.status, s.execErr
+		},
+	}
+}
+
+func registryWith(name string, v runtime.Verb) *runtime.Registry {
+	r := runtime.NewRegistry()
+	r.Register(name, v)
+	return r
+}
+
+func putToken(t *testing.T, store pending.Store, a core.Action) string {
+	t.Helper()
+	tok, err := store.Put(context.Background(), a)
 	require.NoError(t, err)
+	return tok
+}
 
-	gate := &mockGate{decision: acl.DecideServe}
-	engine := &mockEngine{}
-	h := runtime.NewHandler(gate, engine, store)
+// Happy path: an authorized subject with valid params runs the executor once and
+// gets a success toast plus a status line; the gate and engine are untouched.
+func TestHandlerCallbackHappyPath(t *testing.T) {
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "act", Params: map[string]string{"k": "v"}})
+	spy := &spyVerb{status: "did the thing"}
+	authz := &mockAuthz{authorized: true}
+	gate, engine := &mockGate{}, &mockEngine{}
 
-	// Fresh token -> generic done; gate and engine untouched.
+	h := runtime.NewHandler(gate, engine, store, registryWith("act", spy.verb(acl.TierAdmin)), authz)
 	reply, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
-	assert.Contains(t, reply.Notice, "Done")
-	assert.Empty(t, reply.Text, "a callback answers with a toast, not a message")
-	assert.False(t, gate.called, "a click never consults the gate")
-	assert.False(t, engine.called, "a click never reaches the engine")
 
-	// Replayed token -> already completed.
+	assert.Equal(t, 1, spy.execCalls, "executor runs exactly once")
+	assert.Equal(t, acl.TierAdmin, authz.gotMinTier, "re-authorized against the verb's tier")
+	assert.Equal(t, "u1", spy.gotSubject.ID, "executor gets the acting subject")
+	assert.Contains(t, reply.Notice, "Done")
+	assert.Equal(t, "did the thing", reply.Text, "the status line rides in Text for the edit")
+	assert.False(t, gate.called, "a click never consults the consent gate")
+	assert.False(t, engine.called, "a click never reaches the engine")
+}
+
+// The denial matrix: unknown verb, under-tier, authorize error, and invalid
+// params each fail closed with a toast and never reach the executor.
+func TestHandlerCallbackDenials(t *testing.T) {
+	cases := []struct {
+		name        string
+		authorized  bool
+		authzErr    error
+		validateErr error
+		verbName    string // registered name; action always uses "act"
+		wantNotice  string
+		wantAuthz   bool // was Authorize consulted?
+	}{
+		{"unknown-verb", true, nil, nil, "other", "That action is no longer available.", false},
+		{"under-tier", false, nil, nil, "act", "You don't have permission to do that.", true},
+		{"authorize-error", false, errors.New("store down"), nil, "act", "You don't have permission to do that.", true},
+		{"invalid-params", true, nil, errors.New("bad"), "act", "That action can't be completed as requested.", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := pending.NewMemoryStore(testTTL)
+			token := putToken(t, store, core.Action{Verb: "act"})
+			spy := &spyVerb{validateErr: tc.validateErr}
+			authz := &mockAuthz{authorized: tc.authorized, err: tc.authzErr}
+
+			h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store,
+				registryWith(tc.verbName, spy.verb(acl.TierAdmin)), authz)
+			reply, err := h(context.Background(), callbackInbound(token))
+			require.NoError(t, err)
+
+			assert.Equal(t, tc.wantNotice, reply.Notice)
+			assert.Equal(t, 0, spy.execCalls, "the executor is never reached on a denial")
+			assert.Equal(t, tc.wantAuthz, authz.called, "authorize is consulted only after a known verb")
+		})
+	}
+}
+
+// Authorize precedes validate: an unauthorized clicker never reaches param
+// validation, so it can't probe valid param shapes from a validation error.
+func TestHandlerCallbackAuthorizeBeforeValidate(t *testing.T) {
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "act"})
+	spy := &spyVerb{}
+	authz := &mockAuthz{authorized: false}
+
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz)
+	_, err := h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
+
+	assert.True(t, authz.called)
+	assert.Equal(t, 0, spy.validateCalls, "validation never runs for an unauthorized click")
+}
+
+// Executor error: a failure toast, the token stays consumed (no auto-retry).
+func TestHandlerCallbackExecutorError(t *testing.T) {
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "act"})
+	spy := &spyVerb{execErr: errors.New("boom")}
+	authz := &mockAuthz{authorized: true}
+
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz)
+	reply, err := h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
+	assert.Equal(t, "That didn't go through — please try again.", reply.Notice)
+	assert.Equal(t, 1, spy.execCalls)
+
+	// The token was consumed on this resolve; a second click reports so.
+	reply, err = h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
+	assert.Equal(t, "Already completed.", reply.Notice)
+}
+
+// Non-resolved statuses (consumed, expired, no store) toast and never execute.
+func TestHandlerCallbackNonResolved(t *testing.T) {
+	spy := &spyVerb{}
+	authz := &mockAuthz{authorized: true}
+	reg := registryWith("act", spy.verb(acl.TierAdmin))
+
+	// No store -> expired.
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, nil, reg, authz)
+	reply, err := h(context.Background(), callbackInbound("tok"))
+	require.NoError(t, err)
+	assert.Equal(t, "This action has expired.", reply.Notice)
+
+	// Consumed after one resolve.
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "act"})
+	h = runtime.NewHandler(&mockGate{}, &mockEngine{}, store, reg, authz)
+	_, err = h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
 	reply, err = h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 	assert.Equal(t, "Already completed.", reply.Notice)
 
-	// Unknown token -> expired.
-	reply, err = h(context.Background(), callbackInbound("no-such-token"))
-	require.NoError(t, err)
-	assert.Equal(t, "This action has expired.", reply.Notice)
+	assert.Equal(t, 1, spy.execCalls, "only the single fresh resolve executed")
 }
 
-// With no callback store a click can't be resolved and reads as expired, not a
-// crash.
-func TestHandlerCallbackNilStore(t *testing.T) {
-	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, nil)
-	reply, err := h(context.Background(), callbackInbound("tok"))
+// The load-bearing rule end to end over a real acl gate: a tier demotion between
+// render and click denies, and the privileged effect never commits.
+func TestHandlerCallbackDemotionDenies(t *testing.T) {
+	ctx := context.Background()
+	aclStore, err := acl.OpenBolt(filepath.Join(t.TempDir(), "acl.db"))
 	require.NoError(t, err)
-	assert.Equal(t, "This action has expired.", reply.Notice)
+	t.Cleanup(func() { _ = aclStore.Close() })
+	gate := acl.NewGate(aclStore, acl.TierDefault)
+	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierAdmin)) // clicker is admin at render
+
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate)
+
+	// Demote the clicker after the button was shown, before the click.
+	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierDefault))
+
+	reply, err := h(ctx, callbackInbound(token))
+	require.NoError(t, err)
+	assert.Equal(t, "You don't have permission to do that.", reply.Notice)
+
+	rec, err := aclStore.Get(ctx, "target")
+	require.NoError(t, err)
+	assert.NotEqual(t, acl.TierTrusted, rec.Tier, "the privileged effect never committed")
+}
+
+// The happy path over the real gate + DefaultRegistry: an admin sets a target's
+// tier, the effect commits, and the status line reflects it.
+func TestHandlerCallbackSetTierHappyPath(t *testing.T) {
+	ctx := context.Background()
+	aclStore, err := acl.OpenBolt(filepath.Join(t.TempDir(), "acl.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = aclStore.Close() })
+	gate := acl.NewGate(aclStore, acl.TierDefault)
+	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierAdmin))
+
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate)
+
+	reply, err := h(ctx, callbackInbound(token))
+	require.NoError(t, err)
+	assert.Contains(t, reply.Notice, "Done")
+	assert.Contains(t, reply.Text, "trusted")
+
+	rec, err := aclStore.Get(ctx, "target")
+	require.NoError(t, err)
+	assert.Equal(t, acl.TierTrusted, rec.Tier, "the tier change committed")
 }
