@@ -27,6 +27,14 @@ type Verb struct {
 	// Execute performs the effect for the acting subject with validated params and
 	// returns a short status line for the message (empty = no status edit).
 	Execute func(ctx context.Context, subject core.User, params map[string]string) (string, error)
+	// Describe renders the verb's concrete effect for a set of validated params —
+	// the human consent surface on a proposed action's approve button (ADR 0010).
+	// Because it is registry-derived, the label cannot diverge from the effect
+	// Execute will apply; a proposer can't misstate what a tap will do. A
+	// PRIVILEGED verb without a Describe cannot be proposed (refused, fail-closed).
+	// It receives only validated params — the proposal render path validates before
+	// it describes.
+	Describe func(params map[string]string) string
 }
 
 // Registry maps a verb name to its Verb. It is the single source of a verb's
