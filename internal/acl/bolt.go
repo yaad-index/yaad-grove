@@ -72,3 +72,28 @@ func (s *BoltStore) Put(ctx context.Context, r Record) error {
 	}
 	return nil
 }
+
+// Update applies mutate to the user's record within one bbolt write transaction:
+// read-modify-write with no window for a concurrent writer to clobber.
+func (s *BoltStore) Update(ctx context.Context, userID string, mutate func(*Record) error) error {
+	if err := s.db.Update(func(tx *bbolt.Tx) error {
+		bkt := tx.Bucket(aclBucket)
+		rec := Record{UserID: userID}
+		if v := bkt.Get([]byte(userID)); v != nil {
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return fmt.Errorf("acl: unmarshal record: %w", err)
+			}
+		}
+		if err := mutate(&rec); err != nil {
+			return err
+		}
+		data, err := json.Marshal(rec)
+		if err != nil {
+			return fmt.Errorf("acl: marshal record: %w", err)
+		}
+		return bkt.Put([]byte(userID), data)
+	}); err != nil {
+		return fmt.Errorf("acl: update %q: %w", userID, err)
+	}
+	return nil
+}

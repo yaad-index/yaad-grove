@@ -50,6 +50,37 @@ then a registered verb, no transport change.
 with the consent hard-gate (ADR 0002) and layered policy (ADR 0003 / 0007). The
 click is the actor's *request* to run the verb, not permission to run it.
 
+Concretely, a resolved callback runs a fixed order — **lookup → authorize →
+validate → execute**:
+
+1. **Lookup** the verb in the registry. Unknown verb → refuse (toast), no
+   execution.
+2. **Authorize**: read the actor's tier *fresh* from the ACL store and compare to
+   the verb's `MinTier`. A resolved token proves the button was shown, not that
+   the actor still has authority — a **demotion between render and click denies**.
+   Authorization precedes validation so an unauthorized clicker can't probe valid
+   param shapes from a validation error.
+3. **Validate** params. Invalid → refuse (toast).
+4. **Execute**. On success, the toast is the source of truth; a status line may
+   then edit the message's keyboard away, **best-effort** — the effect already
+   committed, so an edit failure is logged, never surfaced as "didn't take". An
+   executor error toasts failure; the token is already single-use-consumed, so a
+   fresh action must be re-offered, never auto-retried.
+
+Every branch — unknown verb, under-tier, invalid params, executor error, and the
+non-resolved states (expired / consumed) — **fails closed and toasts a reason**;
+none is a silent drop, and the executor is reached only on the authorized, valid
+path.
+
+**Authority vs. rate — the `MinTier` rule.** Tier authority is ranked
+`throttled < default < trusted < unlimited < admin`, but that single rank
+overloads two axes: throttled…unlimited are *rate* (quota) grants, admin is
+*authority*. Gating a privileged verb on a mid rate-tier would grant
+action-authority from a mere quota grant. So the rule, held in code at the `Verb`
+call site and here: **privileged verbs use `MinTier=admin`, full stop.** The
+linear rank is an interim mechanism; finer admin granularity would come from a
+separate authority/role axis, not from leaning on the rate tiers.
+
 ### Pending actions live server-side, keyed by a short token
 
 `callback_data` is capped at 64 bytes, so the action itself is persisted
@@ -111,10 +142,13 @@ fetch-back.
   single-use + sweep), and callback ingestion. A no-op **echo** action proves the
   send → click → resolve → respond loop end to end. **T2 owns the dead-token
   toasts** (expired vs already-completed); a clean resolve gets a generic "done".
-- **T3** — the typed `ActionRegistry`, ACL-gated executors, re-authorization at
-  execution, and the first real verbs. Security tests concentrate here:
-  forged / replayed / expired / under-tier all rejected. T3 owns the
-  post-execution toast and the keyboard → status-line edit.
+- **T3** — the typed `Registry` (verb → executor + `MinTier`), ACL-gated
+  executors, re-authorization at execution (the fresh-read order above), and the
+  first real verb (`set_tier`, alongside the unprivileged `echo` baseline).
+  Security tests concentrate here: under-tier, demotion-between-render-and-click,
+  unknown verb, invalid params, executor error, and every non-resolved token all
+  rejected without execution. T3 owns the post-execution toast and the
+  best-effort keyboard → status-line edit.
 - **T4 (later)** — suggested-action proposals rendered as approve / adjust
   buttons.
 

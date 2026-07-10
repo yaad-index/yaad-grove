@@ -201,9 +201,39 @@ func (a *Adapter) handleCallback(ctx context.Context, handler transport.Handler,
 		_ = a.answerCallback(ctx, in.Callback.QueryID, "")
 		return
 	}
+	// The toast is the source of truth — answer it first.
 	if err := a.answerCallback(ctx, in.Callback.QueryID, reply.Notice); err != nil {
 		slog.Error("telegram answerCallbackQuery failed", "err", a.redact(err))
 	}
+	// Best-effort status edit: replace the message and drop its keyboard. The
+	// effect already committed, so an edit failure is logged, not surfaced — it
+	// must never imply the action didn't take (ADR 0009).
+	if strings.TrimSpace(reply.Text) != "" {
+		if err := a.editToStatus(ctx, in.ReplyTo, in.Callback.MessageID, reply.Text); err != nil {
+			slog.Warn("telegram status edit failed (action already committed)", "err", a.redact(err))
+		}
+	}
+}
+
+// editToStatus replaces a message's text with a status line and removes its
+// inline keyboard (omitting ReplyMarkup clears it).
+func (a *Adapter) editToStatus(ctx context.Context, chatID, messageID, text string) error {
+	chat, err := strconv.ParseInt(chatID, 10, 64)
+	if err != nil {
+		return errors.New("telegram: invalid chat id " + strconv.Quote(chatID))
+	}
+	msg, err := strconv.Atoi(messageID)
+	if err != nil {
+		return errors.New("telegram: invalid message id " + strconv.Quote(messageID))
+	}
+	if _, err := a.bot.EditMessageText(ctx, &bot.EditMessageTextParams{
+		ChatID:    chat,
+		MessageID: msg,
+		Text:      text,
+	}); err != nil {
+		return a.redact(err)
+	}
+	return nil
 }
 
 // answerCallback acknowledges a click, optionally showing text as a toast.

@@ -26,13 +26,19 @@ const (
 	atCapacityText  = "I'm at capacity right now — please try again a little later."
 
 	// Callback (button-click) acknowledgements, shown as an ephemeral toast (ADR
-	// 0009). A clean resolve gets a generic "done" — T2 has no verbs to run yet;
-	// T3 replaces this with the executed verb's result. Expired and already-used
-	// are distinguished on purpose: same dead button, different cause.
+	// 0009). Every outcome toasts — a click is never a silent drop. Expired and
+	// already-used are distinguished on purpose: same dead button, different cause.
 	callbackDoneText     = "Done ✓"
 	callbackExpiredText  = "This action has expired."
 	callbackConsumedText = "Already completed."
 	callbackErrorText    = "Something went wrong — please try again."
+
+	// Denials on a resolved callback (ADR 0009 T3). Each fails closed and toasts a
+	// reason; none reaches the executor.
+	callbackDeniedText      = "You don't have permission to do that."
+	callbackUnknownVerbText = "That action is no longer available."
+	callbackInvalidText     = "That action can't be completed as requested."
+	callbackFailedText      = "That didn't go through — please try again."
 )
 
 // checker is the access/consent gate the handler runs ahead of the engine; the
@@ -48,19 +54,28 @@ type answerer interface {
 	Answer(ctx context.Context, q core.Query) (core.Reply, error)
 }
 
+// authorizer re-authorizes a button click against a verb's required tier at
+// execution time, reading the current tier fresh; the concrete *acl.Gate
+// satisfies it. Separate from checker: a click is authorized by authority, not
+// by the consent/rate gate a message query passes.
+type authorizer interface {
+	Authorize(ctx context.Context, user core.User, minTier acl.Tier) (bool, error)
+}
+
 // NewHandler builds the transport.Handler the runtime hands to every transport
 // (ADR 0007/0008): the boundary where the access/consent gate runs *ahead* of the
 // engine, and each gate decision becomes a reply — or silence. The gate is always
 // consulted first; the engine is only ever reached on DecideServe.
 //
 // A button click (in.Callback set) takes a separate path (ADR 0009): it resolves
-// the token in callbacks and acknowledges the click — it is not a model query, so
-// it never touches the engine. callbacks may be nil for a text-only bot; a click
-// then can't be resolved and is treated as expired.
-func NewHandler(gate checker, engine answerer, callbacks pending.Store) transport.Handler {
+// the token, re-authorizes the acting subject against the verb's required tier,
+// and executes — it is not a model query, so it never touches the engine.
+// callbacks may be nil for a text-only bot; a click then can't be resolved and is
+// treated as expired.
+func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
 		if in.Callback != nil {
-			return resolveCallback(ctx, callbacks, in.Callback)
+			return resolveCallback(ctx, callbacks, registry, authz, in), nil
 		}
 		decision, err := gate.Check(ctx, in.User, in.Surface)
 		if err != nil {
@@ -97,29 +112,70 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store) transpor
 	}
 }
 
-// resolveCallback handles a button click (ADR 0009 T2): it resolves the token and
-// returns an ephemeral acknowledgement (Reply.Notice) — never a new message. A
-// dead button reports expired vs already-completed distinctly. A cleanly resolved
-// action gets a generic "done"; T2 has no verbs, so nothing executes here — that
-// is where T3 inserts re-authorization + execution, keyed on in.User's tier.
-func resolveCallback(ctx context.Context, callbacks pending.Store, cb *transport.Callback) (core.Reply, error) {
+// resolveCallback handles a button click (ADR 0009): it resolves the token and,
+// on a fresh resolve, executes the verb — always returning an ephemeral
+// acknowledgement (Reply.Notice), never a new message. A dead button reports
+// expired vs already-completed distinctly; every path toasts, none is silent.
+func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Registry, authz authorizer, in transport.Inbound) core.Reply {
 	if callbacks == nil {
-		return core.Reply{Notice: callbackExpiredText}, nil
+		return core.Reply{Notice: callbackExpiredText}
 	}
-	_, status, err := callbacks.Resolve(ctx, cb.Token)
+	action, status, err := callbacks.Resolve(ctx, in.Callback.Token)
 	if err != nil {
 		// Fail closed: a store error is not a licence to act — just acknowledge.
 		slog.Warn("callback resolve failed", "err", err)
-		return core.Reply{Notice: callbackErrorText}, nil
+		return core.Reply{Notice: callbackErrorText}
 	}
 	switch status {
 	case pending.Resolved:
-		return core.Reply{Notice: callbackDoneText}, nil
+		return executeAction(ctx, registry, authz, in.User, action)
 	case pending.Consumed:
-		return core.Reply{Notice: callbackConsumedText}, nil
+		return core.Reply{Notice: callbackConsumedText}
 	case pending.Expired:
-		return core.Reply{Notice: callbackExpiredText}, nil
+		return core.Reply{Notice: callbackExpiredText}
 	default:
-		return core.Reply{Notice: callbackErrorText}, nil
+		return core.Reply{Notice: callbackErrorText}
 	}
+}
+
+// executeAction runs a resolved verb behind the re-authorization spine (ADR
+// 0009). Order is deliberate: lookup -> authorize -> validate -> execute. A
+// resolved token proves the button was shown, not that the subject still has
+// authority, so authorization reads the CURRENT tier and precedes param
+// validation (so an unauthorized clicker can't probe valid param shapes). Every
+// denial fails closed and toasts a reason; the executor is reached only on the
+// authorized, valid path. On success the toast is the source of truth and any
+// status line rides in Text for the transport's best-effort message edit.
+func executeAction(ctx context.Context, registry *Registry, authz authorizer, subject core.User, action core.Action) core.Reply {
+	if registry == nil {
+		return core.Reply{Notice: callbackUnknownVerbText}
+	}
+	verb, ok := registry.Lookup(action.Verb)
+	if !ok {
+		return core.Reply{Notice: callbackUnknownVerbText}
+	}
+
+	authorized, err := authz.Authorize(ctx, subject, verb.MinTier)
+	if err != nil {
+		slog.Warn("callback authorize failed; denying", "verb", action.Verb, "err", err)
+		return core.Reply{Notice: callbackDeniedText} // fail closed
+	}
+	if !authorized {
+		return core.Reply{Notice: callbackDeniedText}
+	}
+
+	if verb.Validate != nil {
+		if err := verb.Validate(action.Params); err != nil {
+			return core.Reply{Notice: callbackInvalidText}
+		}
+	}
+
+	statusLine, err := verb.Execute(ctx, subject, action.Params)
+	if err != nil {
+		// The action did not commit; the token is already single-use-consumed, so a
+		// fresh action must be re-offered rather than auto-retried.
+		slog.Error("callback verb failed", "verb", action.Verb, "err", err)
+		return core.Reply{Notice: callbackFailedText}
+	}
+	return core.Reply{Notice: callbackDoneText, Text: statusLine}
 }

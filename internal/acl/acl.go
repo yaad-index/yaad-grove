@@ -63,10 +63,15 @@ type Record struct {
 }
 
 // Store persists Record state and survives restarts. Phase 1 intends a bbolt
-// implementation (single-file, embedded), matching the fleet's house choice.
+// implementation (single-file, embedded), the house store choice (ADR 0005).
 type Store interface {
 	Get(ctx context.Context, userID string) (Record, error)
 	Put(ctx context.Context, r Record) error
+	// Update atomically reads the user's record, applies mutate, and writes it
+	// back within a single transaction, so concurrent writers to the same record
+	// cannot clobber one another. A first-seen user's record is the zero Record
+	// with UserID set. If mutate returns an error, the record is left unchanged.
+	Update(ctx context.Context, userID string, mutate func(*Record) error) error
 }
 
 // Decision is the outcome of the gate for one query.
