@@ -12,6 +12,7 @@ import (
 const (
 	verbEcho    = "echo"
 	verbSetTier = "set_tier"
+	verbDismiss = "dismiss"
 )
 
 // tierSetter is the acl write the set_tier verb performs; *acl.Gate satisfies it.
@@ -50,16 +51,34 @@ func SetTierVerb(setter tierSetter) Verb {
 			if err := setter.SetTier(ctx, target, tier); err != nil {
 				return "", err
 			}
-			return "Set " + target + " to " + string(tier) + ".", nil
+			return "Set " + target + " → " + string(tier) + ".", nil
+		},
+		// The consent surface for a proposed set_tier: the exact target and
+		// destination tier, derived from the same params Execute will apply.
+		Describe: func(p map[string]string) string {
+			return "Set " + p["user"] + " → " + p["tier"]
 		},
 	}
 }
 
-// DefaultRegistry registers the Phase-1 verbs: the unprivileged echo baseline and
-// the set_tier admin verb over setter (the acl gate).
+// DismissVerb is the unprivileged dismiss action offered alongside a proposal
+// (ADR 0010): it drops the proposal with no effect and edits the message to say
+// so. TierThrottled is the authority floor, so anyone may dismiss.
+func DismissVerb() Verb {
+	return Verb{
+		MinTier: acl.TierThrottled,
+		Execute: func(context.Context, core.User, map[string]string) (string, error) {
+			return "Dismissed.", nil
+		},
+	}
+}
+
+// DefaultRegistry registers the Phase-1 verbs: the unprivileged echo and dismiss
+// baselines and the set_tier admin verb over setter (the acl gate).
 func DefaultRegistry(setter tierSetter) *Registry {
 	r := NewRegistry()
 	r.Register(verbEcho, EchoVerb())
+	r.Register(verbDismiss, DismissVerb())
 	r.Register(verbSetTier, SetTierVerb(setter))
 	return r
 }
