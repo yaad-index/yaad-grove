@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -11,96 +12,251 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
-func upd(chatID int64, chatType models.ChatType, text string, fromID int64, username string) *models.Update {
-	return &models.Update{ID: 1, Message: &models.Message{
+var echoAction = core.Action{Verb: "echo", Params: map[string]string{"say": "hi"}, Label: "Echo"}
+
+func msg(chatID int64, chatType models.ChatType, text string, fromID int64, username string) *models.Message {
+	return &models.Message{
 		From: &models.User{ID: fromID, Username: username},
 		Chat: models.Chat{ID: chatID, Type: chatType},
 		Text: text,
-	}}
+	}
 }
 
-// Update -> Inbound: private is a DM, an allowed group is a Group, a non-allowed
-// group / empty text / non-message is dropped.
-func TestToInbound(t *testing.T) {
-	a := New(Config{AllowedGroups: []string{"999"}})
+// running attaches a live library client pointed at url, as Run would, so Send /
+// handleCallback can be exercised directly without the long-poll loop.
+func running(t *testing.T, a *Adapter, url string) {
+	t.Helper()
+	b, err := bot.New(a.cfg.Token, bot.WithServerURL(url), bot.WithSkipGetMe())
+	require.NoError(t, err)
+	a.bot = b
+}
 
-	in, ok := a.toInbound(upd(555, models.ChatTypePrivate, "hi", 42, "alice"))
+// Message -> Inbound: private is a DM, an allowed group is a Group, a non-allowed
+// group / empty text / channel / nil is dropped.
+func TestToInbound(t *testing.T) {
+	a := New(Config{AllowedGroups: []string{"999"}}, nil)
+
+	in, ok := a.toInbound(msg(555, models.ChatTypePrivate, "hi", 42, "alice"))
 	require.True(t, ok)
 	assert.Equal(t, core.SurfaceDM, in.Surface)
 	assert.Equal(t, "42", in.User.ID)
 	assert.Equal(t, "alice", in.User.Display)
 	assert.Equal(t, "hi", in.Text)
 	assert.Equal(t, "555", in.ReplyTo)
+	assert.Nil(t, in.Callback, "a text message carries no callback")
 
-	in, ok = a.toInbound(upd(999, models.ChatTypeSupergroup, "yo", 7, "bob"))
+	in, ok = a.toInbound(msg(999, models.ChatTypeSupergroup, "yo", 7, "bob"))
 	require.True(t, ok, "allowed group is served")
 	assert.Equal(t, core.SurfaceGroup, in.Surface)
 	assert.Equal(t, "999", in.ReplyTo)
 
-	_, ok = a.toInbound(upd(111, models.ChatTypeGroup, "yo", 7, "bob"))
+	_, ok = a.toInbound(msg(111, models.ChatTypeGroup, "yo", 7, "bob"))
 	assert.False(t, ok, "a group not in AllowedGroups is dropped")
 
-	_, ok = a.toInbound(upd(555, models.ChatTypePrivate, "   ", 42, "alice"))
+	_, ok = a.toInbound(msg(555, models.ChatTypePrivate, "   ", 42, "alice"))
 	assert.False(t, ok, "empty text is dropped")
 
-	_, ok = a.toInbound(upd(555, models.ChatTypeChannel, "post", 42, ""))
+	_, ok = a.toInbound(msg(555, models.ChatTypeChannel, "post", 42, ""))
 	assert.False(t, ok, "a channel post is dropped")
 
-	_, ok = a.toInbound(&models.Update{ID: 2, Message: nil})
-	assert.False(t, ok, "a non-message update (e.g. a callback) is dropped")
+	_, ok = a.toInbound(nil)
+	assert.False(t, ok, "a nil message is dropped")
 }
 
 // The Display falls back to the first name when there is no username.
 func TestToInboundDisplayFallback(t *testing.T) {
-	a := New(Config{})
-	u := upd(555, models.ChatTypePrivate, "hi", 42, "")
-	u.Message.From.FirstName = "Alice"
-	in, ok := a.toInbound(u)
+	a := New(Config{}, nil)
+	m := msg(555, models.ChatTypePrivate, "hi", 42, "")
+	m.From.FirstName = "Alice"
+	in, ok := a.toInbound(m)
 	require.True(t, ok)
 	assert.Equal(t, "Alice", in.User.Display)
 }
 
-// An empty allow-list serves no groups (safe default); a DM is unaffected by it.
+// An empty allow-list serves no groups (safe default); a DM is unaffected.
 func TestGroupAllowedDefault(t *testing.T) {
-	a := New(Config{}) // no AllowedGroups
-	_, ok := a.toInbound(upd(123, models.ChatTypeGroup, "hi", 1, "u"))
+	a := New(Config{}, nil)
+	_, ok := a.toInbound(msg(123, models.ChatTypeGroup, "hi", 1, "u"))
 	assert.False(t, ok, "empty allow-list serves no groups")
-	_, ok = a.toInbound(upd(123, models.ChatTypePrivate, "hi", 1, "u"))
+	_, ok = a.toInbound(msg(123, models.ChatTypePrivate, "hi", 1, "u"))
 	assert.True(t, ok, "DMs are not gated by AllowedGroups")
 }
 
+// CapButtons tracks whether a callback store is present; the others are constant.
+func TestSupportsCapButtons(t *testing.T) {
+	assert.False(t, New(Config{}, nil).Supports(transport.CapButtons))
+	assert.True(t, New(Config{}, pending.NewMemoryStore(time.Minute)).Supports(transport.CapButtons))
+	assert.True(t, New(Config{}, nil).Supports(transport.CapReactions))
+}
+
 // A silent or empty reply sends nothing (and needs no running client); a real
-// reply before Run surfaces an error rather than panicking on a nil client.
+// reply before Run surfaces an error rather than a nil-client panic.
 func TestSendSilentAndEmptyDoNotSend(t *testing.T) {
-	a := New(Config{Token: "tok"})
+	a := New(Config{Token: "tok"}, nil)
 	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Silent: true}))
 	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "   "}))
 	assert.Error(t, a.Send(context.Background(), "555", core.Reply{Text: "hi"}),
 		"a real reply with no running transport is an error, not a panic")
 }
 
-// Run: an incoming message flows through toInbound -> handler -> Send end to
-// end against a mock Bot API server. The library owns offset acking; this
-// asserts the round-trip. Everything is signalled through channels so the test
-// is race-free under -race.
+// Send renders Actions as an inline keyboard whose callback_data is a token that
+// resolves to the action in the store.
+func TestSendRendersActionsAsKeyboard(t *testing.T) {
+	var replyMarkup string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			replyMarkup = r.FormValue("reply_markup")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	store := pending.NewMemoryStore(time.Minute)
+	a := New(Config{Token: "tok"}, store)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.Send(context.Background(), "555",
+		core.Reply{Text: "pick one", Actions: []core.Action{echoAction}}))
+
+	var markup struct {
+		InlineKeyboard [][]struct {
+			Text         string `json:"text"`
+			CallbackData string `json:"callback_data"`
+		} `json:"inline_keyboard"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(replyMarkup), &markup))
+	require.Len(t, markup.InlineKeyboard, 1)
+	require.Len(t, markup.InlineKeyboard[0], 1)
+	btn := markup.InlineKeyboard[0][0]
+	assert.Equal(t, "Echo", btn.Text)
+	require.NotEmpty(t, btn.CallbackData, "the button carries a token")
+
+	// The token resolves to the stored action — render and store agree.
+	got, status, err := store.Resolve(context.Background(), btn.CallbackData)
+	require.NoError(t, err)
+	assert.Equal(t, pending.Resolved, status)
+	assert.Equal(t, echoAction, got)
+}
+
+// Without a callback store, Actions degrade to an enumerated text list appended
+// to the message, and no inline keyboard is sent.
+func TestSendActionsTextFallbackWithoutStore(t *testing.T) {
+	var text, replyMarkup string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			text = r.FormValue("text")
+			replyMarkup = r.FormValue("reply_markup")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil) // no store
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.Send(context.Background(), "555",
+		core.Reply{Text: "pick one", Actions: []core.Action{echoAction}}))
+
+	assert.Empty(t, replyMarkup, "no inline keyboard without a store")
+	assert.Contains(t, text, "pick one")
+	assert.Contains(t, text, "1. Echo", "actions appended as a text list")
+}
+
+// A button click round-trips: the callback inbound carries the token, query id,
+// message handle, and the acting subject; the handler's Notice becomes the toast.
+func TestCallbackResolvesAndAnswers(t *testing.T) {
+	var answeredID, answeredText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			answeredID = r.FormValue("callback_query_id")
+			answeredText = r.FormValue("text")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok", AllowedGroups: nil}, pending.NewMemoryStore(time.Minute))
+	running(t, a, srv.URL)
+
+	var gotIn transport.Inbound
+	handler := func(_ context.Context, in transport.Inbound) (core.Reply, error) {
+		gotIn = in
+		return core.Reply{Notice: "echo done"}, nil
+	}
+
+	cq := &models.CallbackQuery{
+		ID:   "cq1",
+		From: models.User{ID: 42, Username: "alice"},
+		Message: models.MaybeInaccessibleMessage{
+			Message: &models.Message{ID: 5, Chat: models.Chat{ID: 555, Type: models.ChatTypePrivate}},
+		},
+		Data: "tok123",
+	}
+	a.handleCallback(context.Background(), handler, cq)
+
+	require.NotNil(t, gotIn.Callback, "a click yields a callback inbound")
+	assert.Equal(t, "tok123", gotIn.Callback.Token)
+	assert.Equal(t, "cq1", gotIn.Callback.QueryID)
+	assert.Equal(t, "5", gotIn.Callback.MessageID)
+	assert.Equal(t, "42", gotIn.User.ID, "the acting subject rides in User")
+	assert.Equal(t, core.SurfaceDM, gotIn.Surface)
+	assert.Equal(t, "555", gotIn.ReplyTo)
+
+	assert.Equal(t, "cq1", answeredID)
+	assert.Equal(t, "echo done", answeredText, "the handler's Notice is the toast")
+}
+
+// A callback from a non-allowed group is dropped, but the click is still
+// acknowledged (empty answer) so the client spinner clears.
+func TestCallbackNonAllowedGroupDropped(t *testing.T) {
+	var answered bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/answerCallbackQuery") {
+			answered = true
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, pending.NewMemoryStore(time.Minute)) // empty allow-list
+	running(t, a, srv.URL)
+
+	called := false
+	handler := func(_ context.Context, _ transport.Inbound) (core.Reply, error) {
+		called = true
+		return core.Reply{}, nil
+	}
+	cq := &models.CallbackQuery{
+		ID:      "cq2",
+		From:    models.User{ID: 42},
+		Message: models.MaybeInaccessibleMessage{Message: &models.Message{ID: 5, Chat: models.Chat{ID: 111, Type: models.ChatTypeGroup}}},
+		Data:    "tok",
+	}
+	a.handleCallback(context.Background(), handler, cq)
+
+	assert.False(t, called, "handler not reached for a disallowed-group click")
+	assert.True(t, answered, "the click is still acknowledged")
+}
+
+// Run: an incoming message flows through toInbound -> handler -> Send end to end
+// against a mock Bot API server. Race-free via channels.
 func TestRunDeliversAndReplies(t *testing.T) {
 	inboundCh := make(chan transport.Inbound, 1)
 	sentCh := make(chan string, 1)
-	// The library encodes Bot API calls as multipart/form-data, so read params
-	// via r.FormValue rather than parsing the body as JSON.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
 			offset, _ := strconv.ParseInt(r.FormValue("offset"), 10, 64)
-			// Deliver the message once; the library advances its offset past it.
 			if offset <= 100 {
 				_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":100,"message":`+
 					`{"message_id":1,"from":{"id":42,"username":"alice"},"chat":{"id":555,"type":"private"},"text":"hi"}}]}`)
@@ -120,7 +276,7 @@ func TestRunDeliversAndReplies(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	a := New(Config{Token: "tok"})
+	a := New(Config{Token: "tok"}, nil)
 	a.serverURL = srv.URL
 	a.skipGetMe = true
 	handler := func(_ context.Context, in transport.Inbound) (core.Reply, error) {
@@ -138,10 +294,8 @@ func TestRunDeliversAndReplies(t *testing.T) {
 	select {
 	case in := <-inboundCh:
 		assert.Equal(t, "42", in.User.ID)
-		assert.Equal(t, "alice", in.User.Display)
 		assert.Equal(t, core.SurfaceDM, in.Surface)
 		assert.Equal(t, "hi", in.Text)
-		assert.Equal(t, "555", in.ReplyTo)
 	case <-time.After(3 * time.Second):
 		t.Fatal("handler not called within timeout")
 	}
@@ -153,10 +307,9 @@ func TestRunDeliversAndReplies(t *testing.T) {
 	}
 }
 
-// The bot token never appears in an error surfaced from the transport (the Bot
-// API carries it in the request URL path).
+// The bot token never appears in an error surfaced from the transport.
 func TestRedactStripsToken(t *testing.T) {
-	a := New(Config{Token: "super-secret-token"})
+	a := New(Config{Token: "super-secret-token"}, nil)
 	err := a.redact(errors.New(`Post "https://api.telegram.org/botsuper-secret-token/getUpdates": dial tcp: connection refused`))
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), "super-secret-token")

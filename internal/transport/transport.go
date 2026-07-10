@@ -11,6 +11,8 @@ package transport
 
 import (
 	"context"
+	"strconv"
+	"strings"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 )
@@ -25,6 +27,29 @@ type Inbound struct {
 	// ReplyTo is an opaque, transport-owned handle for where to send the reply
 	// (chat id, thread, etc.). The core never interprets it.
 	ReplyTo string
+	// Callback is set when this inbound is a button click (a Telegram
+	// callback_query) rather than a text message; it is nil for a normal message.
+	// The acting user and surface — the subject the runtime re-authorizes against
+	// (ADR 0009) — ride in User/Surface as usual, so a callback needs no separate
+	// identity.
+	Callback *Callback
+}
+
+// Callback carries the click-specific parts of a button-press inbound. Together
+// with the Inbound's User, Surface, and ReplyTo (the chat), it is everything the
+// runtime needs to resolve the action, acknowledge the click, and (later, ADR
+// 0009 T3) edit the originating message in place — with no fetch-back.
+type Callback struct {
+	// Token keys the pending action in the callback store; the runtime resolves
+	// it (only the token, never the action, rides in the button — ADR 0009).
+	Token string
+	// QueryID answers the click within the platform's acknowledgement window
+	// (Telegram answerCallbackQuery, ~30s); it cannot be fetched after the fact,
+	// so it must ride in the inbound.
+	QueryID string
+	// MessageID, with the Inbound's ReplyTo (chat), locates the message the
+	// button is on, so the keyboard can later be edited to a status line.
+	MessageID string
 }
 
 // Handler processes one inbound message and is supplied by the runtime. A
@@ -40,7 +65,29 @@ const (
 	CapReactions Capability = iota
 	// CapEditMessage: the transport can edit a previously sent message.
 	CapEditMessage
+	// CapButtons: the transport can render a Reply's Actions as interactive
+	// buttons (a Telegram inline keyboard). Where absent, the actions degrade to
+	// an enumerated text list via ActionsAsText (ADR 0009).
+	CapButtons
 )
+
+// ActionsAsText renders a Reply's actions as an enumerated list, the graceful
+// fallback an adapter without CapButtons appends to the message text so the
+// affordances are at least visible where they can't be tapped. It returns the
+// empty string for no actions.
+func ActionsAsText(actions []core.Action) string {
+	if len(actions) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, a := range actions {
+		b.WriteString("\n")
+		b.WriteString(strconv.Itoa(i + 1))
+		b.WriteString(". ")
+		b.WriteString(a.Label)
+	}
+	return b.String()
+}
 
 // Transport is one platform adapter. Implementations live in sub-packages
 // (transport/telegram, later transport/discord, ...). The interface stays

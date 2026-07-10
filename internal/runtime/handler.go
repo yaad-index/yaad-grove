@@ -8,6 +8,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -23,6 +24,15 @@ const (
 	refuseText      = "Sorry, I can't help with that here."
 	rateLimitedText = "You've hit the rate limit — please try again shortly."
 	atCapacityText  = "I'm at capacity right now — please try again a little later."
+
+	// Callback (button-click) acknowledgements, shown as an ephemeral toast (ADR
+	// 0009). A clean resolve gets a generic "done" — T2 has no verbs to run yet;
+	// T3 replaces this with the executed verb's result. Expired and already-used
+	// are distinguished on purpose: same dead button, different cause.
+	callbackDoneText     = "Done ✓"
+	callbackExpiredText  = "This action has expired."
+	callbackConsumedText = "Already completed."
+	callbackErrorText    = "Something went wrong — please try again."
 )
 
 // checker is the access/consent gate the handler runs ahead of the engine; the
@@ -42,8 +52,16 @@ type answerer interface {
 // (ADR 0007/0008): the boundary where the access/consent gate runs *ahead* of the
 // engine, and each gate decision becomes a reply — or silence. The gate is always
 // consulted first; the engine is only ever reached on DecideServe.
-func NewHandler(gate checker, engine answerer) transport.Handler {
+//
+// A button click (in.Callback set) takes a separate path (ADR 0009): it resolves
+// the token in callbacks and acknowledges the click — it is not a model query, so
+// it never touches the engine. callbacks may be nil for a text-only bot; a click
+// then can't be resolved and is treated as expired.
+func NewHandler(gate checker, engine answerer, callbacks pending.Store) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
+		if in.Callback != nil {
+			return resolveCallback(ctx, callbacks, in.Callback)
+		}
 		decision, err := gate.Check(ctx, in.User, in.Surface)
 		if err != nil {
 			// Fail closed: never serve on an unknown gate state.
@@ -76,5 +94,32 @@ func NewHandler(gate checker, engine answerer) transport.Handler {
 			slog.Warn("unknown gate decision; refusing", "decision", int(decision))
 			return core.Reply{Text: refuseText, Refused: true}, nil
 		}
+	}
+}
+
+// resolveCallback handles a button click (ADR 0009 T2): it resolves the token and
+// returns an ephemeral acknowledgement (Reply.Notice) — never a new message. A
+// dead button reports expired vs already-completed distinctly. A cleanly resolved
+// action gets a generic "done"; T2 has no verbs, so nothing executes here — that
+// is where T3 inserts re-authorization + execution, keyed on in.User's tier.
+func resolveCallback(ctx context.Context, callbacks pending.Store, cb *transport.Callback) (core.Reply, error) {
+	if callbacks == nil {
+		return core.Reply{Notice: callbackExpiredText}, nil
+	}
+	_, status, err := callbacks.Resolve(ctx, cb.Token)
+	if err != nil {
+		// Fail closed: a store error is not a licence to act — just acknowledge.
+		slog.Warn("callback resolve failed", "err", err)
+		return core.Reply{Notice: callbackErrorText}, nil
+	}
+	switch status {
+	case pending.Resolved:
+		return core.Reply{Notice: callbackDoneText}, nil
+	case pending.Consumed:
+		return core.Reply{Notice: callbackConsumedText}, nil
+	case pending.Expired:
+		return core.Reply{Notice: callbackExpiredText}, nil
+	default:
+		return core.Reply{Notice: callbackErrorText}, nil
 	}
 }
