@@ -77,7 +77,11 @@ security one: replay is rejected either way (delete → "not found"; tombstone �
 
 Because the lazy path never re-touches a token nobody clicks again, the store
 also runs a **periodic sweep** that drops every past-TTL record — unclicked
-tokens and old tombstones alike — so the bucket stays bounded.
+tokens and old tombstones alike — so the bucket stays bounded. The sweep is not
+merely a method: the store **owns its sweeper lifecycle** — the durable store
+starts it on open and stops it on close — so garbage collection is live the
+moment the store exists, with nothing for the serve loop to remember to schedule.
+The sweep interval is a deployment parameter, not a constant; callers pick it.
 
 ### The callback inbound carries its own authorization subject
 

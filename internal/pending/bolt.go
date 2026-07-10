@@ -17,15 +17,23 @@ var pendingBucket = []byte("pending_actions")
 // 0005), matching internal/budget and internal/acl. Buttons survive a restart,
 // so a click after a redeploy still resolves (or reports expired) rather than
 // silently doing nothing.
+//
+// The store owns its own garbage collection: OpenBolt starts a background
+// sweeper and Close stops it, so the storage bound is live the moment the store
+// exists — no coordination with the serve loop, nothing to forget to wire.
 type BoltStore struct {
-	db  *bbolt.DB
-	ttl time.Duration
-	now func() time.Time // injectable clock; time.Now in production
+	db     *bbolt.DB
+	ttl    time.Duration
+	now    func() time.Time // injectable clock; time.Now in production
+	cancel context.CancelFunc
+	done   chan struct{}
 }
 
 // OpenBolt opens (creating if needed) the pending-action store at path, with a
-// per-token lifetime of ttl.
-func OpenBolt(path string, ttl time.Duration) (*BoltStore, error) {
+// per-token lifetime of ttl, and starts a background sweeper that runs every
+// sweepInterval. A non-positive sweepInterval disables the sweeper (tests drive
+// Sweep directly).
+func OpenBolt(path string, ttl, sweepInterval time.Duration) (*BoltStore, error) {
 	db, err := bbolt.Open(path, 0o600, &bbolt.Options{Timeout: time.Second})
 	if err != nil {
 		return nil, fmt.Errorf("pending: open %s: %w", path, err)
@@ -37,11 +45,29 @@ func OpenBolt(path string, ttl time.Duration) (*BoltStore, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("pending: init bucket: %w", err)
 	}
-	return &BoltStore{db: db, ttl: ttl, now: time.Now}, nil
+	s := &BoltStore{db: db, ttl: ttl, now: time.Now, cancel: func() {}, done: make(chan struct{})}
+	if sweepInterval > 0 {
+		ctx, cancel := context.WithCancel(context.Background())
+		s.cancel = cancel
+		go func() {
+			defer close(s.done)
+			RunSweeper(ctx, s, sweepInterval)
+		}()
+	} else {
+		// Disabled: start no ticker and no goroutine. Pre-close done so Close does
+		// not block waiting for a sweeper that was never launched.
+		close(s.done)
+	}
+	return s, nil
 }
 
-// Close releases the underlying database.
-func (s *BoltStore) Close() error { return s.db.Close() }
+// Close stops the sweeper (joining its goroutine, so no ticker leaks past Close)
+// and releases the underlying database.
+func (s *BoltStore) Close() error {
+	s.cancel()
+	<-s.done
+	return s.db.Close()
+}
 
 // Put stores action under a fresh token expiring ttl from now.
 func (s *BoltStore) Put(_ context.Context, action core.Action) (string, error) {

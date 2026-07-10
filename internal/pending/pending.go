@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -70,6 +71,31 @@ func newToken() (string, error) {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(b[:]), nil
+}
+
+// RunSweeper calls s.Sweep every interval until ctx is cancelled — the store's
+// garbage collector. A method that is merely implemented is not a bound: without
+// something driving it, expired tokens and old tombstones the lazy path never
+// re-touches would accumulate. BoltStore starts this itself on open; a caller
+// using another Store starts it directly. A non-positive interval disables it.
+func RunSweeper(ctx context.Context, s Store, interval time.Duration) {
+	if interval <= 0 {
+		return
+	}
+	t := time.NewTicker(interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if n, err := s.Sweep(ctx); err != nil {
+				slog.Warn("pending: sweep failed", "err", err)
+			} else if n > 0 {
+				slog.Debug("pending: swept expired tokens", "count", n)
+			}
+		}
+	}
 }
 
 // resolveRecord applies the expiry/single-use rules to a found record read at

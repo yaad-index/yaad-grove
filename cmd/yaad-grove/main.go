@@ -22,6 +22,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/model"
+	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/tools"
@@ -61,6 +62,14 @@ type ServeCmd struct {
 	BudgetDB     string        `name:"budget-db" default:"./budget.db" help:"Path to the persisted spend-meter database (survives restarts)." type:"path"`
 
 	TelegramGroups []string `name:"telegram-allowed-groups" help:"Group chat ids that count as 'the community' the bot serves (Telegram)."`
+
+	// The callback token store backs interactive buttons (ADR 0009). It owns its
+	// own garbage collection: the sweeper runs every CallbackSweepInterval, so
+	// expired tokens and old tombstones can't accumulate. The interval is a
+	// deployment parameter, not a constant.
+	CallbackDB            string        `name:"callback-db" default:"./callbacks.db" help:"Path to the persisted callback token store (survives restarts)." type:"path"`
+	CallbackTTL           time.Duration `name:"callback-ttl" default:"10m" help:"How long a rendered button stays valid before it expires."`
+	CallbackSweepInterval time.Duration `name:"callback-sweep-interval" default:"5m" help:"How often the callback store sweeps expired tokens and old tombstones."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -97,12 +106,22 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// Store (bbolt) is wired in Phase 1.
 	_ = acl.NewGate(nil, acl.Tier(c.DefaultTier))
 
-	// The callback token store (buttons) wires in with the full Serve loop; a
-	// text-only transport passes nil here.
+	// The callback token store backs interactive buttons (ADR 0009). It owns its
+	// own sweeper — started here on open, stopped on Close — so the storage bound
+	// is live the moment serve opens the store, with nothing for a later loop to
+	// remember to schedule. Opened before the transport starts; its deferred Close
+	// fires after Run returns, so in-flight callbacks can still resolve during
+	// shutdown.
+	callbacks, err := pending.OpenBolt(c.CallbackDB, c.CallbackTTL, c.CallbackSweepInterval)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = callbacks.Close() }()
+
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
 		AllowedGroups: c.TelegramGroups,
-	}, nil)
+	}, callbacks)
 
 	log.Info("yaad-grove serve (scaffold)",
 		"transport", tp.Name(),

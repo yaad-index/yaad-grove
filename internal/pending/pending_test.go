@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.etcd.io/bbolt"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 )
@@ -29,7 +30,9 @@ func stores(t *testing.T, clk *clock) map[string]Store {
 	mem := NewMemoryStore(testTTL)
 	mem.now = clk.now
 
-	blt, err := OpenBolt(filepath.Join(t.TempDir(), "pending.db"), testTTL)
+	// sweepInterval 0: no background sweeper, so the manual clock these tests
+	// inject is never raced by an auto-sweep goroutine.
+	blt, err := OpenBolt(filepath.Join(t.TempDir(), "pending.db"), testTTL, 0)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = blt.Close() })
 	blt.now = clk.now
@@ -140,6 +143,81 @@ func TestSweep(t *testing.T) {
 			require.NoError(t, err)
 			assert.Equal(t, Resolved, status)
 		})
+	}
+}
+
+// memSize reads the record count under the store's own lock, so it is safe to
+// poll while a sweeper goroutine runs.
+func memSize(s *MemoryStore) int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.m)
+}
+
+// boltCount reads the record count from the bucket.
+func boltCount(t *testing.T, s *BoltStore) int {
+	t.Helper()
+	n := 0
+	require.NoError(t, s.db.View(func(tx *bbolt.Tx) error {
+		n = tx.Bucket(pendingBucket).Stats().KeyN
+		return nil
+	}))
+	return n
+}
+
+// RunSweeper drives Sweep on a ticker and removes expired records until ctx is
+// cancelled. Uses real (short) time — no clock injection — since it exercises the
+// ticker itself.
+func TestRunSweeper(t *testing.T) {
+	st := NewMemoryStore(20 * time.Millisecond) // short TTL
+	_, err := st.Put(context.Background(), echoAction)
+	require.NoError(t, err)
+	_, err = st.Put(context.Background(), echoAction)
+	require.NoError(t, err)
+	require.Equal(t, 2, memSize(st))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go RunSweeper(ctx, st, 5*time.Millisecond)
+
+	assert.Eventually(t, func() bool { return memSize(st) == 0 }, time.Second, 5*time.Millisecond,
+		"the sweeper removes expired records")
+}
+
+// A non-positive interval disables RunSweeper: it returns at once without a
+// ticker, sweeping nothing.
+func TestRunSweeperDisabled(t *testing.T) {
+	st := NewMemoryStore(time.Nanosecond)
+	_, err := st.Put(context.Background(), echoAction)
+	require.NoError(t, err)
+	done := make(chan struct{})
+	go func() { RunSweeper(context.Background(), st, 0); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("RunSweeper with interval<=0 should return immediately")
+	}
+	// Nothing was swept even though the record is expired.
+	assert.Equal(t, 1, memSize(st))
+}
+
+// OpenBolt with a positive interval sweeps in the background, and Close stops it
+// cleanly (joining the goroutine) rather than leaking a ticker.
+func TestBoltAutoSweepAndClose(t *testing.T) {
+	st, err := OpenBolt(filepath.Join(t.TempDir(), "sweep.db"), 20*time.Millisecond, 5*time.Millisecond)
+	require.NoError(t, err)
+
+	_, err = st.Put(context.Background(), echoAction)
+	require.NoError(t, err)
+	assert.Eventually(t, func() bool { return boltCount(t, st) == 0 }, time.Second, 5*time.Millisecond,
+		"the background sweeper removes the expired record")
+
+	done := make(chan struct{})
+	go func() { _ = st.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Close should join the sweeper goroutine and return, not hang")
 	}
 }
 
