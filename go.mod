@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/alecthomas/kong v1.15.0
 	github.com/alecthomas/kong-yaml v0.2.0
+	github.com/go-telegram/bot v1.22.0
 	github.com/stretchr/testify v1.11.1
 	go.etcd.io/bbolt v1.5.0
 )
