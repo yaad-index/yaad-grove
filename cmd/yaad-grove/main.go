@@ -97,10 +97,12 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// Store (bbolt) is wired in Phase 1.
 	_ = acl.NewGate(nil, acl.Tier(c.DefaultTier))
 
+	// The callback token store (buttons) wires in with the full Serve loop; a
+	// text-only transport passes nil here.
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
 		AllowedGroups: c.TelegramGroups,
-	})
+	}, nil)
 
 	log.Info("yaad-grove serve (scaffold)",
 		"transport", tp.Name(),

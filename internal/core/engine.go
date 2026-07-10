@@ -67,6 +67,33 @@ type Reply struct {
 	// sets it for the throttled-unconsented case (acl.DecideSilent, ADR 0007), and
 	// a transport skips Send when it is set.
 	Silent bool
+	// Actions are interactive affordances offered alongside the text: a transport
+	// renders them as buttons (Telegram inline keyboard) where it can, and
+	// degrades to an enumerated text list where it cannot (CapButtons, ADR 0009).
+	// Empty leaves the reply plain text — fully backward-compatible.
+	Actions []Action
+	// Notice is an ephemeral acknowledgement shown to the actor in place, not as a
+	// new message — a Telegram answerCallbackQuery toast, later a Slack/Discord
+	// ephemeral reply. The runtime sets it to answer a button click (ADR 0009);
+	// it is empty for ordinary message replies.
+	Notice string
+}
+
+// Action is an interactive affordance offered on a Reply — one button. It is a
+// typed operation the actor can invoke with a tap rather than by retyping a
+// command (ADR 0009). This is the wire shape: what a transport needs to render
+// the button and round-trip the click. The authorizing/executing half — a
+// minimum tier and an executor bound to the Verb — arrives with the action
+// registry; a button is only ever a UI hint, re-authorized at execution time.
+type Action struct {
+	// Verb names the operation (the registry maps it to an executor and a
+	// minimum tier). The echo action's verb is unprivileged.
+	Verb string
+	// Params carries the verb's arguments. String-valued so it round-trips
+	// cleanly through the callback token store.
+	Params map[string]string
+	// Label is the button caption shown to the user.
+	Label string
 }
 
 // Usage is the token accounting for a model call — what the global spend meter
