@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.5.0](https://github.com/yaad-index/yaad-grove/compare/v0.4.0...v0.5.0) (2026-07-11)
+
+
+### Features
+
+* **cmd,retrieval:** wire semantic retrieval (ADR 0017 build 3/4) ([#79](https://github.com/yaad-index/yaad-grove/issues/79)) ([56c91c0](https://github.com/yaad-index/yaad-grove/commit/56c91c0b103bf1516c7bb4e2ffb98930b22db922))
+* **embed:** OpenAI-compatible embeddings client (ADR 0017 build 1/4) ([#76](https://github.com/yaad-index/yaad-grove/issues/76)) ([64d56d1](https://github.com/yaad-index/yaad-grove/commit/64d56d162c9e2a0be1df8ad27e8ffe8bfce447e9))
+* **retrieval:** semantic retriever + in-memory cosine index (ADR 0017 build 2/4) ([#78](https://github.com/yaad-index/yaad-grove/issues/78)) ([d4ad3c2](https://github.com/yaad-index/yaad-grove/commit/d4ad3c267f553592b73822d7bd7ce0ae787962a3))
+
 ## [0.4.0](https://github.com/yaad-index/yaad-grove/compare/v0.3.3...v0.4.0) (2026-07-11)
 
 
