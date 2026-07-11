@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.2.1](https://github.com/yaad-index/yaad-grove/compare/v0.2.0...v0.2.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **runtime:** route admin DM consent commands to the consent flow ([#50](https://github.com/yaad-index/yaad-grove/issues/50)) ([#51](https://github.com/yaad-index/yaad-grove/issues/51)) ([7edd7ae](https://github.com/yaad-index/yaad-grove/commit/7edd7ae485be9854f46977ad6f489f44d48eafd2))
+
 ## [0.2.0](https://github.com/yaad-index/yaad-grove/compare/v0.1.0...v0.2.0) (2026-07-11)
 
 
