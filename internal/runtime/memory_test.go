@@ -2,6 +2,7 @@ package runtime_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -14,6 +15,69 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
+
+// capModel records the system prompt of each call — to inspect the assembled
+// prompt end to end through the handler + real engine.
+type capModel struct {
+	lastSystem string
+	calls      int
+}
+
+func (m *capModel) Complete(_ context.Context, msgs []core.Message, _ []core.ToolDef) (core.Completion, error) {
+	m.calls++
+	if len(msgs) > 0 {
+		m.lastSystem = msgs[0].Content
+	}
+	return core.Completion{Text: "The widget calibrates via the blue dial."}, nil
+}
+
+// condRetriever grounds a normal question but returns nothing for a meta query,
+// mirroring a retrieval-only bot: "tldr" has no vault chunks.
+type condRetriever struct{}
+
+func (condRetriever) Retrieve(_ context.Context, q string) ([]core.Chunk, error) {
+	if strings.Contains(strings.ToLower(q), "tldr") {
+		return nil, nil
+	}
+	return []core.Chunk{{Source: "a.md", Text: "widget info"}}, nil
+}
+
+type noTools struct{}
+
+func (noTools) Defs() []core.ToolDef                                         { return nil }
+func (noTools) Call(context.Context, string, map[string]any) (string, error) { return "", nil }
+
+// End-to-end (the live 0.3.0 "tldr" reproduce, DM path): an admin asks a question,
+// then "tldr". The follow-up reaches the model with the bot's prior answer in the
+// RECENT CONVERSATION block — empty retrieval for the meta query no longer
+// short-circuits it, and the block permits summarizing.
+func TestHandlerDMTldrReachesModelWithHistory(t *testing.T) {
+	buf := memory.New(20)
+	model := &capModel{}
+	engine := core.New(model, condRetriever{}, noTools{}, "You answer about the widget.")
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"}), Memory: buf, Inject: 15}
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, consent, policy)
+
+	dm := func(text, msgID string) transport.Inbound {
+		return transport.Inbound{User: core.User{ID: "admin1", Display: "Ada"}, Surface: core.SurfaceDM, Text: text, ReplyTo: "dm-chat", Directed: true, MessageID: msgID}
+	}
+
+	// Q1 is grounded and answered → the bot's answer is buffered.
+	_, err := h(context.Background(), dm("how do I calibrate the widget?", "m1"))
+	require.NoError(t, err)
+	callsAfterQ1 := model.calls
+
+	// "tldr": empty retrieval, but history present → the model IS called, with the
+	// bot's prior answer in the RECENT CONVERSATION block.
+	_, err = h(context.Background(), dm("tldr", "m2"))
+	require.NoError(t, err)
+	assert.Greater(t, model.calls, callsAfterQ1, "the meta follow-up reaches the model, not an early refuse")
+	assert.Contains(t, model.lastSystem, "RECENT CONVERSATION")
+	assert.Contains(t, model.lastSystem, "The widget calibrates via the blue dial.",
+		"the bot's prior answer is in the assembled prompt")
+	assert.Contains(t, model.lastSystem, "MAY summarize", "the block permits meta-operations")
+}
 
 func groupMsg(id, text, msgID string, replyToBot bool) transport.Inbound {
 	return transport.Inbound{
