@@ -223,6 +223,44 @@ func TestHandlerAdminDMAnsweredNotLogged(t *testing.T) {
 	assert.Empty(t, qlog.Entries(), "an admin DM is a private 1:1, never logged")
 }
 
+// An admin's consent commands run the consent flow, never the engine (#50): the
+// DM is an admin's only opt-in path (they're consent-gated in the group), so
+// /consent must grant rather than be answered as a query. A non-command admin DM
+// still reaches the engine.
+func TestHandlerAdminDMConsentCommands(t *testing.T) {
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"})}
+	dm := func(text string) transport.Inbound {
+		return transport.Inbound{User: core.User{ID: "admin1"}, Surface: core.SurfaceDM, Text: text, Directed: true}
+	}
+
+	// /consent from an admin grants consent through the flow, not the engine.
+	engine := &mockEngine{reply: core.Reply{Text: "ANSWER"}}
+	consent := &mockConsenter{consent: acl.ConsentUnknown}
+	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, consent, policy)
+	reply, err := h(context.Background(), dm("/consent"))
+	require.NoError(t, err)
+	assert.False(t, engine.called, "an admin's /consent runs the consent flow, not the engine")
+	assert.Equal(t, acl.ConsentGranted, consent.consent, "the admin is opted in")
+	assert.Contains(t, reply.Text, "opted in")
+
+	// /start and /consent remove likewise route to the flow, never the engine.
+	for _, cmd := range []string{"/start", "/consent remove"} {
+		engine := &mockEngine{reply: core.Reply{Text: "ANSWER"}}
+		h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, &mockConsenter{consent: acl.ConsentGranted}, policy)
+		_, err := h(context.Background(), dm(cmd))
+		require.NoError(t, err)
+		assert.False(t, engine.called, "an admin's %q runs the consent flow, not the engine", cmd)
+	}
+
+	// A genuine (non-command) admin query still reaches the engine.
+	engine = &mockEngine{reply: core.Reply{Text: "ANSWER"}}
+	h = runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, &mockConsenter{consent: acl.ConsentGranted}, policy)
+	reply, err = h(context.Background(), dm("what is X?"))
+	require.NoError(t, err)
+	assert.True(t, engine.called, "a non-command admin DM is answered")
+	assert.Equal(t, "ANSWER", reply.Text)
+}
+
 // A non-admin DM never reaches the engine — it is consent management only, even
 // for a message that looks like a query (ADR 0012).
 func TestHandlerNonAdminDMIsConsentOnly(t *testing.T) {

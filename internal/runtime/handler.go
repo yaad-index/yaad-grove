@@ -77,12 +77,16 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		if in.Callback != nil {
 			return resolveCallback(ctx, callbacks, registry, authz, in), nil
 		}
-		// DM routing (ADR 0012): admin → answered by the engine; anyone else → the
-		// consent flow (opt in / status), never a query. A nil consenter means no
-		// consent surface is wired (a text-only bot), so a DM falls through to the
-		// gate below rather than being dropped.
+		// DM routing (ADR 0012). Consent commands run the consent flow for everyone,
+		// including admins: an admin is consent-gated in the group like anyone, so
+		// the DM is their only opt-in path — routing their /consent to the engine
+		// would leave them unable to consent at all (#50). A non-command admin DM is
+		// a genuine query, answered by the engine; every other DM is consent
+		// management only. A nil consenter means no consent surface is wired (a
+		// text-only bot), so a DM falls through to the gate below rather than being
+		// dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
-			if policy.Admins.IsAdmin(in.User.ID) {
+			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
 				return answer(ctx, engine, in)
 			}
 			return dmConsentFlow(ctx, consent, in), nil
