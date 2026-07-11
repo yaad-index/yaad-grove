@@ -33,6 +33,20 @@ type consenter interface {
 	SetConsent(ctx context.Context, userID string, c acl.Consent) error
 }
 
+// isConsentCommand reports whether a DM is a consent-management command rather
+// than a query. These route to the consent flow for everyone — including an
+// admin, whose DM would otherwise be answered as a query, leaving them no way to
+// opt in (an admin is consent-gated in the group like anyone, so the DM is their
+// only consent path). #50.
+func isConsentCommand(text string) bool {
+	switch strings.TrimSpace(text) {
+	case "/start", "/consent", "/consent remove":
+		return true
+	default:
+		return false
+	}
+}
+
 // dmConsentFlow handles a DM message as consent management (ADR 0012): the
 // non-admin DM surface is consent-only. `/consent` grants directly (the text
 // backup); `/start`, a bare message, or anything else shows the opt-in button
