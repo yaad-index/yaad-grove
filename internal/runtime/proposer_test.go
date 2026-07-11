@@ -27,6 +27,8 @@ func (s *stubSetter) SetTier(_ context.Context, user string, tier acl.Tier) erro
 	return nil
 }
 
+func (s *stubSetter) SetConsent(context.Context, string, acl.Consent) error { return nil }
+
 var promoteBob = runtime.Proposal{
 	Prompt: "Promote bob?",
 	Action: core.Action{Verb: "set_tier", Params: map[string]string{"user": "bob", "tier": "trusted"}},
@@ -132,7 +134,7 @@ func TestProposalApproveEndToEnd(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, approve)
 
-	h := runtime.NewHandler(nil, nil, store, registry, gate, nil)
+	h := runtime.NewHandler(nil, nil, store, registry, gate, nil, nil)
 	clickReply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
 	assert.Contains(t, clickReply.Notice, "Done")
@@ -150,7 +152,7 @@ func TestProposalDismiss(t *testing.T) {
 	token := putToken(t, store, core.Action{Verb: "dismiss", Label: "Dismiss"})
 
 	// dismiss is unprivileged (TierThrottled), which any subject clears.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}), &mockAuthz{authorized: true}, nil)
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}), &mockAuthz{authorized: true}, nil, nil)
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
 	assert.Contains(t, reply.Notice, "Done")

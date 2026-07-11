@@ -10,14 +10,28 @@ import (
 )
 
 const (
-	verbEcho    = "echo"
-	verbSetTier = "set_tier"
-	verbDismiss = "dismiss"
+	verbEcho         = "echo"
+	verbSetTier      = "set_tier"
+	verbDismiss      = "dismiss"
+	verbConsentGrant = "consent_grant"
 )
 
 // tierSetter is the acl write the set_tier verb performs; *acl.Gate satisfies it.
 type tierSetter interface {
 	SetTier(ctx context.Context, userID string, tier acl.Tier) error
+}
+
+// consentSetter is the acl write the consent_grant verb performs; *acl.Gate
+// satisfies it.
+type consentSetter interface {
+	SetConsent(ctx context.Context, userID string, c acl.Consent) error
+}
+
+// gateWriter is the acl write surface the default verb set needs; *acl.Gate
+// satisfies it.
+type gateWriter interface {
+	tierSetter
+	consentSetter
 }
 
 // EchoVerb is the unprivileged baseline carried over from T2: it proves the
@@ -73,12 +87,30 @@ func DismissVerb() Verb {
 	}
 }
 
-// DefaultRegistry registers the Phase-1 verbs: the unprivileged echo and dismiss
-// baselines and the set_tier admin verb over setter (the acl gate).
-func DefaultRegistry(setter tierSetter) *Registry {
+// ConsentGrantVerb is the self-service opt-in behind the DM opt-in button (ADR
+// 0012). It grants the acting subject's OWN consent — no cross-user grant — so it
+// is unprivileged (TierThrottled: anyone may opt themselves in). The confirmation
+// names the withdraw path.
+func ConsentGrantVerb(setter consentSetter) Verb {
+	return Verb{
+		MinTier: acl.TierThrottled,
+		Execute: func(ctx context.Context, subject core.User, _ map[string]string) (string, error) {
+			if err := setter.SetConsent(ctx, subject.ID, acl.ConsentGranted); err != nil {
+				return "", err
+			}
+			return consentGrantedText, nil
+		},
+	}
+}
+
+// DefaultRegistry registers the Phase-1 verbs: the unprivileged echo/dismiss
+// baselines, the self-service consent_grant, and the set_tier admin verb — all
+// over the acl gate.
+func DefaultRegistry(gate gateWriter) *Registry {
 	r := NewRegistry()
 	r.Register(verbEcho, EchoVerb())
 	r.Register(verbDismiss, DismissVerb())
-	r.Register(verbSetTier, SetTierVerb(setter))
+	r.Register(verbConsentGrant, ConsentGrantVerb(gate))
+	r.Register(verbSetTier, SetTierVerb(gate))
 	return r
 }

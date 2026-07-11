@@ -74,10 +74,17 @@ type authorizer interface {
 // and executes — it is not a model query, so it never touches the engine.
 // callbacks may be nil for a text-only bot; a click then can't be resolved and is
 // treated as expired.
-func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log) transport.Handler {
+func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log, consent consenter) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
 		if in.Callback != nil {
 			return resolveCallback(ctx, callbacks, registry, authz, in), nil
+		}
+		// DM consent management (ADR 0012): the non-admin DM surface is consent-only
+		// — it never answers a query, only opts in / shows status. Admin DM answering
+		// is wired ahead of this in unit (d). A nil consenter disables the flow (the
+		// gate handles the DM instead), keeping a text-only bot working.
+		if in.Surface == core.SurfaceDM && consent != nil {
+			return dmConsentFlow(ctx, consent, in), nil
 		}
 		decision, err := gate.Check(ctx, in.User, in.Surface)
 		if err != nil {

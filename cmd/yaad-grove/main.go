@@ -181,7 +181,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// writer. The handler runs the consent gate ahead of the engine, records
 	// consented messages (ADR 0004), and resolves button clicks.
 	actions := runtime.DefaultRegistry(gate)
-	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog)
+	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate)
 
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
