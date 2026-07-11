@@ -1,6 +1,6 @@
 # ADR 0014 — Bounded per-conversation memory (shared conversation buffer)
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-11)
 **Amends:** ADR 0004 (logging boundary), ADR 0008/0011 (answer composition + grounding), ADR 0012 (consent gates logging)
 
 ## Context
