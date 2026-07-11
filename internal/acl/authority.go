@@ -63,6 +63,27 @@ func (g *Gate) Authorize(ctx context.Context, user core.User, minTier Tier) (boo
 	return AtLeast(g.resolveTier(rec), minTier), nil
 }
 
+// SetConsent records a user's consent answer (ADR 0002/0012), atomically. The
+// self-service opt-in button and the /consent command both grant through here; a
+// later withdrawal path revokes through here.
+func (g *Gate) SetConsent(ctx context.Context, userID string, c Consent) error {
+	return g.store.Update(ctx, userID, func(r *Record) error {
+		r.Consent = c
+		return nil
+	})
+}
+
+// ConsentOf reports a user's current consent state — read by the DM consent flow
+// to show status vs. offer the opt-in (ADR 0012). A first-seen user is
+// ConsentUnknown.
+func (g *Gate) ConsentOf(ctx context.Context, userID string) (Consent, error) {
+	rec, err := g.store.Get(ctx, userID)
+	if err != nil {
+		return ConsentUnknown, err
+	}
+	return rec.Consent, nil
+}
+
 // SetTier assigns tier to userID, creating the row if the user is unseen. It is
 // the write half of the admin control plane (ADR 0009): a privileged verb calls
 // it to change another user's authority. An unknown tier is refused so the store

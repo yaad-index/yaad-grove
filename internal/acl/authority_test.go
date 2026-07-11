@@ -86,3 +86,25 @@ func TestSetTier(t *testing.T) {
 
 	assert.ErrorIs(t, gate.SetTier(ctx, "newuser", acl.Tier("bogus")), acl.ErrUnknownTier)
 }
+
+// SetConsent records the answer and ConsentOf reads it back (both atomic /
+// fresh); an unseen user reads ConsentUnknown.
+func TestSetAndReadConsent(t *testing.T) {
+	ctx := context.Background()
+	store := newMemStore()
+	gate := acl.NewGate(store, acl.TierDefault)
+
+	c, err := gate.ConsentOf(ctx, "u1")
+	require.NoError(t, err)
+	assert.Equal(t, acl.ConsentUnknown, c, "unseen user is unknown")
+
+	require.NoError(t, gate.SetConsent(ctx, "u1", acl.ConsentGranted))
+	c, err = gate.ConsentOf(ctx, "u1")
+	require.NoError(t, err)
+	assert.Equal(t, acl.ConsentGranted, c)
+	assert.Equal(t, acl.ConsentGranted, store.recs["u1"].Consent, "persisted")
+
+	require.NoError(t, gate.SetConsent(ctx, "u1", acl.ConsentDeclined))
+	c, _ = gate.ConsentOf(ctx, "u1")
+	assert.Equal(t, acl.ConsentDeclined, c, "revocable to declined")
+}
