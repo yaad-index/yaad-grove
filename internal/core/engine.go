@@ -14,6 +14,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -272,10 +273,37 @@ func New(model Model, retriever Retriever, tools Tools, scope string, opts ...Op
 // 0008). Answer detects it and returns a refusal instead of the model's text.
 const RefusalToken = "%%OUT_OF_SCOPE%%"
 
-// outOfScopeReply is the fixed user-facing text for a refusal (both the empty-
-// grounding short-circuit and the model-signalled sentinel), so a refusal never
-// leaks prompt internals.
+// outOfScopeReply is the fallback refusal text: the empty-grounding short-circuit
+// (no model call to shape it) and a model that emitted only the bare sentinel both
+// use it, so a refusal never leaks prompt internals.
 const outOfScopeReply = "That's outside what I can answer from my curated sources."
+
+// parseRefusal interprets a final model reply against the out-of-scope sentinel
+// (ADR 0008/0013). The model is instructed to LEAD an off-domain or ungroundable
+// reply with the token, then a brief in-persona note of what it can help with —
+// so the token is expected first. After trimming leading whitespace, a prefix
+// match is a refusal: the marker is stripped and the persona note surfaced (or the
+// fallback line if the model wrote none), with Refused set.
+//
+// Detection is prefix-only on purpose: a token buried mid-reply is an instruction
+// violation, not a refusal — it is logged (observable, never silently wrong) and
+// the reply is treated as a normal answer, with any stray marker stripped so no
+// raw token reaches the user.
+func parseRefusal(text string) (reply string, refused bool) {
+	lead := strings.TrimLeft(text, " \t\r\n")
+	if strings.HasPrefix(lead, RefusalToken) {
+		note := strings.TrimSpace(strings.TrimPrefix(lead, RefusalToken))
+		if note == "" {
+			note = outOfScopeReply
+		}
+		return note, true
+	}
+	if strings.Contains(text, RefusalToken) {
+		slog.Warn("refusal sentinel not at reply start; treating as a normal answer", "reply", text)
+		text = strings.TrimSpace(strings.ReplaceAll(text, RefusalToken, ""))
+	}
+	return text, false
+}
 
 // maxToolIterations caps the tool-call loop: the model may call tools up to this
 // many rounds before Answer gives up and refuses. It bounds a stuck or looping
@@ -306,8 +334,13 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		return Reply{}, err
 	}
 	tools := e.tools.Defs()
-	// Nothing to ground on and no tool that could: refuse without a model call.
-	if len(chunks) == 0 && len(tools) == 0 {
+	// Nothing to ground on, no tool that could, AND no conversation to meta-operate
+	// on: refuse without a model call. History is the exception — a meta follow-up
+	// like "tldr" has no vault chunks yet must still reach the model to summarize
+	// the recent conversation (ADR 0014), so an empty retrieval alone must not
+	// short-circuit it. The grounding contract in the prompt still refuses a
+	// genuine off-domain question.
+	if len(chunks) == 0 && len(tools) == 0 && len(q.History) == 0 {
 		return Reply{Text: outOfScopeReply, Refused: true}, nil
 	}
 
@@ -322,12 +355,12 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 			return Reply{}, err
 		}
 		if len(completion.ToolCalls) == 0 {
-			// Final answer. The scope prompt emits the sentinel for out-of-domain
-			// (or ungroundable) queries — refuse then, never leaking prompt internals.
-			if strings.Contains(completion.Text, RefusalToken) {
-				return Reply{Text: outOfScopeReply, Refused: true}, nil
-			}
-			return Reply{Text: completion.Text}, nil
+			// Final answer. The scope prompt has the model lead an out-of-domain (or
+			// ungroundable) reply with the sentinel, then a brief in-persona note of
+			// what it can help with (ADR 0013): parseRefusal strips the marker and
+			// surfaces that note as the persona-shaped decline.
+			text, refused := parseRefusal(completion.Text)
+			return Reply{Text: text, Refused: refused}, nil
 		}
 
 		// The model wants tools: record its request, run each, and append the
@@ -374,14 +407,14 @@ func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks [
 		b.WriteString("\n\n---\n\n")
 	}
 	b.WriteString(strings.TrimSpace(scope))
-	b.WriteString("\n\nAnswer ONLY questions within the scope above. For anything outside that scope, reply with exactly " +
-		RefusalToken + " and nothing else — even if the CONTEXT or a tool provides information about it. " +
+	b.WriteString("\n\nAnswer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with " +
+		RefusalToken + " (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. " +
 		"For an in-scope question, answer using the CONTEXT below")
 	if hasTools {
 		b.WriteString(" and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope)")
 	}
-	b.WriteString(", and cite the [source] tags you rely on. If you cannot ground an in-scope answer, reply with exactly " +
-		RefusalToken + " and nothing else.")
+	b.WriteString(", and cite the [source] tags you rely on. If you cannot ground an in-scope answer, decline the same way: " +
+		RefusalToken + " first, then a brief in-voice note.")
 	if hasPersona {
 		b.WriteString(" The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.")
 	}
@@ -413,7 +446,7 @@ func conversationBlock(history []HistoryTurn) string {
 		}
 	}
 	var b strings.Builder
-	b.WriteString("\n\nRECENT CONVERSATION (context only, NOT a source of facts; a partial record — only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke):\n")
+	b.WriteString("\n\nRECENT CONVERSATION — the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no [source] citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the CONTEXT below. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke.\n")
 	for _, t := range history {
 		b.WriteString("\n[")
 		b.WriteString(t.Time.Format("15:04"))

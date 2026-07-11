@@ -214,16 +214,73 @@ func TestAnswerRefusesOnEmptyRetrievalWithoutModelCall(t *testing.T) {
 	assert.NotEmpty(t, reply.Text)
 }
 
-// The model's out-of-scope sentinel becomes a refusal, the sentinel replaced by a
-// clean user-facing line.
+// A sentinel-led decline is a refusal, and the persona-voiced note after the
+// marker is what the user sees — the marker itself is stripped (ADR 0013).
 func TestAnswerRefusesOnModelSentinel(t *testing.T) {
-	mdl := textModel("preamble " + core.RefusalToken)
+	mdl := textModel(core.RefusalToken + " I focus on widgets — happy to help with those.")
 	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "unrelated"}}}, nopTools{}, "scope")
 
 	reply, err := e.Answer(context.Background(), core.Query{Text: "off topic"})
 	require.NoError(t, err)
 	assert.True(t, reply.Refused)
+	assert.NotContains(t, reply.Text, core.RefusalToken, "the marker is stripped")
+	assert.Contains(t, reply.Text, "I focus on widgets", "the persona-voiced decline is surfaced")
+}
+
+// Refusal detection is prefix-only: the token first (leading whitespace
+// tolerated) is a refusal; a bare token falls back to the fixed line;
+// a BURIED token is an instruction violation, treated as a normal answer with the
+// stray marker stripped so no raw token reaches the user.
+func TestRefusalParsing(t *testing.T) {
+	chunk := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+
+	// Bare token → refusal with the fallback line, no raw marker.
+	mdl := textModel(core.RefusalToken)
+	reply, err := core.New(mdl, chunk, nopTools{}, "scope").Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.True(t, reply.Refused)
+	assert.NotEmpty(t, reply.Text)
 	assert.NotContains(t, reply.Text, core.RefusalToken)
+
+	// Leading whitespace before the token still refuses.
+	mdl2 := textModel("  \n" + core.RefusalToken + " here's what I can do")
+	reply2, err := core.New(mdl2, chunk, nopTools{}, "scope").Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.True(t, reply2.Refused)
+	assert.Contains(t, reply2.Text, "here's what I can do")
+
+	// A buried token is NOT a refusal; the stray marker is stripped from the reply.
+	mdl3 := textModel("Here is an answer " + core.RefusalToken + " tail")
+	reply3, err := core.New(mdl3, chunk, nopTools{}, "scope").Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.False(t, reply3.Refused, "a buried sentinel is an instruction violation, not a refusal")
+	assert.NotContains(t, reply3.Text, core.RefusalToken, "the stray marker is stripped from the user text")
+}
+
+// The early refuse-without-a-model-call must not fire when there is conversation
+// history: a meta follow-up ("tldr") has no vault chunks but must still reach the
+// model to summarize the recent conversation (ADR 0014). Reproduces + fixes the
+// live 0.3.0 "tldr refuses" bug.
+func TestAnswerWithHistoryReachesModel(t *testing.T) {
+	mdl := textModel("summary of the prior turn")
+	e := core.New(mdl, mockRetriever{chunks: nil}, nopTools{}, "SCOPE") // empty retrieval, no tools
+	q := core.Query{Text: "tldr", History: []core.HistoryTurn{
+		{Bot: true, Text: "The widget calibrates via the blue dial.", Time: time.Now()},
+	}}
+	reply, err := e.Answer(context.Background(), q)
+	require.NoError(t, err)
+	assert.Positive(t, mdl.calls, "the model is called when there is history to meta-operate on")
+	assert.False(t, reply.Refused)
+	assert.Contains(t, systemOf(mdl), "RECENT CONVERSATION", "the prior turn reaches the prompt")
+	assert.Contains(t, systemOf(mdl), "MAY summarize", "the header permits meta-operations")
+
+	// Still short-circuits (no model call) when there is neither grounding nor history.
+	mdl2 := textModel("must not be produced")
+	e2 := core.New(mdl2, mockRetriever{chunks: nil}, nopTools{}, "SCOPE")
+	reply2, err := e2.Answer(context.Background(), core.Query{Text: "unknowable"})
+	require.NoError(t, err)
+	assert.True(t, reply2.Refused)
+	assert.Zero(t, mdl2.calls, "empty retrieval + no tools + no history still refuses without a model call")
 }
 
 // Retriever and model errors propagate.
