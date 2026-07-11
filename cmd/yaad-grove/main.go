@@ -54,6 +54,13 @@ type ServeCmd struct {
 	VaultDir string `name:"vault-dir" default:"./vault" help:"Curated vault root (markdown + frontmatter) the bot grounds on." type:"path"`
 	Scope    string `name:"scope" help:"Scope statement / system prompt that bounds the bot and drives refusal."`
 
+	// PersonaFile is the optional operator-authored persona/behavior file (ADR
+	// 0013), layered into the system prompt ahead of scope. Left empty, it defaults
+	// to PERSONA.md in the working dir: a present default file is used and its
+	// absence is graceful (no persona layer); an explicitly-set path that can't be
+	// read is a startup error (the operator meant to use one).
+	PersonaFile string `name:"persona-file" help:"Operator persona/behavior file (Markdown) layered into the prompt. Defaults to PERSONA.md in the working dir (absent is fine); an explicitly-set unreadable path is fatal."`
+
 	ModelBaseURL string `name:"model-base-url" default:"https://api.openai.com/v1" help:"OpenAI-compatible API base URL."`
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
 
@@ -140,7 +147,15 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	registry := tools.New(servers)
-	engine := core.New(m, retriever, registry, c.Scope)
+
+	// The optional persona layer (ADR 0013): operator-authored behavior prepended
+	// to the system prompt ahead of scope/grounding. Load before the engine so a
+	// misconfigured persona fails startup rather than serving without it.
+	persona, err := loadPersona(c.PersonaFile)
+	if err != nil {
+		return err
+	}
+	engine := core.New(m, retriever, registry, c.Scope, core.WithPersona(persona))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
@@ -238,6 +253,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"callback_db", c.CallbackDB,
 		"callback_sweep", c.CallbackSweepInterval.String(),
 		"quarantine_log", quarantineState,
+		"persona", persona != "",
 		"admins", len(policy.Admins),
 		"nudge_mode", c.NudgeMode,
 		"mcp_servers", len(servers),
@@ -250,6 +266,27 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	}
 	log.Info("yaad-grove stopped")
 	return nil
+}
+
+// loadPersona reads the persona file for the engine (ADR 0013). An empty
+// configured path means "use the default": PERSONA.md in the working dir, whose
+// absence is graceful (no persona layer). A non-empty configured path is an
+// explicit operator choice, so a missing or unreadable file there is fatal — the
+// operator meant to run with a persona. Either way an unreadable (not just
+// missing) default file is also fatal: the file is there but broken.
+func loadPersona(configuredPath string) (string, error) {
+	path, explicit := configuredPath, configuredPath != ""
+	if !explicit {
+		path = "PERSONA.md"
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if !explicit && errors.Is(err, os.ErrNotExist) {
+			return "", nil // default file simply not present — run without a persona
+		}
+		return "", fmt.Errorf("persona file %q: %w", path, err)
+	}
+	return string(data), nil
 }
 
 // parseMCPServers parses "name=command arg1 arg2" specs into server configs.
