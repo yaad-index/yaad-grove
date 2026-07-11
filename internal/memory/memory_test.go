@@ -63,15 +63,56 @@ func TestPurge(t *testing.T) {
 // The follow-up gate: a reply to the bot, a meta request, or a referential lead
 // counts; a plain standalone question does not.
 func TestIsFollowUp(t *testing.T) {
-	assert.True(t, memory.IsFollowUp("what is the capital?", true), "reply-to-bot always counts")
-	assert.True(t, memory.IsFollowUp("tldr", false), "meta request")
-	assert.True(t, memory.IsFollowUp("more please", false), "meta prefix")
-	assert.True(t, memory.IsFollowUp("why?", false), "meta with punctuation")
-	assert.True(t, memory.IsFollowUp("what about the second one", false), "referential lead")
-	assert.True(t, memory.IsFollowUp("it doesn't work", false), "pronoun lead")
+	cases := []struct {
+		name       string
+		query      string
+		replyToBot bool
+		want       bool
+	}{
+		// Existing signals.
+		{"reply-to-bot always counts", "what is the capital?", true, true},
+		{"meta request", "tldr", false, true},
+		{"meta prefix", "more please", false, true},
+		{"meta with punctuation", "why?", false, true},
+		{"referential lead", "what about the second one", false, true},
+		{"pronoun lead", "it doesn't work", false, true},
 
-	assert.False(t, memory.IsFollowUp("how do I install the widget?", false), "standalone question")
-	assert.False(t, memory.IsFollowUp("", false), "empty")
+		// Short-message heuristic — language-agnostic (#84). A brief ack in any
+		// language is a follow-up even when it isn't a platform reply.
+		{"persian yes", "بله", false, true},
+		{"persian yeah", "آره", false, true},
+		{"persian why", "چرا", false, true},
+		{"persian yes with punctuation", "بله؟", false, true},
+		{"persian two-word ack", "بله لطفا", false, true},
+		{"english one-word ack", "yes", false, true},
+		{"english two-word ack", "go ahead", false, true},
+
+		// Guards: a longer standalone question — English or not — is NOT a follow-up,
+		// so a fresh question still injects no history.
+		{"standalone english question", "how do I install the widget?", false, false},
+		{"standalone persian question", "قوانین این بازی چیست", false, false},
+		{"empty", "", false, false},
+		{"whitespace only", "   ", false, false},
+	}
+	for _, tc := range cases {
+		assert.Equal(t, tc.want, memory.IsFollowUp(tc.query, tc.replyToBot), tc.name)
+	}
+}
+
+// The end-to-end gate: a short non-English ack pulls recent history from the
+// buffer, where before it would have answered in isolation (#84).
+func TestSelectShortNonEnglishFollowUpInjectsHistory(t *testing.T) {
+	b := memory.New(10)
+	b.Append("chat", turn("u1", "Al", "the widget calibrates with the blue dial"))
+	b.Append("chat", memory.Turn{Bot: true, Text: "turn the blue dial clockwise", Time: time.Now(), MessageID: "b1"})
+
+	// "بله" ("yes") as a non-reply short ack — the reported symptom (#84).
+	got := b.Select("chat", "بله", false, 5)
+	assert.NotEmpty(t, got, "a short non-English ack injects recent history instead of answering in isolation")
+
+	// A standalone non-English question still gates to nothing.
+	assert.Nil(t, b.Select("chat", "قوانین این بازی چیست", false, 5),
+		"a fresh non-English question pulls no history")
 }
 
 // Select gates on follow-up: a standalone question injects nothing even with a

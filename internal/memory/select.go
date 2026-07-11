@@ -92,11 +92,18 @@ var referentialPrefix = []string{
 	"it ", "it's ", "that ", "this ", "they ", "those ", "these ", "what about ",
 }
 
+// shortMessageMaxTokens is the word-token ceiling under which a message is taken
+// as a follow-up regardless of language (ADR 0014). A one- or two-word reply
+// ("yes", "بله", "why not") carries almost no standalone meaning, so against an
+// existing buffer it is far more likely a continuation than a fresh question.
+const shortMessageMaxTokens = 2
+
 // IsFollowUp is the v1 heuristic (ADR 0014): does the message reference prior
-// context? A reply to the bot always does; otherwise a short meta-request or a
-// leading referential word. It is intentionally cheap and improvable — a miss
-// degrades to an isolated answer, and a false hit costs only up to the inject
-// budget, so no separate knob is warranted.
+// context? A reply to the bot always does; otherwise a very short message (a brief
+// ack/continuation in any language), or an English meta-request or leading
+// referential word. It is intentionally cheap and improvable — a miss degrades to
+// an isolated answer, and a false hit costs only up to the inject budget, so no
+// separate knob is warranted.
 func IsFollowUp(query string, replyToBot bool) bool {
 	if replyToBot {
 		return true
@@ -104,6 +111,15 @@ func IsFollowUp(query string, replyToBot bool) bool {
 	q := strings.ToLower(strings.TrimSpace(query))
 	if q == "" {
 		return false
+	}
+	// Language-agnostic signal: a very short message is treated as a follow-up. The
+	// English cue lists below can't reach non-English acks ("بله", "آره"), but a
+	// low word-token count is script-neutral, so a short Persian/Arabic/etc. reply
+	// is caught the same as "yes"/"go on". (Non-space-segmented scripts collapse to
+	// one token and so also lean follow-up — acceptable per the false-hit rationale
+	// above; the buffer-empty guard in Select means a wrong hit injects nothing.)
+	if n := len(strings.FieldsFunc(q, notWord)); n >= 1 && n <= shortMessageMaxTokens {
+		return true
 	}
 	for _, m := range followUpMeta {
 		if q == m || strings.HasPrefix(q, m+" ") || strings.HasPrefix(q, m+"?") {
