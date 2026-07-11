@@ -23,6 +23,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/pending"
+	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/tools"
@@ -70,6 +71,11 @@ type ServeCmd struct {
 	CallbackDB            string        `name:"callback-db" default:"./callbacks.db" help:"Path to the persisted callback token store (survives restarts)." type:"path"`
 	CallbackTTL           time.Duration `name:"callback-ttl" default:"10m" help:"How long a rendered button stays valid before it expires."`
 	CallbackSweepInterval time.Duration `name:"callback-sweep-interval" default:"5m" help:"How often the callback store sweeps expired tokens and old tombstones."`
+
+	// The quarantine log records consented community messages OUTSIDE the answering
+	// vault (ADR 0004), so a later curation pass has data. The answering bot never
+	// reads it. Empty disables logging.
+	QuarantineLog string `name:"quarantine-log" default:"./quarantine.jsonl" help:"Path to the consent-gated community-message log (JSONL, append-only). Empty disables logging." type:"path"`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -117,6 +123,20 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = callbacks.Close() }()
+
+	// The quarantine log records consented messages for later curation (ADR 0004),
+	// kept outside the answering vault. It is passed to the runtime handler (which
+	// logs only on the consent-granted path); empty path disables it.
+	var qlog quarantine.Log
+	if c.QuarantineLog != "" {
+		flog, err := quarantine.OpenFile(c.QuarantineLog)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = flog.Close() }()
+		qlog = flog
+	}
+	_ = qlog // wired into the runtime handler with the full serve loop
 
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
