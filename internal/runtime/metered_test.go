@@ -20,7 +20,7 @@ type spyModel struct {
 	err   error
 }
 
-func (s *spyModel) Complete(context.Context, string, string) (core.Completion, error) {
+func (s *spyModel) Complete(context.Context, []core.Message, []core.ToolDef) (core.Completion, error) {
 	s.calls++
 	return core.Completion{Text: "ok", Usage: core.Usage{TotalTokens: s.usage}}, s.err
 }
@@ -38,7 +38,7 @@ func TestMeteredRecordsUsage(t *testing.T) {
 	spy := &spyModel{usage: 30}
 	m := runtime.MeterModel(meter, spy)
 
-	c, err := m.Complete(context.Background(), "s", "u")
+	c, err := m.Complete(context.Background(), nil, nil)
 	require.NoError(t, err)
 	assert.Equal(t, "ok", c.Text)
 	assert.Equal(t, 1, spy.calls)
@@ -52,7 +52,7 @@ func TestMeteredBlocksOverBudget(t *testing.T) {
 	spy := &spyModel{usage: 5}
 	m := runtime.MeterModel(meter, spy)
 
-	_, err := m.Complete(context.Background(), "s", "u")
+	_, err := m.Complete(context.Background(), nil, nil)
 	require.ErrorIs(t, err, budget.ErrOverBudget)
 	assert.Equal(t, 0, spy.calls, "no underlying call when over budget")
 }
@@ -63,7 +63,7 @@ func TestMeteredPropagatesInnerError(t *testing.T) {
 	spy := &spyModel{err: errors.New("boom")}
 	m := runtime.MeterModel(meter, spy)
 
-	_, err := m.Complete(context.Background(), "s", "u")
+	_, err := m.Complete(context.Background(), nil, nil)
 	assert.Error(t, err)
 	assert.Equal(t, int64(100), meter.Remaining(), "a failed call records no spend")
 }

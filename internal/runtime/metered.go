@@ -30,12 +30,13 @@ func MeterModel(meter *budget.Meter, inner core.Model) core.Model {
 }
 
 // Complete refuses when the spend ceiling is reached (no underlying call), else
-// completes and records the usage.
-func (m *meteredModel) Complete(ctx context.Context, system, user string) (core.Completion, error) {
+// completes and records the usage. It gates every round of the tool-call loop
+// (ADR 0011), so a multi-call answer is naturally bounded by the ceiling.
+func (m *meteredModel) Complete(ctx context.Context, messages []core.Message, tools []core.ToolDef) (core.Completion, error) {
 	if !m.meter.Allow() {
 		return core.Completion{}, budget.ErrOverBudget
 	}
-	completion, err := m.inner.Complete(ctx, system, user)
+	completion, err := m.inner.Complete(ctx, messages, tools)
 	if err != nil {
 		return core.Completion{}, err
 	}
