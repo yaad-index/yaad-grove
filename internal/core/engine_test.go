@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -21,34 +22,80 @@ func (m mockRetriever) Retrieve(context.Context, string) ([]core.Chunk, error) {
 	return m.chunks, m.err
 }
 
+// mockModel returns scripted completions in order (the last repeats), so a test
+// can drive the tool-call loop. It records the messages/tools of the last call.
 type mockModel struct {
-	reply     string
-	err       error
-	called    bool
-	gotSystem string
-	gotUser   string
+	replies      []core.Completion
+	err          error
+	calls        int
+	lastMessages []core.Message
+	lastTools    []core.ToolDef
 }
 
-func (m *mockModel) Complete(_ context.Context, system, user string) (core.Completion, error) {
-	m.called = true
-	m.gotSystem, m.gotUser = system, user
-	return core.Completion{Text: m.reply}, m.err
+func (m *mockModel) Complete(_ context.Context, messages []core.Message, tools []core.ToolDef) (core.Completion, error) {
+	m.calls++
+	m.lastMessages, m.lastTools = messages, tools
+	if m.err != nil {
+		return core.Completion{}, m.err
+	}
+	if len(m.replies) == 0 {
+		return core.Completion{}, nil
+	}
+	idx := m.calls - 1
+	if idx >= len(m.replies) {
+		idx = len(m.replies) - 1
+	}
+	return m.replies[idx], nil
 }
 
-// nopTools satisfies core.Tools; Answer does not call tools in Unit 5.
+func textModel(reply string) *mockModel {
+	return &mockModel{replies: []core.Completion{{Text: reply}}}
+}
+
+func systemOf(m *mockModel) string {
+	if len(m.lastMessages) == 0 {
+		return ""
+	}
+	return m.lastMessages[0].Content
+}
+
+// nopTools advertises no tools.
 type nopTools struct{}
 
-func (nopTools) List() []string                                               { return nil }
+func (nopTools) Defs() []core.ToolDef                                         { return nil }
 func (nopTools) Call(context.Context, string, map[string]any) (string, error) { return "", nil }
 
-// A grounded query is answered by the model, and the system prompt carries the
-// scope, the refusal contract, and each chunk's source in retrieval order.
+// mockTools advertises tools and returns scripted results/errors per name.
+type mockTools struct {
+	defs    []core.ToolDef
+	results map[string]string
+	errs    map[string]error
+	calls   []string
+}
+
+func (m *mockTools) Defs() []core.ToolDef { return m.defs }
+func (m *mockTools) Call(_ context.Context, name string, _ map[string]any) (string, error) {
+	m.calls = append(m.calls, name)
+	if m.errs != nil {
+		if err := m.errs[name]; err != nil {
+			return "", err
+		}
+	}
+	return m.results[name], nil
+}
+
+func toolCall(id, name string) core.ToolCall {
+	return core.ToolCall{ID: id, Name: name, Arguments: map[string]any{}}
+}
+
+// A grounded query is answered by the model; the system prompt carries the scope,
+// the refusal contract, and each chunk's source in retrieval order.
 func TestAnswerGrounded(t *testing.T) {
 	ret := mockRetriever{chunks: []core.Chunk{
 		{Source: "notes/a.md#Intro", Text: "The widget installs via the script."},
 		{Source: "faq.md", Text: "Reset anytime."},
 	}}
-	mdl := &mockModel{reply: "Install with the script [notes/a.md#Intro]."}
+	mdl := textModel("Install with the script [notes/a.md#Intro].")
 	e := core.New(mdl, ret, nopTools{}, "You answer about the widget.")
 
 	reply, err := e.Answer(context.Background(), core.Query{Text: "how do I install?"})
@@ -56,31 +103,33 @@ func TestAnswerGrounded(t *testing.T) {
 	assert.False(t, reply.Refused)
 	assert.Equal(t, "Install with the script [notes/a.md#Intro].", reply.Text)
 
-	assert.Contains(t, mdl.gotSystem, "You answer about the widget.")
-	assert.Contains(t, mdl.gotSystem, core.RefusalToken)
-	assert.Contains(t, mdl.gotSystem, "notes/a.md#Intro")
-	assert.Contains(t, mdl.gotSystem, "faq.md")
-	assert.Less(t, strings.Index(mdl.gotSystem, "notes/a.md#Intro"), strings.Index(mdl.gotSystem, "faq.md"),
+	sys := systemOf(mdl)
+	assert.Contains(t, sys, "You answer about the widget.")
+	assert.Contains(t, sys, core.RefusalToken)
+	assert.Contains(t, sys, "notes/a.md#Intro")
+	assert.Contains(t, sys, "faq.md")
+	assert.Less(t, strings.Index(sys, "notes/a.md#Intro"), strings.Index(sys, "faq.md"),
 		"chunk sources appear in retrieval order (deterministic)")
-	assert.Equal(t, "how do I install?", mdl.gotUser, "user message is the raw query")
+	require.Len(t, mdl.lastMessages, 2)
+	assert.Equal(t, "how do I install?", mdl.lastMessages[1].Content, "user message is the raw query")
 }
 
-// Empty retrieval refuses without a model call.
+// Empty retrieval with no tools refuses without a model call.
 func TestAnswerRefusesOnEmptyRetrievalWithoutModelCall(t *testing.T) {
-	mdl := &mockModel{reply: "must not be produced"}
+	mdl := textModel("must not be produced")
 	e := core.New(mdl, mockRetriever{chunks: nil}, nopTools{}, "scope")
 
 	reply, err := e.Answer(context.Background(), core.Query{Text: "unknowable"})
 	require.NoError(t, err)
 	assert.True(t, reply.Refused)
-	assert.False(t, mdl.called, "no model call when there is nothing to ground on")
+	assert.Equal(t, 0, mdl.calls, "no model call when there is nothing to ground on and no tools")
 	assert.NotEmpty(t, reply.Text)
 }
 
-// The model's out-of-scope sentinel becomes a refusal, with the sentinel replaced
-// by a clean user-facing line.
+// The model's out-of-scope sentinel becomes a refusal, the sentinel replaced by a
+// clean user-facing line.
 func TestAnswerRefusesOnModelSentinel(t *testing.T) {
-	mdl := &mockModel{reply: "preamble " + core.RefusalToken}
+	mdl := textModel("preamble " + core.RefusalToken)
 	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "unrelated"}}}, nopTools{}, "scope")
 
 	reply, err := e.Answer(context.Background(), core.Query{Text: "off topic"})
@@ -91,7 +140,7 @@ func TestAnswerRefusesOnModelSentinel(t *testing.T) {
 
 // Retriever and model errors propagate.
 func TestAnswerPropagatesErrors(t *testing.T) {
-	e1 := core.New(&mockModel{}, mockRetriever{err: errors.New("scan failed")}, nopTools{}, "scope")
+	e1 := core.New(textModel(""), mockRetriever{err: errors.New("scan failed")}, nopTools{}, "scope")
 	_, err := e1.Answer(context.Background(), core.Query{Text: "q"})
 	assert.Error(t, err, "retriever error propagates")
 
@@ -99,4 +148,119 @@ func TestAnswerPropagatesErrors(t *testing.T) {
 		mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, nopTools{}, "scope")
 	_, err = e2.Answer(context.Background(), core.Query{Text: "q"})
 	assert.Error(t, err, "model error propagates")
+}
+
+func toolRegistry() *mockTools {
+	return &mockTools{
+		defs:    []core.ToolDef{{Name: "search", Description: "search transcripts", Schema: json.RawMessage(`{"type":"object"}`)}},
+		results: map[string]string{"search": "found: the answer"},
+	}
+}
+
+// The tool-call loop: the model requests a tool, the engine runs it and feeds the
+// result back as scoped context, and the model then answers. The tool defs reach
+// the model and the tool result is appended to the next round.
+func TestAnswerToolLoop(t *testing.T) {
+	tools := toolRegistry()
+	mdl := &mockModel{replies: []core.Completion{
+		{ToolCalls: []core.ToolCall{toolCall("c1", "search")}}, // round 1: call the tool
+		{Text: "Here's the answer [search]."},                  // round 2: final
+	}}
+	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tools, "scope")
+
+	reply, err := e.Answer(context.Background(), core.Query{Text: "in-domain q the vault lacks"})
+	require.NoError(t, err)
+	assert.False(t, reply.Refused)
+	assert.Equal(t, "Here's the answer [search].", reply.Text)
+	assert.Equal(t, []string{"search"}, tools.calls, "the tool was called once")
+	assert.Equal(t, 2, mdl.calls, "model completed twice (request, then final)")
+
+	// The tool defs were advertised, and the tool result was fed back as a tool turn.
+	require.Len(t, mdl.lastTools, 1)
+	assert.Equal(t, "search", mdl.lastTools[0].Name)
+	var sawToolResult bool
+	for _, m := range mdl.lastMessages {
+		if m.Role == core.RoleTool && strings.Contains(m.Content, "found: the answer") {
+			sawToolResult = true
+		}
+	}
+	assert.True(t, sawToolResult, "the tool result is fed back as a tool-role message")
+}
+
+// A tool that ran and reported an error feeds its failure back as content so the
+// model can adapt; the loop continues rather than aborting.
+func TestAnswerToolErrorFedBack(t *testing.T) {
+	tools := toolRegistry()
+	tools.errs = map[string]error{"search": errors.New("no results")}
+	mdl := &mockModel{replies: []core.Completion{
+		{ToolCalls: []core.ToolCall{toolCall("c1", "search")}},
+		{Text: "Sorry, nothing found, but here's what I know."},
+	}}
+	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tools, "scope")
+
+	reply, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.False(t, reply.Refused)
+	assert.Equal(t, 2, mdl.calls, "the loop continued after the tool error")
+
+	var sawErr bool
+	for _, m := range mdl.lastMessages {
+		if m.Role == core.RoleTool && strings.Contains(m.Content, "tool error") {
+			sawErr = true
+		}
+	}
+	assert.True(t, sawErr, "the tool failure is fed back as content")
+}
+
+// A transport-level tool failure (ErrToolUnavailable) aborts the loop.
+func TestAnswerToolUnavailableAborts(t *testing.T) {
+	tools := toolRegistry()
+	// A transport failure wraps ErrToolUnavailable (as the real Registry does).
+	tools.errs = map[string]error{"search": errWrap(core.ErrToolUnavailable)}
+	mdl := &mockModel{replies: []core.Completion{
+		{ToolCalls: []core.ToolCall{toolCall("c1", "search")}},
+		{Text: "must not be reached"},
+	}}
+	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tools, "scope")
+
+	_, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, core.ErrToolUnavailable)
+	assert.Equal(t, 1, mdl.calls, "the loop aborted; the model was not called again")
+}
+
+func errWrap(err error) error { return &wrapped{err} }
+
+type wrapped struct{ err error }
+
+func (w *wrapped) Error() string { return "tool call: " + w.err.Error() }
+func (w *wrapped) Unwrap() error { return w.err }
+
+// A model that never stops requesting tools hits the iteration cap and refuses
+// gracefully rather than looping forever.
+func TestAnswerToolLoopCap(t *testing.T) {
+	tools := toolRegistry()
+	mdl := &mockModel{replies: []core.Completion{
+		{ToolCalls: []core.ToolCall{toolCall("c1", "search")}}, // repeats (last-reply-repeats)
+	}}
+	e := core.New(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tools, "scope")
+
+	reply, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.True(t, reply.Refused, "capped loop refuses rather than hanging")
+	assert.Equal(t, 5, mdl.calls, "the loop is capped at maxToolIterations")
+}
+
+// With no vault chunks but tools available, the model IS consulted (a tool may
+// ground an in-domain answer) — no empty-retrieval short-circuit.
+func TestAnswerEmptyChunksWithToolsCallsModel(t *testing.T) {
+	tools := toolRegistry()
+	mdl := textModel("grounded via tool [search].")
+	e := core.New(mdl, mockRetriever{chunks: nil}, tools, "scope")
+
+	reply, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.False(t, reply.Refused)
+	assert.Equal(t, 1, mdl.calls, "the model is consulted because a tool could ground it")
+	assert.Contains(t, systemOf(mdl), "tools available to you", "the prompt mentions tool grounding")
 }

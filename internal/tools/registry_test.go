@@ -46,7 +46,13 @@ func TestListAndCall(t *testing.T) {
 	r := New(nil)
 	connectTo(t, r, referenceServer())
 
-	assert.ElementsMatch(t, []string{"echo", "boom"}, r.List())
+	assert.ElementsMatch(t, []string{"echo", "boom"}, defNames(r))
+	// Defs carry the description advertised by the server, for the model.
+	for _, d := range r.Defs() {
+		if d.Name == "echo" {
+			assert.Equal(t, "echo the text argument back", d.Description)
+		}
+	}
 
 	out, err := r.Call(context.Background(), "echo", map[string]any{"text": "hi"})
 	require.NoError(t, err)
@@ -88,7 +94,7 @@ func TestMultipleServersAggregate(t *testing.T) {
 		})
 	connectTo(t, r, s2)
 
-	assert.ElementsMatch(t, []string{"echo", "boom", "ping"}, r.List())
+	assert.ElementsMatch(t, []string{"echo", "boom", "ping"}, defNames(r))
 	out, err := r.Call(context.Background(), "ping", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "pong", out)
@@ -98,6 +104,15 @@ func TestMultipleServersAggregate(t *testing.T) {
 func TestEmptyRegistry(t *testing.T) {
 	r := New(nil)
 	require.NoError(t, r.Connect(context.Background()))
-	assert.Empty(t, r.List())
+	assert.Empty(t, r.Defs())
 	require.NoError(t, r.Close())
+}
+
+// defNames extracts the tool names from the registry's defs.
+func defNames(r *Registry) []string {
+	var names []string
+	for _, d := range r.Defs() {
+		names = append(names, d.Name)
+	}
+	return names
 }

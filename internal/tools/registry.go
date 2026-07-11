@@ -13,6 +13,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strings"
@@ -123,29 +124,44 @@ func (r *Registry) connect(ctx context.Context, transport mcp.Transport) error {
 	return nil
 }
 
-// List names the callable tools across all connected servers, in discovery
-// order.
-func (r *Registry) List() []string {
+// Defs returns the tool definitions to advertise to the model, in discovery
+// order. Each tool's InputSchema (received as decoded JSON) is re-marshaled to a
+// json.RawMessage and passed through unchanged — the MCP server owns argument
+// validation.
+func (r *Registry) Defs() []core.ToolDef {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	out := make([]string, len(r.names))
-	copy(out, r.names)
-	return out
+	defs := make([]core.ToolDef, 0, len(r.names))
+	for _, name := range r.names {
+		ref := r.tools[name]
+		var schema json.RawMessage
+		if ref.inputSchema != nil {
+			if raw, err := json.Marshal(ref.inputSchema); err == nil {
+				schema = raw
+			}
+		}
+		defs = append(defs, core.ToolDef{Name: name, Description: ref.description, Schema: schema})
+	}
+	return defs
 }
 
 // Call routes a tool call to the server advertising it and returns the tool's
-// text output. A tool that reports an error (result.IsError) becomes a Go error
-// carrying the tool's message.
+// text output. A tool that ran and reported an error (result.IsError) is an
+// ordinary error the engine feeds back to the model; a transport-level failure
+// (dead session / broken RPC) wraps core.ErrToolUnavailable so the engine aborts
+// the loop instead (ADR 0011).
 func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (string, error) {
 	r.mu.RLock()
 	ref, ok := r.tools[name]
 	r.mu.RUnlock()
 	if !ok {
+		// A name the model invented — feed it back so the model can correct, don't
+		// abort: an ordinary error, not ErrToolUnavailable.
 		return "", fmt.Errorf("tools: unknown tool %q", name)
 	}
 	res, err := ref.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
-		return "", fmt.Errorf("tools: call %q: %w", name, err)
+		return "", fmt.Errorf("tools: call %q: %w: %w", name, core.ErrToolUnavailable, err)
 	}
 	text := flattenContent(res.Content)
 	if res.IsError {

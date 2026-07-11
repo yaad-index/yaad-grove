@@ -12,8 +12,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/model"
 )
+
+// msgs builds a system+user conversation.
+func msgs(system, user string) []core.Message {
+	return []core.Message{
+		{Role: core.RoleSystem, Content: system},
+		{Role: core.RoleUser, Content: user},
+	}
+}
 
 // A mocked 200 returns the choice text and surfaces token usage; the request
 // carries the bearer key and the two messages in order.
@@ -31,7 +40,7 @@ func TestCompleteSuccess(t *testing.T) {
 	defer srv.Close()
 
 	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "sk-test-123", Model: "gpt-x"})
-	res, err := c.Complete(context.Background(), "be terse", "hello")
+	res, err := c.Complete(context.Background(), msgs("be terse", "hello"), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "hi there", res.Text)
 	assert.Equal(t, 12, res.Usage.PromptTokens)
@@ -64,7 +73,7 @@ func TestCompleteNon2xxTypedError(t *testing.T) {
 	defer srv.Close()
 
 	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "sk-x", Model: "m"})
-	_, err := c.Complete(context.Background(), "s", "u")
+	_, err := c.Complete(context.Background(), msgs("s", "u"), nil)
 	require.Error(t, err)
 	var se *model.StatusError
 	require.ErrorAs(t, err, &se)
@@ -83,7 +92,7 @@ func TestCompleteAPIKeyNeverLeaks(t *testing.T) {
 
 	const secret = "sk-super-secret-XYZ"
 	c := model.New(model.Config{BaseURL: srv.URL, APIKey: secret, Model: "m"})
-	_, err := c.Complete(context.Background(), "s", "u")
+	_, err := c.Complete(context.Background(), msgs("s", "u"), nil)
 	require.Error(t, err)
 	assert.NotContains(t, err.Error(), secret)
 }
@@ -100,7 +109,7 @@ func TestCompleteBadResponses(t *testing.T) {
 			}))
 			defer srv.Close()
 			c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "m"})
-			_, err := c.Complete(context.Background(), "s", "u")
+			_, err := c.Complete(context.Background(), msgs("s", "u"), nil)
 			assert.Error(t, err)
 		})
 	}
@@ -115,7 +124,7 @@ func TestCompleteContextCancelled(t *testing.T) {
 	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "m"})
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := c.Complete(ctx, "s", "u")
+	_, err := c.Complete(ctx, msgs("s", "u"), nil)
 	assert.Error(t, err)
 }
 
@@ -128,6 +137,72 @@ func TestCompleteContextDeadline(t *testing.T) {
 	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "m"})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
-	_, err := c.Complete(ctx, "s", "u")
+	_, err := c.Complete(ctx, msgs("s", "u"), nil)
 	assert.Error(t, err)
+}
+
+// The request advertises the tools, and a response with tool_calls is parsed into
+// the completion (id, name, and the JSON-string arguments decoded to a map).
+func TestCompleteToolCalls(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"",` +
+			`"tool_calls":[{"id":"call_1","type":"function","function":{"name":"search","arguments":"{\"q\":\"widgets\"}"}}]}}],` +
+			`"usage":{"total_tokens":9}}`))
+	}))
+	defer srv.Close()
+
+	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "m"})
+	tools := []core.ToolDef{{Name: "search", Description: "search transcripts", Schema: json.RawMessage(`{"type":"object"}`)}}
+	res, err := c.Complete(context.Background(), msgs("s", "u"), tools)
+	require.NoError(t, err)
+
+	require.Len(t, res.ToolCalls, 1)
+	assert.Equal(t, "call_1", res.ToolCalls[0].ID)
+	assert.Equal(t, "search", res.ToolCalls[0].Name)
+	assert.Equal(t, "widgets", res.ToolCalls[0].Arguments["q"])
+
+	// The request carried the tools array as OpenAI functions.
+	var sent struct {
+		Tools []struct {
+			Type     string `json:"type"`
+			Function struct {
+				Name       string          `json:"name"`
+				Parameters json.RawMessage `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(gotBody), &sent))
+	require.Len(t, sent.Tools, 1)
+	assert.Equal(t, "function", sent.Tools[0].Type)
+	assert.Equal(t, "search", sent.Tools[0].Function.Name)
+	assert.JSONEq(t, `{"type":"object"}`, string(sent.Tools[0].Function.Parameters))
+}
+
+// An assistant tool-call turn and the tool-result turn round-trip their
+// correlation ids on the wire (OpenAI rejects unmatched tool results).
+func TestCompleteRoundTripsToolMessages(t *testing.T) {
+	var gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"done"}}],"usage":{"total_tokens":3}}`))
+	}))
+	defer srv.Close()
+
+	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "m"})
+	convo := []core.Message{
+		{Role: core.RoleSystem, Content: "s"},
+		{Role: core.RoleUser, Content: "u"},
+		{Role: core.RoleAssistant, ToolCalls: []core.ToolCall{{ID: "call_1", Name: "search", Arguments: map[string]any{"q": "x"}}}},
+		{Role: core.RoleTool, ToolCallID: "call_1", Content: "result text"},
+	}
+	_, err := c.Complete(context.Background(), convo, nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, gotBody, `"id":"call_1"`, "assistant tool-call carries its id")
+	assert.Contains(t, gotBody, `"tool_call_id":"call_1"`, "tool result correlates to the call")
+	assert.Contains(t, gotBody, `"arguments":"{\"q\":\"x\"}"`, "args serialized as a JSON string")
 }

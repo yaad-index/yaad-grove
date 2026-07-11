@@ -55,19 +55,47 @@ func (e *StatusError) Error() string {
 	return fmt.Sprintf("model: endpoint returned status %d: %s", e.Status, e.Snippet)
 }
 
+type chatFunctionCall struct {
+	Name      string `json:"name"`
+	Arguments string `json:"arguments"` // a JSON string, per the OpenAI wire format
+}
+
+type chatToolCall struct {
+	ID       string           `json:"id"`
+	Type     string           `json:"type"` // "function"
+	Function chatFunctionCall `json:"function"`
+}
+
 type chatMessage struct {
-	Role    string `json:"role"`
-	Content string `json:"content"`
+	Role       string         `json:"role"`
+	Content    string         `json:"content,omitempty"`
+	ToolCalls  []chatToolCall `json:"tool_calls,omitempty"`
+	ToolCallID string         `json:"tool_call_id,omitempty"`
+}
+
+type chatToolFunction struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	Parameters  json.RawMessage `json:"parameters,omitempty"`
+}
+
+type chatTool struct {
+	Type     string           `json:"type"` // "function"
+	Function chatToolFunction `json:"function"`
 }
 
 type chatRequest struct {
 	Model    string        `json:"model"`
 	Messages []chatMessage `json:"messages"`
+	Tools    []chatTool    `json:"tools,omitempty"`
 }
 
 type chatResponse struct {
 	Choices []struct {
-		Message chatMessage `json:"message"`
+		Message struct {
+			Content   string         `json:"content"`
+			ToolCalls []chatToolCall `json:"tool_calls"`
+		} `json:"message"`
 	} `json:"choices"`
 	Usage struct {
 		PromptTokens     int `json:"prompt_tokens"`
@@ -76,18 +104,20 @@ type chatResponse struct {
 	} `json:"usage"`
 }
 
-// Complete sends a system+user prompt to the chat-completions endpoint and
-// returns the first choice's text plus the call's token usage (ADR 0006). It
-// propagates ctx (cancellation + deadline); a non-2xx response is a *StatusError;
+// Complete runs one round of the conversation with the available tools and
+// returns either the first choice's text or its tool-call requests, plus token
+// usage (ADR 0006/0011). It propagates ctx; a non-2xx response is a *StatusError;
 // network and decode failures are wrapped. The API key is never logged or
 // included in an error.
-func (c *Client) Complete(ctx context.Context, system, user string) (core.Completion, error) {
+func (c *Client) Complete(ctx context.Context, messages []core.Message, tools []core.ToolDef) (core.Completion, error) {
+	reqMessages, err := toChatMessages(messages)
+	if err != nil {
+		return core.Completion{}, err
+	}
 	body, err := json.Marshal(chatRequest{
-		Model: c.cfg.Model,
-		Messages: []chatMessage{
-			{Role: "system", Content: system},
-			{Role: "user", Content: user},
-		},
+		Model:    c.cfg.Model,
+		Messages: reqMessages,
+		Tools:    toChatTools(tools),
 	})
 	if err != nil {
 		return core.Completion{}, fmt.Errorf("model: marshal request: %w", err)
@@ -119,14 +149,78 @@ func (c *Client) Complete(ctx context.Context, system, user string) (core.Comple
 	if len(out.Choices) == 0 {
 		return core.Completion{}, errors.New("model: response contained no choices")
 	}
+	msg := out.Choices[0].Message
+	toolCalls, err := fromChatToolCalls(msg.ToolCalls)
+	if err != nil {
+		return core.Completion{}, err
+	}
 	return core.Completion{
-		Text: out.Choices[0].Message.Content,
+		Text:      msg.Content,
+		ToolCalls: toolCalls,
 		Usage: core.Usage{
 			PromptTokens:     out.Usage.PromptTokens,
 			CompletionTokens: out.Usage.CompletionTokens,
 			TotalTokens:      out.Usage.TotalTokens,
 		},
 	}, nil
+}
+
+// toChatMessages maps the neutral conversation to the wire format. An assistant
+// turn's tool calls and a tool turn's tool_call_id must round-trip so the
+// endpoint can correlate results to requests.
+func toChatMessages(messages []core.Message) ([]chatMessage, error) {
+	out := make([]chatMessage, 0, len(messages))
+	for _, m := range messages {
+		cm := chatMessage{Role: string(m.Role), Content: m.Content, ToolCallID: m.ToolCallID}
+		for _, tc := range m.ToolCalls {
+			args, err := json.Marshal(tc.Arguments)
+			if err != nil {
+				return nil, fmt.Errorf("model: marshal tool-call args: %w", err)
+			}
+			cm.ToolCalls = append(cm.ToolCalls, chatToolCall{
+				ID:       tc.ID,
+				Type:     "function",
+				Function: chatFunctionCall{Name: tc.Name, Arguments: string(args)},
+			})
+		}
+		out = append(out, cm)
+	}
+	return out, nil
+}
+
+// toChatTools maps the tool definitions to the wire format, passing each tool's
+// JSON Schema through as the function parameters.
+func toChatTools(tools []core.ToolDef) []chatTool {
+	if len(tools) == 0 {
+		return nil
+	}
+	out := make([]chatTool, 0, len(tools))
+	for _, t := range tools {
+		out = append(out, chatTool{
+			Type:     "function",
+			Function: chatToolFunction{Name: t.Name, Description: t.Description, Parameters: t.Schema},
+		})
+	}
+	return out
+}
+
+// fromChatToolCalls parses the model's tool-call requests, decoding each
+// function's JSON-string arguments into a map for the tool call.
+func fromChatToolCalls(calls []chatToolCall) ([]core.ToolCall, error) {
+	if len(calls) == 0 {
+		return nil, nil
+	}
+	out := make([]core.ToolCall, 0, len(calls))
+	for _, c := range calls {
+		args := map[string]any{}
+		if a := strings.TrimSpace(c.Function.Arguments); a != "" {
+			if err := json.Unmarshal([]byte(a), &args); err != nil {
+				return nil, fmt.Errorf("model: decode tool-call args for %q: %w", c.Function.Name, err)
+			}
+		}
+		out = append(out, core.ToolCall{ID: c.ID, Name: c.Function.Name, Arguments: args})
+	}
+	return out, nil
 }
 
 // compile-time assertion that Client satisfies core.Model.

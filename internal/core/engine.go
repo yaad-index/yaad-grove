@@ -12,6 +12,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 )
@@ -105,22 +106,68 @@ type Usage struct {
 	TotalTokens      int
 }
 
-// Completion is a model call's result: the generated text plus the token usage.
-// Usage travels with the text so the model-call path can Record actual spend
-// against the ceiling (ADR 0006) — the meter needs the real usage, known only
-// from the response.
+// Completion is a model call's result. It is either a final answer (Text) or a
+// request to run one or more tools (ToolCalls) — never both meaningfully; the
+// engine loops, running the tools and calling again, until the model returns
+// text (ADR 0011). Usage travels with it so the model-call path can Record actual
+// spend against the ceiling (ADR 0006).
 type Completion struct {
-	Text  string
-	Usage Usage
+	Text      string
+	ToolCalls []ToolCall
+	Usage     Usage
 }
 
-// Model is an OpenAI-compatible chat completion model. The engine depends only
-// on this interface; the concrete client (endpoint, key, model name from
-// config) lives in internal/model and can be any OpenAI-shaped provider. Complete
-// returns the generated text and the call's token usage (ADR 0006).
-type Model interface {
-	Complete(ctx context.Context, system, user string) (Completion, error)
+// Role is a conversation turn's author in the model exchange.
+type Role string
+
+const (
+	RoleSystem    Role = "system"
+	RoleUser      Role = "user"
+	RoleAssistant Role = "assistant"
+	RoleTool      Role = "tool"
+)
+
+// Message is one turn in the model conversation. Assistant turns may carry
+// ToolCalls (the model's tool requests); tool turns carry a ToolCallID naming the
+// request they answer — the two must correlate (ADR 0011).
+type Message struct {
+	Role       Role
+	Content    string
+	ToolCalls  []ToolCall
+	ToolCallID string
 }
+
+// ToolDef is a callable tool advertised to the model: its name, a description,
+// and the JSON Schema for its arguments. The schema is passed through to the
+// model as-is; the MCP server validates arguments on its end (no client-side
+// schema handling — ADR 0011).
+type ToolDef struct {
+	Name        string
+	Description string
+	Schema      json.RawMessage
+}
+
+// ToolCall is the model's request to invoke a tool with arguments.
+type ToolCall struct {
+	ID        string
+	Name      string
+	Arguments map[string]any
+}
+
+// Model is an OpenAI-compatible chat model. The engine depends only on this
+// interface; the concrete client lives in internal/model. Complete runs one
+// round of the conversation with the available tools and returns either a final
+// text answer or the tools the model wants to call, plus the call's usage.
+type Model interface {
+	Complete(ctx context.Context, messages []Message, tools []ToolDef) (Completion, error)
+}
+
+// ErrToolUnavailable marks a tool *call* that failed at the transport level (a
+// dead MCP session, a broken RPC) rather than a tool that ran and reported an
+// error. The engine aborts the loop on it — it is infrastructure the model can't
+// reason its way around — whereas a tool-reported failure is fed back as content
+// so the model can adapt (ADR 0011).
+var ErrToolUnavailable = errors.New("core: tool call unavailable")
 
 // Chunk is a retrieved piece of the curated vault, with its source for
 // attribution in the answer.
@@ -141,9 +188,11 @@ type Retriever interface {
 // config lists which MCP servers to connect. Their tools become this bot's
 // tools, scoped per instance (ADR 0001).
 type Tools interface {
-	// List names the callable tools, for prompt construction and scoping.
-	List() []string
-	// Call invokes a named tool with JSON-ish arguments and returns its result.
+	// Defs returns the callable tool definitions to advertise to the model.
+	Defs() []ToolDef
+	// Call invokes a named tool with arguments and returns its text result. A
+	// transport-level failure (dead session) wraps ErrToolUnavailable; a
+	// tool-reported failure is an ordinary error.
 	Call(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
@@ -175,51 +224,99 @@ const RefusalToken = "%%OUT_OF_SCOPE%%"
 // leaks prompt internals.
 const outOfScopeReply = "That's outside what I can answer from my curated sources."
 
-// Answer grounds q on the retrieved vault context and returns a Reply, or a
-// refusal when it can't be grounded (ADR 0008). The flow: retrieve -> if nothing
-// grounds it, refuse without a model call -> else assemble the grounded prompt
-// (scope + chunks) and complete -> if the model signals out-of-scope, refuse.
+// maxToolIterations caps the tool-call loop: the model may call tools up to this
+// many rounds before Answer gives up and refuses. It bounds a stuck or looping
+// model; the spend ceiling (ADR 0006) is the cost backstop across the rounds.
+const maxToolIterations = 5
+
+// Answer grounds q on the retrieved vault context — extended, when the query is
+// in-domain, by tools the model may call — and returns a Reply, or a refusal when
+// it is out of scope or cannot be grounded (ADR 0008/0011).
 //
-// The engine depends only on its interfaces (ADR 0001): the spend ceiling is
-// applied by a metered Model decorator (ADR 0006/0008), and the consent gate runs
-// ahead of Answer at the runtime boundary (ADR 0007) — neither lives here.
+// The flow: retrieve -> assemble the grounded prompt (scope + chunks) -> loop:
+// complete with the tool set; if the model requests tools, run them and feed the
+// results back as scoped context, then complete again; when the model returns
+// text, refuse on the sentinel else answer. The loop is capped.
 //
-// Tool calls are a documented seam: the engine carries a Tools registry, but the
-// MCP call loop lands with the transport/tools unit; Answer is retrieval-grounded
-// for now.
+// The tool <-> grounding boundary (ADR 0011): tool results enter as scoped,
+// attributed context, never as authority. The scope prompt keys refusal on the
+// instance's DOMAIN, not on whether some context happens to cover the query — so
+// a tool can ground an in-domain answer the vault lacks, but can never widen what
+// is in scope. The refusal sentinel fires the same as ever.
+//
+// The engine depends only on its interfaces (ADR 0001): the spend ceiling is a
+// metered Model decorator (ADR 0006/0008) and the consent gate runs ahead of
+// Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	chunks, err := e.retriever.Retrieve(ctx, q.Text)
 	if err != nil {
 		return Reply{}, err
 	}
-	// Empty-grounding short-circuit: nothing to ground on -> refuse without
-	// spending a model call.
-	if len(chunks) == 0 {
+	tools := e.tools.Defs()
+	// Nothing to ground on and no tool that could: refuse without a model call.
+	if len(chunks) == 0 && len(tools) == 0 {
 		return Reply{Text: outOfScopeReply, Refused: true}, nil
 	}
 
-	completion, err := e.model.Complete(ctx, groundedSystemPrompt(e.scope, chunks), q.Text)
-	if err != nil {
-		return Reply{}, err
+	messages := []Message{
+		{Role: RoleSystem, Content: groundedSystemPrompt(e.scope, chunks, len(tools) > 0)},
+		{Role: RoleUser, Content: q.Text},
 	}
-	// Model-signalled refusal: the scope prompt asks the model to emit the
-	// sentinel when the context can't answer.
-	if strings.Contains(completion.Text, RefusalToken) {
-		return Reply{Text: outOfScopeReply, Refused: true}, nil
+
+	for i := 0; i < maxToolIterations; i++ {
+		completion, err := e.model.Complete(ctx, messages, tools)
+		if err != nil {
+			return Reply{}, err
+		}
+		if len(completion.ToolCalls) == 0 {
+			// Final answer. The scope prompt emits the sentinel for out-of-domain
+			// (or ungroundable) queries — refuse then, never leaking prompt internals.
+			if strings.Contains(completion.Text, RefusalToken) {
+				return Reply{Text: outOfScopeReply, Refused: true}, nil
+			}
+			return Reply{Text: completion.Text}, nil
+		}
+
+		// The model wants tools: record its request, run each, and append the
+		// results as scoped tool context for the next round.
+		messages = append(messages, Message{Role: RoleAssistant, ToolCalls: completion.ToolCalls})
+		for _, tc := range completion.ToolCalls {
+			result, err := e.tools.Call(ctx, tc.Name, tc.Arguments)
+			if err != nil {
+				if errors.Is(err, ErrToolUnavailable) {
+					// A transport failure is not something the model can reason around.
+					return Reply{}, err
+				}
+				// A tool that ran and failed feeds its failure back so the model adapts.
+				result = "tool error: " + err.Error()
+			}
+			messages = append(messages, Message{Role: RoleTool, ToolCallID: tc.ID, Content: result})
+		}
 	}
-	return Reply{Text: completion.Text}, nil
+
+	// The loop hit its cap without a final answer — refuse rather than hang.
+	return Reply{Text: outOfScopeReply, Refused: true}, nil
 }
 
-// groundedSystemPrompt assembles the scope statement, the refusal contract, and
-// the retrieved chunks (each tagged with its Source for citation) into the system
-// message (ADR 0008). Plain, deterministic assembly — chunks in the order the
-// retriever ranked them.
-func groundedSystemPrompt(scope string, chunks []Chunk) string {
+// groundedSystemPrompt assembles the scope statement, the refusal contract, the
+// retrieved chunks (each tagged with its Source for citation), and — when tools
+// are available — the tool-grounding rule into the system message (ADR 0008/0011).
+//
+// The refusal contract is domain-anchored: the model answers only questions about
+// the instance's scope/domain and emits the sentinel for anything outside it,
+// even if a tool or the context provides information about it. That is what keeps
+// tools from widening scope.
+func groundedSystemPrompt(scope string, chunks []Chunk, hasTools bool) string {
 	var b strings.Builder
 	b.WriteString(strings.TrimSpace(scope))
-	b.WriteString("\n\nAnswer using ONLY the CONTEXT below, and cite the [source] tags you rely on. " +
-		"If the context does not contain the answer, reply with exactly " + RefusalToken + " and nothing else.\n\n" +
-		"CONTEXT:\n")
+	b.WriteString("\n\nAnswer ONLY questions within the scope above. For anything outside that scope, reply with exactly " +
+		RefusalToken + " and nothing else — even if the CONTEXT or a tool provides information about it. " +
+		"For an in-scope question, answer using the CONTEXT below")
+	if hasTools {
+		b.WriteString(" and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope)")
+	}
+	b.WriteString(", and cite the [source] tags you rely on. If you cannot ground an in-scope answer, reply with exactly " +
+		RefusalToken + " and nothing else.\n\nCONTEXT:\n")
 	for _, c := range chunks {
 		b.WriteString("\n[" + c.Source + "]\n")
 		b.WriteString(strings.TrimSpace(c.Text))
