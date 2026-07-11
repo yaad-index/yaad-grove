@@ -83,7 +83,11 @@ func (s *Semantic) Retrieve(ctx context.Context, query string) ([]core.Chunk, er
 	}
 	var hits []ranked
 	for i, v := range s.vectors {
-		if sim := cosine(qv[0], v); sim >= s.threshold {
+		sim := cosine(qv[0], v)
+		// threshold <= 0 is "no floor" (brain-judges, ADR 0017): every chunk reaches
+		// the model, ranked — even a negative-cosine one — so a non-empty vault is
+		// never empty. A positive floor filters normally.
+		if s.threshold <= 0 || sim >= s.threshold {
 			hits = append(hits, ranked{i, sim})
 		}
 	}

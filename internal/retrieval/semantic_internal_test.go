@@ -74,6 +74,23 @@ func TestSemanticRetrieveThresholdZeroReturnsTopK(t *testing.T) {
 	assert.Equal(t, "c0", got[0].Text)
 }
 
+// threshold=0 is "no floor": even a chunk with negative cosine is returned, so a
+// non-empty vault is never empty in brain-judges mode (ADR 0017 contract).
+func TestSemanticThresholdZeroIncludesNegativeSim(t *testing.T) {
+	s := &Semantic{
+		embedder:  &fakeEmb{byText: map[string][]float32{"q": {1, 0}}},
+		maxChunks: 8,
+		threshold: 0,
+		chunks:    []core.Chunk{{Source: "p", Text: "pos"}, {Source: "n", Text: "neg"}},
+		vectors:   [][]float32{{1, 0}, {-1, 0}}, // cosines to q=[1,0]: +1 and -1
+	}
+	got, err := s.Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	require.Len(t, got, 2, "no floor returns even the negative-cosine chunk")
+	assert.Equal(t, "pos", got[0].Text, "still ranked by similarity")
+	assert.Equal(t, "neg", got[1].Text)
+}
+
 // MaxChunks caps the result even when more clear the threshold.
 func TestSemanticRetrieveCap(t *testing.T) {
 	s := fixtureSemantic(0, 1)
