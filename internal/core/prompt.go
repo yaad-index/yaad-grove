@@ -1,6 +1,7 @@
 package core
 
 import (
+	"log/slog"
 	"strings"
 	"text/template"
 )
@@ -65,6 +66,9 @@ func renderPrompt(tmpl *template.Template, query, persona, scope string, history
 	}
 	var b strings.Builder
 	if err := tmpl.Execute(&b, data); err != nil {
+		// The grounding contract is safe (the default still renders), but a custom
+		// template silently misapplied is worth surfacing so it's diagnosable.
+		slog.Warn("prompt template execution failed; using the embedded default", "err", err)
 		var fb strings.Builder
 		_ = defaultPromptTemplate.Execute(&fb, data)
 		return fb.String()
