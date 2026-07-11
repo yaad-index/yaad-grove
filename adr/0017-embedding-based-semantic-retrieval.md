@@ -40,9 +40,9 @@ An OpenAI-compatible `/embeddings` endpoint, mirroring the chat-model config —
 - **`--embedding-base-url` and `--embedding-model` are set together as a pair.** Both present → semantic mode (the opt-in). Both absent → keyword (default). An **incomplete pair** (one without the other) → **startup-fatal** ("both required together"), the same posture as the chat-model pair. There is **no default embedding model and none is needed** — you are in semantic mode precisely because you named the model, so there is never a blank-field-blocks-startup surprise.
 - **Recommended pairs (documented, copy-paste starting points — not defaults):**
   - OpenAI-compatible endpoint → **`text-embedding-3-large`** (strong multilingual, same key path).
-  - host-local → **`multilingual-e5-large`** via an Ollama endpoint.
+  - host-local → **`bge-m3`** via an Ollama `/v1` endpoint — multilingual (100+ languages incl. Persian), 1024-dim, and the embedder used for the empirical calibration below (validated end-to-end against the real failing query). A local Ollama endpoint needs no auth, so the key env can be any placeholder (or the model-key fallback). Note: `nomic-embed-text` is English-only — unsuitable for the multilingual goal.
 
-The default embedder should be multilingual; both recommendations are.
+The recommended embedder should be multilingual; both above are.
 
 ## Vector store
 
@@ -59,14 +59,36 @@ The default embedder should be multilingual; both recommendations are.
 - **Startup index build, endpoint unreachable → fatal.** Semantic was opted into but can't index — a deployment error, fail loud (same posture as `--persona-file`).
 - **Query-time embedding failure (mid-session) → fall back to keyword for that query + `slog.Warn`.** Keyword is the resilience net; a transient endpoint blip degrades to language-blind retrieval, never total failure.
 
-## Similarity threshold and top-k
+## Ranking, the threshold, and the pre-model block — OPEN DECISION for the gate
 
-- Reuse the current top-k (8).
-- **`--similarity-threshold` is configurable with a conservative default** (not hardcoded). It is load-bearing: too tight → empty retrieval → the grounding short-circuit fires when it shouldn't; too loose → noise fed to the model. Conservative default, operator-tunable.
+Top-k is reused (k=8). The similarity **threshold is not merely a recall knob — it is what lets the semantic retriever ever return "empty," and thus what keeps the pre-model grounding block alive.** A top-k retriever with *no* floor never returns empty for a non-empty vault: it always hands back k chunks, so the refuse-**without**-a-model-call short-circuit (the load-bearing block ADR 0008/0011 and the "dumb bot blocks before the brain" principle rely on) **never fires in semantic mode** — every off-topic query reaches the model and grounding falls entirely to the model's scope-refusal (`%%OUT_OF_SCOPE%%`). This is exactly the "block early vs. let the brain judge" fork — an architecture decision reserved for the gate, not an implementation default. Two coherent designs:
 
-## Grounding guarantee — preserved (load-bearing)
+- **(1) Conservative floor (~0.30) + top-k — RECOMMENDED.** A best match below the floor → empty → the hard block fires *before* the model. Preserves the pre-model block. The empirical floor makes over-refusal a non-issue.
+- **(2) top-k only, no floor.** Everything reaches the model; grounding is the model's scope-refusal only. Matches the "let the brain judge" musing; costs a model call per off-topic query; a weaker, more injection-exposed block.
 
-Retrieval returns top-k chunks **above the similarity threshold**; if nothing clears it, the existing refuse-without-a-model-call short-circuit fires unchanged. The threshold makes "empty result" mean *genuinely nothing relevant*, not "keyword whiffed" — embeddings make the block fire only when there is truly no match. The block stays exactly as is.
+`--similarity-threshold` is the knob either way (conservative default under (1); unset/0 under (2)).
+
+### Empirical calibration (decision-grade)
+
+Measured with `bge-m3` (a multilingual embedder) on the real Persian query vs. real vault content, cosine similarity:
+
+| pair | cosine |
+|---|---|
+| Persian query ↔ on-topic English doc | **0.43** |
+| English query ↔ on-topic English doc | 0.70 |
+| Persian query ↔ unrelated decoy | **0.23** |
+| Persian query ↔ English query (same meaning) | 0.54 |
+
+Cross-language valid matches (~0.43) sit well below same-language (~0.70) but clearly above noise (~0.23). A floor tuned for same-language (0.5+) would re-introduce over-refusal for the exact Persian case this ADR fixes. **A ~0.30 floor is the safe value** — above noise, below cross-language valid — which is why (1)'s default is 0.30, not 0.5.
+
+## Grounding guarantee — preserved (mechanism depends on the fork)
+
+The guarantee holds under both designs, but the *mechanism* differs and is the crux of the fork:
+
+- Under **(1)**, retrieval returns top-k chunks above the floor; nothing above the floor → empty → the existing refuse-without-a-model-call short-circuit fires unchanged, so the block is genuinely pre-model.
+- Under **(2)**, semantic retrieval is never empty for a non-empty vault, so the pre-model short-circuit is effectively bypassed and the model's in-prompt scope-refusal (ADR 0008 sentinel) carries the whole guarantee.
+
+Either way a query embed failure that falls back to keyword can still yield empty → refuse. The recommendation (1) keeps the pre-model block load-bearing.
 
 ## Budget (ADR 0006)
 
