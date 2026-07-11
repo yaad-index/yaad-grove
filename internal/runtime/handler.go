@@ -14,15 +14,8 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
-// Phase-1 reply copy. Constants for now; a later config pass can override. The
-// consent prompt is deliberately honest and short: it says the bot answers from a
-// curated knowledge base, that continuing opts the user in, and that a minimal
-// record is kept to do so.
+// Phase-1 reply copy. Constants for now; a later config pass can override.
 const (
-	consentPromptText = "Hi — I answer questions from a curated knowledge base. " +
-		"If you keep chatting with me, you're opting in, and I'll keep a minimal record " +
-		"(just enough to remember your choice), never the content of your messages until you do. " +
-		"Reply to continue, or ignore this if you'd rather not."
 	refuseText      = "Sorry, I can't help with that here."
 	rateLimitedText = "You've hit the rate limit — please try again shortly."
 	atCapacityText  = "I'm at capacity right now — please try again a little later."
@@ -43,11 +36,11 @@ const (
 	callbackFailedText      = "That didn't go through — please try again."
 )
 
-// checker is the access/consent gate the handler runs ahead of the engine; the
-// concrete *acl.Gate satisfies it. It is an interface so the handler's
+// checker is the group access/consent gate the handler runs ahead of the engine;
+// the concrete *acl.Gate satisfies it. It is an interface so the handler's
 // decision-mapping is unit-testable with a mock gate.
 type checker interface {
-	Check(ctx context.Context, user core.User, surface core.Surface) (acl.Decision, error)
+	Check(ctx context.Context, in acl.GateInput) (acl.Decision, error)
 }
 
 // answerer is the engine the handler serves through; the concrete *core.Engine
@@ -65,57 +58,67 @@ type authorizer interface {
 }
 
 // NewHandler builds the transport.Handler the runtime hands to every transport
-// (ADR 0007/0008): the boundary where the access/consent gate runs *ahead* of the
-// engine, and each gate decision becomes a reply — or silence. The gate is always
-// consulted first; the engine is only ever reached on DecideServe.
+// (ADR 0008/0012): the boundary that routes a message by surface and turns each
+// gate decision into a reply — or silence.
+//
+// Surfaces split (ADR 0012). A DM is answered only for an admin (a private
+// one-to-one, never logged); every other DM is consent management only, never a
+// query. A group message goes through the consent gate, which decides from the
+// user's consent and whether the message is directed at the bot: answer+log,
+// log-only, a consent nudge, or nothing.
 //
 // A button click (in.Callback set) takes a separate path (ADR 0009): it resolves
 // the token, re-authorizes the acting subject against the verb's required tier,
 // and executes — it is not a model query, so it never touches the engine.
 // callbacks may be nil for a text-only bot; a click then can't be resolved and is
 // treated as expired.
-func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log, consent consenter) transport.Handler {
+func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log, consent consenter, policy Policy) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
 		if in.Callback != nil {
 			return resolveCallback(ctx, callbacks, registry, authz, in), nil
 		}
-		// DM consent management (ADR 0012): the non-admin DM surface is consent-only
-		// — it never answers a query, only opts in / shows status. Admin DM answering
-		// is wired ahead of this in unit (d). A nil consenter disables the flow (the
-		// gate handles the DM instead), keeping a text-only bot working.
+		// DM routing (ADR 0012): admin → answered by the engine; anyone else → the
+		// consent flow (opt in / status), never a query. A nil consenter means no
+		// consent surface is wired (a text-only bot), so a DM falls through to the
+		// gate below rather than being dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
+			if policy.Admins.IsAdmin(in.User.ID) {
+				return answer(ctx, engine, in)
+			}
 			return dmConsentFlow(ctx, consent, in), nil
 		}
-		decision, err := gate.Check(ctx, in.User, in.Surface)
+
+		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})
 		if err != nil {
 			// Fail closed: never serve on an unknown gate state.
 			slog.Warn("consent gate check failed; refusing", "err", err)
 			return core.Reply{Text: refuseText, Refused: true}, nil
 		}
 
+		// Consent-gated logging (ADR 0004/0012): every consented group message is
+		// recorded — the answered directed one, the ambient log-only one, and even a
+		// rate-limited one (still consented content). Directedness changes the reply,
+		// not whether we log. Unconsented decisions (nudge/silent) and a store-error
+		// refuse record nothing, holding ADR 0002's "record nothing without consent".
+		// Logged before the reply so an Answer error still captures the message; a
+		// log failure warns and never fails the reply.
+		switch decision {
+		case acl.DecideServe, acl.DecideLogOnly, acl.DecideRateLimited:
+			logServed(ctx, qlog, in)
+		}
+
 		switch decision {
 		case acl.DecideServe:
-			// Consent-gated logging (ADR 0004): DecideServe is the ONLY path where
-			// consent is confirmed, so it is the only place a message is recorded —
-			// ADR 0002's "record nothing without consent" is enforced by this
-			// placement. Logged before answering so an Answer error still captures
-			// the message; a log failure warns and never fails the reply.
-			logServed(ctx, qlog, in)
-			reply, aerr := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text})
-			if aerr != nil {
-				if errors.Is(aerr, budget.ErrOverBudget) {
-					// The spend ceiling was hit mid-call — degrade gracefully, don't crash.
-					return core.Reply{Text: atCapacityText, Refused: true}, nil
-				}
-				return core.Reply{}, aerr
-			}
-			return reply, nil
-		case acl.DecideAskConsent:
-			return core.Reply{Text: consentPromptText}, nil
+			return answer(ctx, engine, in)
+		case acl.DecideLogOnly:
+			// Consented ambient chatter: logged above, no reply.
+			return core.Reply{Silent: true}, nil
+		case acl.DecideNudge:
+			return nudgeReply(policy.Nudge), nil
 		case acl.DecideRateLimited:
 			return core.Reply{Text: rateLimitedText}, nil
 		case acl.DecideSilent:
-			// Throttled-unconsented (ADR 0007): send nothing at all.
+			// Unconsented ambient chatter: nothing at all.
 			return core.Reply{Silent: true}, nil
 		case acl.DecideRefuse:
 			return core.Reply{Text: refuseText, Refused: true}, nil
@@ -127,10 +130,33 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 	}
 }
 
-// logServed appends a consented message to the quarantine log (ADR 0004). It is
-// called only from the DecideServe branch — consent is confirmed there. A nil log
-// disables logging; a log failure is warned, never surfaced, so it can't break a
-// reply the user is owed.
+// answer runs the engine and maps its outcome to a reply: a spend-ceiling breach
+// (ADR 0006) degrades to a capacity notice rather than crashing; any other error
+// propagates. Shared by the group serve path and the admin-DM path.
+func answer(ctx context.Context, engine answerer, in transport.Inbound) (core.Reply, error) {
+	reply, err := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text})
+	if err != nil {
+		if errors.Is(err, budget.ErrOverBudget) {
+			return core.Reply{Text: atCapacityText, Refused: true}, nil
+		}
+		return core.Reply{}, err
+	}
+	return reply, nil
+}
+
+// nudgeReply renders the consent nudge for an unconsented directed message (ADR
+// 0012). This cut delivers message-mode; reaction-mode arrives with the
+// transport reaction path, so a reaction-configured nudge degrades to the message
+// text here rather than dropping the opt-in instruction.
+func nudgeReply(n Nudge) core.Reply {
+	return core.Reply{Text: n.resolve().Text}
+}
+
+// logServed appends a consented group message to the quarantine log (ADR
+// 0004/0012). The caller invokes it only for consent-confirmed decisions
+// (serve / log-only / rate-limited), so consent is established before this runs.
+// A nil log disables logging; a log failure is warned, never surfaced, so it
+// can't break a reply the user is owed.
 func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
 	// Group-only (ADR 0004): the growth corpus is community chatter. A served DM is
 	// a private one-to-one exchange (typically an admin), not community content, so

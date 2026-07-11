@@ -1,20 +1,24 @@
 // Package acl is access control and consent: the gates that decide whether a
 // query is served at all, and the persistent per-user state behind them.
 //
-// The model, decided for Phase 1 (ADR 0001):
+// The model (ADR 0012, amending 0002/0003/0007):
 //
-//   - Consent is a HARD gate on the whole interaction. With no consent the
-//     bot's only response is a consent prompt — it does not answer the query
-//     and it records nothing the user said. Message content is never persisted
-//     without consent; only the minimal ACL row (id + consent flag + rate
-//     counter) is kept, so the bot can remember the state and throttle the
-//     reminder.
-//   - Two surfaces, different reach. A group member may talk to the bot
-//     (membership is the boundary). A DM is served only if an admin has
-//     explicitly approved that user; everyone else DMing gets a refusal.
+//   - Consent is the gate for BOTH being answered and being logged. It is
+//     granted explicitly and privately — via the DM opt-in button or the
+//     `/consent` command — never inferred from group messages. The store keeps
+//     only the minimal ACL row (id + consent flag + tier + rate counter); no
+//     message content is persisted without consent.
+//   - This gate decides a GROUP message by whether it is directed at the bot: a
+//     directed message from a consented user is answered (and logged), a
+//     directed message from an unconsented user draws a consent nudge, ambient
+//     chatter from a consented user is logged silently, and ambient chatter from
+//     an unconsented user is ignored. Only directed messages ever draw a reply,
+//     so a nudge cannot flood the group.
+//   - The DM surface is routed by the runtime, not here: an admin DM is answered
+//     by the engine, a non-admin DM is consent management only. Admins are a
+//     config allowlist (a DM-surface privilege), so this gate never sees them.
 //   - Layered policy: per-user override > named tier > instance default.
-//   - Admins configure all of this live by talking to the bot; the store
-//     survives restarts.
+//   - The store survives restarts, so consent and tier assignments are durable.
 package acl
 
 import (
@@ -52,14 +56,10 @@ type Record struct {
 	UserID  string
 	Tier    Tier
 	Consent Consent
-	// DMApproved is the admin allowlist flag for direct messages. Irrelevant in
-	// groups (membership is the boundary there).
-	DMApproved bool
 	// RateCount / RateWindowStart back a simple per-user rate limit; the global
 	// spend ceiling is the real backstop and lives in the runtime.
 	RateCount       int
 	RateWindowStart time.Time
-	LastPromptedAt  time.Time // throttles the consent reminder
 }
 
 // Store persists Record state and survives restarts. Phase 1 intends a bbolt
@@ -78,25 +78,31 @@ type Store interface {
 type Decision int
 
 const (
-	// DecideServe: all gates pass — answer the query (and log, since serving
-	// implies consent granted).
+	// DecideServe: consented and directed at the bot — answer the query (and log
+	// it, since serving implies consent).
 	DecideServe Decision = iota
-	// DecideAskConsent: no consent yet — reply only with the consent prompt,
-	// record nothing the user said.
-	DecideAskConsent
-	// DecideRefuse: not permitted here (e.g. an unapproved DM) — refuse.
+	// DecideLogOnly: consented ambient chatter — log it to the growth corpus with
+	// no reply (ADR 0004/0012). Not answered, not rate-counted.
+	DecideLogOnly
+	// DecideNudge: unconsented but directed at the bot — deliver the configurable
+	// consent nudge (ADR 0012), never an answer, and log nothing.
+	DecideNudge
+	// DecideRefuse: not permitted — refuse. The fail-closed outcome on a store
+	// error.
 	DecideRefuse
-	// DecideRateLimited: over the user's limit — a polite "try again shortly".
+	// DecideRateLimited: consented and directed but over the user's rate allowance
+	// — a polite "try again shortly".
 	DecideRateLimited
-	// DecideSilent: no consent, and the consent prompt is within its throttle
-	// window — reply nothing at all (ADR 0007). The gate owns the throttle, so the
-	// transport just renders this as no reply.
+	// DecideSilent: unconsented ambient chatter — reply nothing and log nothing
+	// (ADR 0012). The transport renders this as no reply.
 	DecideSilent
 )
 
-// Gate stacks the access checks in order: surface reach (group membership vs DM
-// admin-approval) -> consent -> rate limit -> serve (ADR 0007). It is the single
-// place that decides whether the engine ever sees a query.
+// Gate decides a group message from a user's consent and the message's
+// directedness: consent -> (directed) rate limit -> serve, or log / nudge /
+// ignore (ADR 0012). It is the single place that decides whether the engine ever
+// sees a group query. DM routing is the runtime's job (admin answering vs
+// consent management), so the gate never handles a DM.
 type Gate struct {
 	store   Store
 	defTier Tier
@@ -107,12 +113,9 @@ func NewGate(store Store, defaultTier Tier) *Gate {
 	return &Gate{store: store, defTier: defaultTier}
 }
 
-// Access-control windows (ADR 0002/0003). Phase-1 defaults; the per-tier
-// allowances tune the rate limit.
+// Access-control windows (ADR 0003). The per-tier allowances tune the rate
+// limit.
 const (
-	// consentPromptThrottle is the minimum gap between consent reminders to an
-	// unconsented user; within it the gate stays silent (ADR 0007).
-	consentPromptThrottle = time.Hour
 	// rateWindow is the per-user rate-limit window.
 	rateWindow = time.Hour
 	// unlimitedRate marks a tier with no per-user rate cap.
@@ -145,46 +148,54 @@ func (g *Gate) resolveTier(rec Record) Tier {
 	return g.defTier
 }
 
-// Check resolves the layered policy for a user on a given surface and returns the
-// decision, in order surface-reach -> consent -> rate-limit -> serve (ADR 0007).
+// GateInput is a group message's gate query: who sent it and whether it is
+// directed at the bot (a reply-to-bot or an @mention) vs ambient chatter (ADR
+// 0012). It carries no message text — the gate never needs content to decide, so
+// ADR 0002's "record nothing the user said" guarantee holds at the type level.
+// It is a struct so a later dimension can be added without breaking callers.
+type GateInput struct {
+	User     core.User
+	Surface  core.Surface
+	Directed bool
+}
+
+// Check decides a group message (ADR 0012). Consent gates first: an unconsented
+// user directing a message at the bot draws a nudge, their ambient chatter is
+// ignored — neither is logged, and nothing they said is recorded. A consented
+// user's ambient chatter is logged (DecideLogOnly, no reply, not rate-counted);
+// a consented directed message is rate-limited and, under the allowance, served.
 //
-// It deliberately takes only the user and surface, never the message text: the
-// gate never needs content to decide, so ADR 0002's "record nothing the user
-// said" guarantee is enforced at the type level — the gate literally cannot see,
-// let alone retain, what the user wrote. Consent gates before the rate limit so
-// an unconsented user is never counted (they are bounded by the consent-prompt
-// throttle instead), extending that guarantee to the rate path. A store error at
-// any step fails closed (DecideRefuse) — never serve on an unknown state.
-func (g *Gate) Check(ctx context.Context, user core.User, surface core.Surface) (Decision, error) {
-	rec, err := g.store.Get(ctx, user.ID)
+// Directedness only changes the reply, never whether a consented message is
+// logged — the runtime logs on both DecideServe and DecideLogOnly, so every
+// consented group message reaches the growth corpus (ADR 0004), matching the DM
+// disclosure. A store error fails closed (DecideRefuse) — never serve on an
+// unknown state.
+func (g *Gate) Check(ctx context.Context, in GateInput) (Decision, error) {
+	rec, err := g.store.Get(ctx, in.User.ID)
 	if err != nil {
 		return DecideRefuse, err
 	}
 
-	// Surface reach (ADR 0003): a DM is served only to an admin-approved user; a
-	// group message is already membership-bounded upstream by the transport.
-	if surface == core.SurfaceDM && !rec.DMApproved {
-		return DecideRefuse, nil
-	}
-
-	// Consent hard gate (ADR 0002): anything but ConsentGranted is unconsented
-	// (unknown and declined collapse to the same "keep prompting" state). The only
-	// response is the consent prompt, throttled; nothing the user said is recorded.
+	// Consent gate (ADR 0012): consent is granted only via the DM flow, never
+	// inferred here. An unconsented user is nudged when they direct a message at
+	// the bot, and ignored otherwise; only a directed message draws a reply, so a
+	// nudge cannot flood the group. Nothing unconsented is recorded.
 	if rec.Consent != ConsentGranted {
-		now := time.Now()
-		if !rec.LastPromptedAt.IsZero() && now.Sub(rec.LastPromptedAt) < consentPromptThrottle {
-			return DecideSilent, nil // within the throttle window — say nothing
+		if in.Directed {
+			return DecideNudge, nil
 		}
-		rec.LastPromptedAt = now
-		if err := g.store.Put(ctx, rec); err != nil {
-			return DecideRefuse, err
-		}
-		return DecideAskConsent, nil
+		return DecideSilent, nil
 	}
 
-	// Rate limit (ADR 0003) — consented users only, per-user fairness. The global
-	// spend ceiling (ADR 0006) is the cost backstop, checked on the model-call
-	// path, not here.
+	// Consented ambient chatter is logged with no reply (ADR 0004/0012); it is not
+	// rate-counted because nothing is answered.
+	if !in.Directed {
+		return DecideLogOnly, nil
+	}
+
+	// Consented + directed: an answer. Rate limit for per-user fairness (ADR
+	// 0003); the global spend ceiling (ADR 0006) is the cost backstop, on the
+	// model-call path, not here.
 	allow := allowanceFor(g.resolveTier(rec))
 	now := time.Now()
 	if rec.RateWindowStart.IsZero() || now.Sub(rec.RateWindowStart) >= rateWindow {

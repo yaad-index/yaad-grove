@@ -89,6 +89,19 @@ type ServeCmd struct {
 	// vault (ADR 0004), so a later curation pass has data. The answering bot never
 	// reads it. Empty disables logging.
 	QuarantineLog string `name:"quarantine-log" default:"./quarantine.jsonl" help:"Path to the consent-gated community-message log (JSONL, append-only). Empty disables logging." type:"path"`
+
+	// Admins are the platform user ids answered in a DM (ADR 0012). Admin status is
+	// a DM-surface privilege only: in the group an admin is consent-gated like any
+	// member. Empty means no one can DM the bot for answers (the DM stays
+	// consent-management only for everyone).
+	Admins []string `name:"admin" help:"A platform user id with DM-answering privilege (repeatable). Admin is a DM-only privilege; in the group admins are consent-gated like anyone."`
+
+	// The consent nudge shown to an unconsented user who directs a message at the
+	// bot in a group (ADR 0012): a text reply (default) or an emoji reaction, with
+	// configurable copy/emoji. Empty text/emoji use sensible defaults.
+	NudgeMode  string `name:"nudge-mode" default:"message" enum:"message,reaction" help:"How to nudge an unconsented user who addresses the bot in a group: 'message' (text reply) or 'reaction' (emoji)."`
+	NudgeText  string `name:"nudge-text" help:"Message-mode nudge copy (the opt-in instruction). Empty uses a sensible default."`
+	NudgeEmoji string `name:"nudge-emoji" help:"Reaction-mode nudge emoji. Empty uses a sensible default (🤝)."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -176,12 +189,25 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	}
 	defer func() { _ = registry.Close() }()
 
+	// The surface-split answering policy (ADR 0012): the admin allowlist (DM
+	// answering) and the consent nudge for an unconsented user who addresses the
+	// bot in a group. Both are per-instance config.
+	policy := runtime.Policy{
+		Admins: runtime.NewAdminSet(c.Admins),
+		Nudge: runtime.Nudge{
+			Mode:  runtime.NudgeMode(c.NudgeMode),
+			Text:  c.NudgeText,
+			Emoji: c.NudgeEmoji,
+		},
+	}
+
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
 	// 0009/0010); the gate is the tier source, the re-authorizer, and the tier
-	// writer. The handler runs the consent gate ahead of the engine, records
-	// consented messages (ADR 0004), and resolves button clicks.
+	// writer. The handler routes by surface (ADR 0012): admin DMs answer, other
+	// DMs manage consent, group messages pass the consent gate; consented group
+	// messages are recorded (ADR 0004) and button clicks resolved.
 	actions := runtime.DefaultRegistry(gate)
-	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate)
+	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate, policy)
 
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
@@ -203,6 +229,8 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"callback_db", c.CallbackDB,
 		"callback_sweep", c.CallbackSweepInterval.String(),
 		"quarantine_log", quarantineState,
+		"admins", len(policy.Admins),
+		"nudge_mode", c.NudgeMode,
 		"mcp_servers", len(servers),
 		"tools", len(registry.Defs()),
 		"spend_remaining_tokens", meter.Remaining(),
