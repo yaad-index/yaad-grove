@@ -55,6 +55,16 @@ func TestToTelegramHTMLBlocks(t *testing.T) {
 	assert.Contains(t, code, "if a &lt; b {}")
 }
 
+// A Markdown link to a non-web destination (a vault file / relative path) is
+// de-linked to plain text — no dead <a> in Telegram — while a genuine http(s)
+// link stays clickable (#63 follow-up).
+func TestToTelegramHTMLDelinksNonWeb(t *testing.T) {
+	assert.Equal(t, "see the faq", toTelegramHTML("see [the faq](faq.md)"))
+	assert.Equal(t, "steps notes", toTelegramHTML("steps [notes](notes/a.md#Intro)"))
+	assert.Equal(t, `see <a href="https://x.y">docs</a>`, toTelegramHTML("see [docs](https://x.y)"))
+	assert.Contains(t, toTelegramHTML("[here](http://z)"), `<a href="http://z">here</a>`)
+}
+
 // Empty / whitespace-only input yields an empty string, so Send skips the HTML
 // attempt rather than sending an empty entity.
 func TestToTelegramHTMLEmpty(t *testing.T) {

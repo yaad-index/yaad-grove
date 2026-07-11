@@ -333,6 +333,13 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	if err != nil {
 		return Reply{}, err
 	}
+	// Server-side grounding trace (ADR 0008): the source tags never reach the user
+	// (they are internal, un-openable paths), so the sources that grounded an
+	// answer are recorded here instead — model-independent, straight from the
+	// retrieved chunks.
+	if len(chunks) > 0 {
+		slog.Info("grounding sources", "count", len(chunks), "sources", chunkSources(chunks))
+	}
 	tools := e.tools.Defs()
 	// Nothing to ground on, no tool that could, AND no conversation to meta-operate
 	// on: refuse without a model call. History is the exception — a meta follow-up
@@ -413,7 +420,7 @@ func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks [
 	if hasTools {
 		b.WriteString(" and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope)")
 	}
-	b.WriteString(", and cite the [source] tags you rely on. If you cannot ground an in-scope answer, decline the same way: " +
+	b.WriteString(". Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: " +
 		RefusalToken + " first, then a brief in-voice note.")
 	if hasPersona {
 		b.WriteString(" The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.")
@@ -472,4 +479,14 @@ func speakerLabel(t HistoryTurn) string {
 		return "assistant"
 	}
 	return t.Speaker
+}
+
+// chunkSources lists the source tags of the retrieved chunks, for the server-side
+// grounding trace (ADR 0008). Never user-facing.
+func chunkSources(chunks []Chunk) []string {
+	out := make([]string, len(chunks))
+	for i, c := range chunks {
+		out[i] = c.Source
+	}
+	return out
 }

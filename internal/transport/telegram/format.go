@@ -91,22 +91,31 @@ func (r *htmlRenderer) render(n ast.Node, entering bool) (ast.WalkStatus, error)
 			r.b.WriteByte('>')
 		}
 	case *ast.Link:
-		if entering {
-			r.b.WriteString(`<a href="`)
-			r.b.WriteString(html.EscapeString(string(n.Destination)))
-			r.b.WriteString(`">`)
-		} else {
-			r.b.WriteString("</a>")
+		// De-link a destination that isn't a real web URL (#63 follow-up): the model
+		// is told to ground on the vault's [source] tags but not surface them, yet it
+		// occasionally emits a Markdown link to a vault file — a dead link in Telegram
+		// (the vault isn't web-addressable). Keep genuine http(s) links clickable;
+		// render everything else as plain text (the link text still shows).
+		if isWebURL(string(n.Destination)) {
+			if entering {
+				r.b.WriteString(`<a href="`)
+				r.b.WriteString(html.EscapeString(string(n.Destination)))
+				r.b.WriteString(`">`)
+			} else {
+				r.b.WriteString("</a>")
+			}
 		}
 	case *ast.Image:
-		// Telegram can't inline an image via HTML in a text message; render the alt
-		// text (the node's children) as a link to the source.
-		if entering {
-			r.b.WriteString(`<a href="`)
-			r.b.WriteString(html.EscapeString(string(n.Destination)))
-			r.b.WriteString(`">`)
-		} else {
-			r.b.WriteString("</a>")
+		// Telegram can't inline an image via HTML; render the alt text as a link to a
+		// real http(s) source, or plain text for a non-web (dead) destination.
+		if isWebURL(string(n.Destination)) {
+			if entering {
+				r.b.WriteString(`<a href="`)
+				r.b.WriteString(html.EscapeString(string(n.Destination)))
+				r.b.WriteString(`">`)
+			} else {
+				r.b.WriteString("</a>")
+			}
 		}
 	case *ast.Heading:
 		// Telegram has no headings — render the line bold.
@@ -202,4 +211,12 @@ func (r *htmlRenderer) writeLines(n ast.Node) {
 		seg := lines.At(i)
 		r.b.WriteString(html.EscapeString(string(seg.Value(r.src))))
 	}
+}
+
+// isWebURL reports whether dest is an absolute http(s) URL — the only link
+// destinations Telegram can actually open. Bare filenames and relative paths
+// (dead vault refs) are not, so the renderer plain-texts them.
+func isWebURL(dest string) bool {
+	d := strings.ToLower(strings.TrimSpace(dest))
+	return strings.HasPrefix(d, "http://") || strings.HasPrefix(d, "https://")
 }

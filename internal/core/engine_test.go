@@ -65,6 +65,19 @@ func TestNoHistoryNoBlock(t *testing.T) {
 	assert.NotContains(t, systemOf(mdl), "RECENT CONVERSATION")
 }
 
+// The grounding instruction tells the model to ground on the [source] tags but
+// NOT surface them (their vault paths aren't user-openable); the old "cite the
+// [source] tags" instruction is gone (#63 follow-up).
+func TestSourcesNotSurfaced(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "faq.md", Text: "x"}}}
+	mdl := textModel("ok")
+	_, err := core.New(mdl, ret, nopTools{}, "SCOPE").Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	sys := systemOf(mdl)
+	assert.Contains(t, sys, "do NOT mention, cite, or link the source")
+	assert.NotContains(t, sys, "cite the [source] tags you rely on", "the old cite-the-sources instruction is gone")
+}
+
 type mockRetriever struct {
 	chunks []core.Chunk
 	err    error
