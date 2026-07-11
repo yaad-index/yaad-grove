@@ -21,6 +21,7 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
 	"github.com/go-telegram/bot"
 	"github.com/go-telegram/bot/models"
@@ -55,6 +56,11 @@ type Adapter struct {
 	// only ever reached from Run's dispatch, after Run has assigned it
 	// (happens-before the library's handler goroutines), so no lock is needed.
 	bot *bot.Bot
+	// botID and botUsername are the bot's own identity, fetched in Run, used to
+	// tell a message directed at the bot (reply-to-bot / @mention) from ambient
+	// chatter (ADR 0012). Set before Start, so the dispatch goroutines see them.
+	botID       int64
+	botUsername string
 }
 
 // New returns a Telegram adapter for cfg. callbacks is the pending-action store
@@ -129,6 +135,17 @@ func (a *Adapter) Run(ctx context.Context, handler transport.Handler) error {
 		return a.redact(err)
 	}
 	a.bot = b
+
+	// Fetch the bot's own identity, used to tell a directed message from ambient
+	// chatter (ADR 0012). Skipped in tests (which set the identity directly); a
+	// failure in production just leaves @mention/reply-to-bot detection off.
+	if !a.skipGetMe {
+		if me, err := b.GetMe(ctx); err == nil {
+			a.botID, a.botUsername = me.ID, me.Username
+		} else {
+			slog.Warn("telegram: could not fetch bot identity; directed detection limited", "err", a.redact(err))
+		}
+	}
 
 	// Drop the pre-online backlog: without this the library drains all updates
 	// queued while the bot was offline, so a user who messaged before boot gets
@@ -268,11 +285,48 @@ func (a *Adapter) toInbound(m *models.Message) (transport.Inbound, bool) {
 		return transport.Inbound{}, false
 	}
 	return transport.Inbound{
-		User:    userOf(m.From),
-		Surface: surface,
-		Text:    m.Text,
-		ReplyTo: strconv.FormatInt(m.Chat.ID, 10),
+		User:     userOf(m.From),
+		Surface:  surface,
+		Text:     m.Text,
+		ReplyTo:  strconv.FormatInt(m.Chat.ID, 10),
+		Directed: surface == core.SurfaceDM || a.isDirected(m),
 	}, true
+}
+
+// isDirected reports whether a group message is aimed at the bot: a reply to one
+// of the bot's messages, or an @mention / text-mention of it (ADR 0012). It needs
+// the bot's identity (set in Run); without it, only what can be matched matches.
+func (a *Adapter) isDirected(m *models.Message) bool {
+	if a.botID != 0 && m.ReplyToMessage != nil && m.ReplyToMessage.From != nil && m.ReplyToMessage.From.ID == a.botID {
+		return true
+	}
+	for _, e := range m.Entities {
+		switch e.Type {
+		case models.MessageEntityTypeMention:
+			// A text "@username" mention — compare the mentioned handle to the bot's.
+			if a.botUsername != "" && strings.EqualFold(entityText(m.Text, e.Offset, e.Length), "@"+a.botUsername) {
+				return true
+			}
+		case models.MessageEntityTypeTextMention:
+			// A mention that carries the user object directly (no @handle in text).
+			if a.botID != 0 && e.User != nil && e.User.ID == a.botID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// entityText extracts the substring a Telegram entity covers. Entity offsets and
+// lengths are in UTF-16 code units (not bytes or runes), so the text is measured
+// in UTF-16 to slice correctly even when earlier characters are multi-unit
+// (emoji, non-BMP) — a mention mid-message resolves correctly.
+func entityText(text string, offset, length int) string {
+	u := utf16.Encode([]rune(text))
+	if offset < 0 || length < 0 || offset+length > len(u) {
+		return ""
+	}
+	return string(utf16.Decode(u[offset : offset+length]))
 }
 
 // toCallbackInbound maps a callback_query to a callback inbound, or ok=false to
