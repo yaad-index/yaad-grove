@@ -19,6 +19,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf16"
@@ -329,7 +330,7 @@ func (a *Adapter) toInbound(m *models.Message) (transport.Inbound, bool) {
 	in := transport.Inbound{
 		User:       userOf(m.From),
 		Surface:    surface,
-		Text:       m.Text,
+		Text:       a.stripBotMentions(m.Text, m.Entities),
 		ReplyTo:    strconv.FormatInt(m.Chat.ID, 10),
 		Directed:   surface == core.SurfaceDM || a.isDirected(m),
 		MessageID:  strconv.Itoa(m.ID),
@@ -363,6 +364,43 @@ func (a *Adapter) isDirected(m *models.Message) bool {
 		}
 	}
 	return false
+}
+
+// stripBotMentions removes the bot's OWN @mention spans from text (ADR 0012
+// directed-detection reused): a directed message like "@thebot how can you help?"
+// must not carry the handle into the query, or the model answers the handle
+// instead of the question. Other users' mentions are left intact. Offsets and
+// lengths are UTF-16 units (like entityText), so spans are removed in UTF-16
+// space, highest-offset first so earlier offsets stay valid; the result is
+// trimmed. A mention-only message reduces to the empty string — the caller lets
+// it through so a bare ping still draws a reply rather than silence.
+func (a *Adapter) stripBotMentions(text string, entities []models.MessageEntity) string {
+	if len(entities) == 0 {
+		return text
+	}
+	u := utf16.Encode([]rune(text))
+	type span struct{ start, end int }
+	var spans []span
+	for _, e := range entities {
+		var mine bool
+		switch e.Type {
+		case models.MessageEntityTypeMention:
+			mine = a.botUsername != "" && strings.EqualFold(entityText(text, e.Offset, e.Length), "@"+a.botUsername)
+		case models.MessageEntityTypeTextMention:
+			mine = a.botID != 0 && e.User != nil && e.User.ID == a.botID
+		}
+		if mine && e.Offset >= 0 && e.Offset+e.Length <= len(u) {
+			spans = append(spans, span{e.Offset, e.Offset + e.Length})
+		}
+	}
+	if len(spans) == 0 {
+		return text
+	}
+	sort.Slice(spans, func(i, j int) bool { return spans[i].start > spans[j].start })
+	for _, s := range spans {
+		u = append(u[:s.start], u[s.end:]...)
+	}
+	return strings.TrimSpace(string(utf16.Decode(u)))
 }
 
 // replyToBot reports whether m is a reply to one of the bot's own messages — the

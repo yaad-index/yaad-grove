@@ -99,6 +99,67 @@ func TestToInboundMemoryFields(t *testing.T) {
 	assert.False(t, in.ReplyToBot)
 }
 
+// The bot's own @mention is stripped from the query so the model doesn't answer
+// the handle; other users' mentions stay, and UTF-16 offsets are honored.
+func TestStripBotMentions(t *testing.T) {
+	a := New(Config{}, nil)
+	a.botID = 100
+	a.botUsername = "grovebot"
+
+	mention := func(off, ln int) models.MessageEntity {
+		return models.MessageEntity{Type: models.MessageEntityTypeMention, Offset: off, Length: ln}
+	}
+
+	// Leading mention → stripped clean.
+	assert.Equal(t, "how can you help?",
+		a.stripBotMentions("@grovebot how can you help?", []models.MessageEntity{mention(0, 9)}))
+
+	// Mid-message mention → handle gone, words intact.
+	mid := a.stripBotMentions("please @grovebot help now", []models.MessageEntity{mention(7, 9)})
+	assert.NotContains(t, mid, "@grovebot")
+	assert.Contains(t, mid, "please")
+	assert.Contains(t, mid, "help now")
+
+	// text_mention (no @handle in text) of the bot → its span removed.
+	assert.Equal(t, "there",
+		a.stripBotMentions("hey there", []models.MessageEntity{{Type: models.MessageEntityTypeTextMention, Offset: 0, Length: 3, User: &models.User{ID: 100}}}))
+
+	// Multiple self-mentions → all removed.
+	multi := a.stripBotMentions("@grovebot and @grovebot again", []models.MessageEntity{mention(0, 9), mention(14, 9)})
+	assert.NotContains(t, multi, "@grovebot")
+	assert.Contains(t, multi, "and")
+	assert.Contains(t, multi, "again")
+
+	// Another user's mention is left intact.
+	assert.Equal(t, "ask @alice about it",
+		a.stripBotMentions("@grovebot ask @alice about it", []models.MessageEntity{mention(0, 9), mention(14, 6)}))
+
+	// UTF-16: a leading emoji (2 units) shifts the mention offset; the emoji is the
+	// user's content and stays, only the handle is removed.
+	utf := a.stripBotMentions("🤝 @grovebot hi", []models.MessageEntity{mention(3, 9)})
+	assert.NotContains(t, utf, "@grovebot")
+	assert.Contains(t, utf, "🤝")
+	assert.Contains(t, utf, "hi")
+
+	// Mention-only → empty query (the caller lets it through so a bare ping replies).
+	assert.Empty(t, a.stripBotMentions("@grovebot", []models.MessageEntity{mention(0, 9)}))
+
+	// No entities → unchanged.
+	assert.Equal(t, "just a normal question", a.stripBotMentions("just a normal question", nil))
+}
+
+// toInbound strips the bot's mention from the query end to end.
+func TestToInboundStripsBotMention(t *testing.T) {
+	a := New(Config{AllowedGroups: []string{"999"}}, nil)
+	a.botUsername = "grovebot"
+	m := msg(999, models.ChatTypeSupergroup, "@grovebot how do I install?", 7, "bob")
+	m.Entities = []models.MessageEntity{{Type: models.MessageEntityTypeMention, Offset: 0, Length: 9}}
+	in, ok := a.toInbound(m)
+	require.True(t, ok)
+	assert.Equal(t, "how do I install?", in.Text)
+	assert.True(t, in.Directed, "still a directed message")
+}
+
 // The Display falls back to the first name when there is no username.
 func TestToInboundDisplayFallback(t *testing.T) {
 	a := New(Config{}, nil)
