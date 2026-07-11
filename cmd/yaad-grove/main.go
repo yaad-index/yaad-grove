@@ -10,9 +10,14 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
+	"os/signal"
+	"strings"
+	"syscall"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -53,6 +58,14 @@ type ServeCmd struct {
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
 
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
+
+	// The ACL store persists consent, tier, and rate state (ADR 0002/0003); it
+	// survives restarts so consent decisions and tier assignments are durable.
+	ACLDB string `name:"acl-db" default:"./acl.db" help:"Path to the persisted access-control store (consent, tiers, rate counters)." type:"path"`
+
+	// MCPServers lists the external tool servers to connect (ADR 0001), each as
+	// "name=command arg1 arg2". Repeatable; empty means a retrieval-only bot.
+	MCPServers []string `name:"mcp-server" help:"An MCP tool server to connect, as 'name=command arg1 arg2' (args are space-separated; no spaces within an arg). Repeatable."`
 
 	// The global spend ceiling (ADR 0006): the hard cost backstop the model-call
 	// path consults before every call. Conservative default so the bot is
@@ -105,12 +118,25 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		Model:   c.ModelName,
 	}))
 	retriever := retrieval.New(c.VaultDir, 8)
-	registry := tools.New(nil) // MCP servers come from config in Phase 1
+
+	// The tool registry connects the configured MCP servers; their tools become
+	// this instance's tools (ADR 0001). Zero configured leaves a retrieval-only
+	// bot. Connected before the transport starts and closed on shutdown.
+	servers, err := parseMCPServers(c.MCPServers)
+	if err != nil {
+		return err
+	}
+	registry := tools.New(servers)
 	engine := core.New(m, retriever, registry, c.Scope)
 
-	// The gate stacks surface-reach -> rate-limit -> consent -> serve; its
-	// Store (bbolt) is wired in Phase 1.
-	_ = acl.NewGate(nil, acl.Tier(c.DefaultTier))
+	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
+	// 0002/0003/0007) over a persisted ACL store.
+	aclStore, err := acl.OpenBolt(c.ACLDB)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = aclStore.Close() }()
+	gate := acl.NewGate(aclStore, acl.Tier(c.DefaultTier))
 
 	// The callback token store backs interactive buttons (ADR 0009). It owns its
 	// own sweeper — started here on open, stopped on Close — so the storage bound
@@ -136,24 +162,75 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		defer func() { _ = flog.Close() }()
 		qlog = flog
 	}
-	_ = qlog // wired into the runtime handler with the full serve loop
+	// A signal cancels ctx, which drives the whole shutdown: the transport's Run
+	// returns and the deferred Closes fire (LIFO: registry -> qlog -> callbacks ->
+	// acl -> budget). Known Phase-1 limitation: the Telegram library dispatches
+	// handlers asynchronously and does not join them, so a handler in-flight at
+	// shutdown can briefly outlive a store Close (errors are logged, not fatal); an
+	// in-flight drain is a follow-up.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	if err := registry.Connect(ctx); err != nil {
+		return err
+	}
+	defer func() { _ = registry.Close() }()
+
+	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
+	// 0009/0010); the gate is the tier source, the re-authorizer, and the tier
+	// writer. The handler runs the consent gate ahead of the engine, records
+	// consented messages (ADR 0004), and resolves button clicks.
+	actions := runtime.DefaultRegistry(gate)
+	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog)
 
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
 		AllowedGroups: c.TelegramGroups,
 	}, callbacks)
 
-	log.Info("yaad-grove serve (scaffold)",
+	quarantineState := c.QuarantineLog
+	if quarantineState == "" {
+		quarantineState = "disabled"
+	}
+	// Startup line: what is actually live, so the staged wiring (sweeper, logging,
+	// tools) is verifiable at a glance.
+	log.Info("yaad-grove serving",
 		"transport", tp.Name(),
 		"model", c.ModelName,
 		"vault_dir", c.VaultDir,
 		"default_tier", c.DefaultTier,
-		"spend_ceiling_tokens", c.SpendCeiling,
-		"spend_period", c.SpendPeriod.String(),
+		"acl_db", c.ACLDB,
+		"callback_db", c.CallbackDB,
+		"callback_sweep", c.CallbackSweepInterval.String(),
+		"quarantine_log", quarantineState,
+		"mcp_servers", len(servers),
+		"tools", len(registry.Defs()),
 		"spend_remaining_tokens", meter.Remaining(),
 	)
-	_ = engine
-	return fmt.Errorf("serve: %w", core.ErrNotImplemented)
+
+	if err := tp.Run(ctx, handler); err != nil && !errors.Is(err, context.Canceled) {
+		return err
+	}
+	log.Info("yaad-grove stopped")
+	return nil
+}
+
+// parseMCPServers parses "name=command arg1 arg2" specs into server configs.
+func parseMCPServers(specs []string) ([]tools.ServerConfig, error) {
+	out := make([]tools.ServerConfig, 0, len(specs))
+	for _, spec := range specs {
+		name, cmd, ok := strings.Cut(spec, "=")
+		name = strings.TrimSpace(name)
+		if !ok || name == "" {
+			return nil, fmt.Errorf("serve: invalid --mcp-server %q (want 'name=command args')", spec)
+		}
+		fields := strings.Fields(cmd)
+		if len(fields) == 0 {
+			return nil, fmt.Errorf("serve: --mcp-server %q has no command", spec)
+		}
+		out = append(out, tools.ServerConfig{Name: name, Command: fields[0], Args: fields[1:]})
+	}
+	return out, nil
 }
 
 // VersionCmd prints the build version.
