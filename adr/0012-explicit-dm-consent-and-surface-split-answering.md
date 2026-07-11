@@ -19,7 +19,7 @@ This ADR replaces the inference model with explicit consent, splits answering by
 
 **Group (open to all members).** The bot handles a group message by whether it is *directed at the bot* (a reply to one of the bot's messages, or an @mention) or *ambient* (anything else):
 
-- **Directed + consented** → the bot answers from the knowledge base.
+- **Directed + consented** → the bot answers from the knowledge base **and** logs the message to the growth corpus. All consented group messages are logged (ADR 0004); directedness only changes the *reply* (directed gets an answer, ambient gets none), not whether the message is logged.
 - **Directed + not consented** → the bot delivers a **configurable consent nudge**: either a short **text reply** with the opt-in instruction (the default) or an **emoji reaction**, chosen per instance, with the message text / emoji configurable and a sensible default. Either way it does not answer, and it cannot flood — only directed messages ever draw any response; ambient chatter never does.
 - **Ambient + consented** → the message is **silently logged** to the growth corpus (ADR 0004), with no reply.
 - **Ambient + not consented** → ignored: no log, no reply.
