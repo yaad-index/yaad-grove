@@ -355,6 +355,42 @@ func TestRunDeliversAndReplies(t *testing.T) {
 	}
 }
 
+// On startup Run drops the pre-online backlog: it calls deleteWebhook with
+// drop_pending_updates=true before polling, so messages queued while the bot was
+// offline aren't processed.
+func TestRunDropsPendingBacklog(t *testing.T) {
+	dropped := make(chan string, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/deleteWebhook"):
+			select {
+			case dropped <- r.FormValue("drop_pending_updates"):
+			default:
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+		default: // getUpdates and anything else: nothing pending
+			_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+		}
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	a.serverURL = srv.URL
+	a.skipGetMe = true
+	handler := func(context.Context, transport.Inbound) (core.Reply, error) { return core.Reply{}, nil }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx, handler) }()
+
+	select {
+	case v := <-dropped:
+		assert.Equal(t, "true", v, "startup drops the pending backlog")
+	case <-time.After(3 * time.Second):
+		t.Fatal("deleteWebhook(drop_pending_updates) was not called on startup")
+	}
+}
+
 // The bot token never appears in an error surfaced from the transport.
 func TestRedactStripsToken(t *testing.T) {
 	a := New(Config{Token: "super-secret-token"}, nil)
