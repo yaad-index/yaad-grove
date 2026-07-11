@@ -114,6 +114,12 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	sort.Slice(out.Data, func(i, j int) bool { return out.Data[i].Index < out.Data[j].Index })
 	vecs := make([][]float32, len(out.Data))
 	for i := range out.Data {
+		// After sorting, indices must be exactly 0..n-1. A right-count-but-
+		// duplicate/gapped set would pass the count check yet misalign vectors with
+		// inputs — a silent wrong-retrieval bug — so reject it here.
+		if out.Data[i].Index != i {
+			return nil, fmt.Errorf("embed: non-contiguous response index %d at position %d", out.Data[i].Index, i)
+		}
 		vecs[i] = out.Data[i].Embedding
 	}
 	return vecs, nil

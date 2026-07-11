@@ -84,6 +84,36 @@ func TestEmbedCountMismatch(t *testing.T) {
 	assert.Error(t, err)
 }
 
+// A right-count-but-non-contiguous index set (duplicate/gapped) is rejected — it
+// would otherwise misalign vectors with inputs silently.
+func TestEmbedNonContiguousIndex(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1]},{"index":0,"embedding":[2]}]}`))
+	}))
+	defer srv.Close()
+
+	c := embed.New(embed.Config{BaseURL: srv.URL, Model: "m"})
+	_, err := c.Embed(context.Background(), []string{"a", "b"})
+	assert.Error(t, err, "duplicate index at the right count still errors, never misaligns")
+}
+
+// With no key, no Authorization header is sent — pinning the no-auth local case.
+func TestEmbedNoKeyOmitsAuthHeader(t *testing.T) {
+	var hasAuth bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hasAuth = r.Header["Authorization"]
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[1]}]}`))
+	}))
+	defer srv.Close()
+
+	c := embed.New(embed.Config{BaseURL: srv.URL, Model: "m"}) // no APIKey
+	_, err := c.Embed(context.Background(), []string{"a"})
+	require.NoError(t, err)
+	assert.False(t, hasAuth, "no Authorization header when no key is configured")
+}
+
 // Empty input makes no request.
 func TestEmbedEmptyInput(t *testing.T) {
 	called := false
