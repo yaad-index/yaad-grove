@@ -22,16 +22,17 @@ import (
 const testTTL = time.Minute
 
 type mockGate struct {
-	decision   acl.Decision
-	err        error
-	called     bool
-	gotUser    core.User
-	gotSurface core.Surface
+	decision    acl.Decision
+	err         error
+	called      bool
+	gotUser     core.User
+	gotSurface  core.Surface
+	gotDirected bool
 }
 
-func (m *mockGate) Check(_ context.Context, user core.User, surface core.Surface) (acl.Decision, error) {
+func (m *mockGate) Check(_ context.Context, in acl.GateInput) (acl.Decision, error) {
 	m.called = true
-	m.gotUser, m.gotSurface = user, surface
+	m.gotUser, m.gotSurface, m.gotDirected = in.User, in.Surface, in.Directed
 	return m.decision, m.err
 }
 
@@ -48,12 +49,13 @@ func (m *mockEngine) Answer(_ context.Context, q core.Query) (core.Reply, error)
 	return m.reply, m.err
 }
 
+// A group message directed at the bot (the common answer path).
 var inbound = transport.Inbound{
-	User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "hello", ReplyTo: "chat-1",
+	User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "hello", ReplyTo: "chat-1", Directed: true,
 }
 
-// Each gate decision maps to the right reply; the gate is always checked first
-// and the engine is reached only on DecideServe.
+// Each group gate decision maps to the right reply; the gate is always checked
+// first and the engine is reached only on DecideServe.
 func TestHandlerDecisionMapping(t *testing.T) {
 	cases := []struct {
 		name        string
@@ -64,7 +66,8 @@ func TestHandlerDecisionMapping(t *testing.T) {
 		wantTextSub string
 	}{
 		{"serve", acl.DecideServe, true, false, false, "engine answer"},
-		{"ask-consent", acl.DecideAskConsent, false, false, false, "opting in"},
+		{"log-only", acl.DecideLogOnly, false, true, false, ""},
+		{"nudge", acl.DecideNudge, false, false, false, "opt in"},
 		{"rate-limited", acl.DecideRateLimited, false, false, false, "rate limit"},
 		{"silent", acl.DecideSilent, false, true, false, ""},
 		{"refuse", acl.DecideRefuse, false, false, true, "can't help"},
@@ -73,12 +76,13 @@ func TestHandlerDecisionMapping(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			gate := &mockGate{decision: tc.decision}
 			engine := &mockEngine{reply: core.Reply{Text: "engine answer"}}
-			reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil)(context.Background(), inbound)
+			reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil, runtime.Policy{})(context.Background(), inbound)
 			require.NoError(t, err)
 
 			assert.True(t, gate.called, "gate is always checked first")
 			assert.Equal(t, inbound.User, gate.gotUser)
 			assert.Equal(t, inbound.Surface, gate.gotSurface)
+			assert.Equal(t, inbound.Directed, gate.gotDirected, "directedness is passed to the gate")
 			assert.Equal(t, tc.wantEngine, engine.called, "engine only on serve")
 			assert.Equal(t, tc.wantSilent, reply.Silent)
 			assert.Equal(t, tc.wantRefused, reply.Refused)
@@ -102,7 +106,7 @@ func TestHandlerDecisionMapping(t *testing.T) {
 func TestHandlerGateErrorFailsClosed(t *testing.T) {
 	gate := &mockGate{err: errors.New("store down")}
 	engine := &mockEngine{}
-	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil)(context.Background(), inbound)
+	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil, runtime.Policy{})(context.Background(), inbound)
 	require.NoError(t, err, "a gate error is handled, not surfaced as a crash")
 	assert.True(t, reply.Refused)
 	assert.False(t, engine.called, "engine not reached on a gate failure")
@@ -112,7 +116,7 @@ func TestHandlerGateErrorFailsClosed(t *testing.T) {
 func TestHandlerOverBudgetGraceful(t *testing.T) {
 	gate := &mockGate{decision: acl.DecideServe}
 	engine := &mockEngine{err: budget.ErrOverBudget}
-	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil)(context.Background(), inbound)
+	reply, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil, runtime.Policy{})(context.Background(), inbound)
 	require.NoError(t, err, "over-budget is degraded gracefully")
 	assert.Contains(t, reply.Text, "capacity")
 	assert.True(t, reply.Refused)
@@ -122,17 +126,17 @@ func TestHandlerOverBudgetGraceful(t *testing.T) {
 func TestHandlerAnswerErrorPropagates(t *testing.T) {
 	gate := &mockGate{decision: acl.DecideServe}
 	engine := &mockEngine{err: errors.New("boom")}
-	_, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil)(context.Background(), inbound)
+	_, err := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil, runtime.Policy{})(context.Background(), inbound)
 	assert.Error(t, err)
 }
 
-// A served (consent-granted) message is logged to the quarantine store with the
-// user, surface, and text.
+// A served (consent-granted, directed) message is logged to the quarantine store
+// with the user, surface, and text.
 func TestHandlerLogsServedMessage(t *testing.T) {
 	qlog := &quarantine.MemoryLog{}
 	gate := &mockGate{decision: acl.DecideServe}
 	engine := &mockEngine{reply: core.Reply{Text: "answer"}}
-	h := runtime.NewHandler(gate, engine, nil, nil, nil, qlog, nil)
+	h := runtime.NewHandler(gate, engine, nil, nil, nil, qlog, nil, runtime.Policy{})
 
 	_, err := h(context.Background(), inbound)
 	require.NoError(t, err)
@@ -144,29 +148,105 @@ func TestHandlerLogsServedMessage(t *testing.T) {
 	assert.Equal(t, "hello", entries[0].Text)
 }
 
+// Consented ambient chatter (DecideLogOnly) is logged but draws no reply.
+func TestHandlerLogOnlyLogsAndStaysSilent(t *testing.T) {
+	qlog := &quarantine.MemoryLog{}
+	engine := &mockEngine{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideLogOnly}, engine, nil, nil, nil, qlog, nil, runtime.Policy{})
+
+	reply, err := h(context.Background(), inbound)
+	require.NoError(t, err)
+	require.Len(t, qlog.Entries(), 1, "consented ambient chatter is logged")
+	assert.True(t, reply.Silent, "log-only produces no reply")
+	assert.False(t, engine.called, "ambient chatter is never answered")
+}
+
+// A rate-limited message is still consented content, so it is logged even though
+// it isn't answered — directedness/rate change the reply, not whether we log.
+func TestHandlerLogsRateLimitedMessage(t *testing.T) {
+	qlog := &quarantine.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideRateLimited}, &mockEngine{}, nil, nil, nil, qlog, nil, runtime.Policy{})
+	reply, err := h(context.Background(), inbound)
+	require.NoError(t, err)
+	assert.Len(t, qlog.Entries(), 1, "a rate-limited message is consented content — logged")
+	assert.Contains(t, reply.Text, "rate limit")
+}
+
 // The quarantine log is group-only (ADR 0004): a served group message is logged,
 // a served DM is not (a private one-to-one is not community content).
 func TestHandlerLogsGroupOnly(t *testing.T) {
 	qlog := &quarantine.MemoryLog{}
-	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, qlog, nil)
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, qlog, nil, runtime.Policy{})
 
-	_, err := h(context.Background(), transport.Inbound{User: core.User{ID: "g1"}, Surface: core.SurfaceGroup, Text: "community msg"})
+	_, err := h(context.Background(), transport.Inbound{User: core.User{ID: "g1"}, Surface: core.SurfaceGroup, Text: "community msg", Directed: true})
 	require.NoError(t, err)
 	require.Len(t, qlog.Entries(), 1, "a served group message is logged")
 
-	_, err = h(context.Background(), transport.Inbound{User: core.User{ID: "d1"}, Surface: core.SurfaceDM, Text: "private msg"})
+	// A DM with no consenter wired falls through to the gate (DecideServe here);
+	// logServed still excludes it as a private one-to-one.
+	_, err = h(context.Background(), transport.Inbound{User: core.User{ID: "d1"}, Surface: core.SurfaceDM, Text: "private msg", Directed: true})
 	require.NoError(t, err)
 	assert.Len(t, qlog.Entries(), 1, "a served DM is not logged")
 }
 
-// Every non-serve decision logs nothing — consent is not confirmed, so ADR 0002's
-// "record nothing without consent" holds.
-func TestHandlerDoesNotLogWhenNotServed(t *testing.T) {
+// An admin DM is answered by the engine and, being a private one-to-one, is
+// never logged (ADR 0012 + #38's group-only guard).
+func TestHandlerAdminDMAnsweredNotLogged(t *testing.T) {
+	qlog := &quarantine.MemoryLog{}
+	engine := &mockEngine{reply: core.Reply{Text: "admin answer"}}
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"})}
+	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, qlog, consent, policy)
+
+	reply, err := h(context.Background(), transport.Inbound{User: core.User{ID: "admin1"}, Surface: core.SurfaceDM, Text: "q", Directed: true})
+	require.NoError(t, err)
+	assert.True(t, engine.called, "an admin DM is answered by the engine")
+	assert.Equal(t, "admin answer", reply.Text)
+	assert.Empty(t, qlog.Entries(), "an admin DM is a private 1:1, never logged")
+}
+
+// A non-admin DM never reaches the engine — it is consent management only, even
+// for a message that looks like a query (ADR 0012).
+func TestHandlerNonAdminDMIsConsentOnly(t *testing.T) {
+	engine := &mockEngine{reply: core.Reply{Text: "ANSWER"}}
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"})}
+	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, consent, policy)
+
+	reply, err := h(context.Background(), transport.Inbound{User: core.User{ID: "rando"}, Surface: core.SurfaceDM, Text: "what is X?", Directed: true})
+	require.NoError(t, err)
+	assert.False(t, engine.called, "a non-admin DM never reaches the engine")
+	assert.NotEqual(t, "ANSWER", reply.Text)
+}
+
+// Admin is a DM-surface privilege only: in the group an unconsented admin is
+// consent-gated like anyone else — nudged, not answered (ADR 0012). Locks in the
+// no-admin-special-case-in-group choice over a real gate.
+func TestHandlerAdminInGroupIsConsentGated(t *testing.T) {
+	ctx := context.Background()
+	aclStore, err := acl.OpenBolt(filepath.Join(t.TempDir(), "acl.db"))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = aclStore.Close() })
+	gate := acl.NewGate(aclStore, acl.TierDefault)
+	engine := &mockEngine{reply: core.Reply{Text: "ANSWER"}}
+	// admin1 is a configured admin but has not consented.
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"})}
+	h := runtime.NewHandler(gate, engine, nil, nil, nil, nil, gate, policy)
+
+	reply, err := h(ctx, transport.Inbound{User: core.User{ID: "admin1"}, Surface: core.SurfaceGroup, Text: "hi bot", Directed: true})
+	require.NoError(t, err)
+	assert.False(t, engine.called, "an unconsented admin in the group is not answered")
+	assert.Contains(t, reply.Text, "opt in", "an unconsented admin in the group is nudged like anyone")
+}
+
+// The unconsented/error decisions log nothing — consent is not established, so
+// ADR 0002's "record nothing without consent" holds.
+func TestHandlerDoesNotLogWhenNotConsented(t *testing.T) {
 	for _, decision := range []acl.Decision{
-		acl.DecideAskConsent, acl.DecideSilent, acl.DecideRateLimited, acl.DecideRefuse,
+		acl.DecideNudge, acl.DecideSilent, acl.DecideRefuse,
 	} {
 		qlog := &quarantine.MemoryLog{}
-		h := runtime.NewHandler(&mockGate{decision: decision}, &mockEngine{}, nil, nil, nil, qlog, nil)
+		h := runtime.NewHandler(&mockGate{decision: decision}, &mockEngine{}, nil, nil, nil, qlog, nil, runtime.Policy{})
 		_, err := h(context.Background(), inbound)
 		require.NoError(t, err)
 		assert.Empty(t, qlog.Entries(), "decision %d logs nothing", decision)
@@ -185,16 +265,16 @@ func TestHandlerDeclinedConsentLogsNothing(t *testing.T) {
 	gate := acl.NewGate(aclStore, acl.TierDefault)
 
 	qlog := &quarantine.MemoryLog{}
-	h := runtime.NewHandler(gate, &mockEngine{}, nil, nil, nil, qlog, nil)
+	h := runtime.NewHandler(gate, &mockEngine{}, nil, nil, nil, qlog, nil, runtime.Policy{})
 
-	_, err = h(ctx, transport.Inbound{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "secret"})
+	_, err = h(ctx, transport.Inbound{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "secret", Directed: true})
 	require.NoError(t, err)
 	assert.Empty(t, qlog.Entries(), "a declined user's message is never recorded")
 }
 
 // A nil log disables logging without a panic on the serve path.
 func TestHandlerNilLogNoOp(t *testing.T) {
-	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, nil, nil)
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, nil, nil, runtime.Policy{})
 	_, err := h(context.Background(), inbound)
 	require.NoError(t, err)
 }
@@ -205,7 +285,7 @@ func TestHandlerCallbackDoesNotLog(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "echo"})
 	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store,
-		registryWith("echo", runtime.EchoVerb()), &mockAuthz{authorized: true}, qlog, nil)
+		registryWith("echo", runtime.EchoVerb()), &mockAuthz{authorized: true}, qlog, nil, runtime.Policy{})
 
 	_, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
@@ -282,7 +362,7 @@ func TestHandlerCallbackHappyPath(t *testing.T) {
 	authz := &mockAuthz{authorized: true}
 	gate, engine := &mockGate{}, &mockEngine{}
 
-	h := runtime.NewHandler(gate, engine, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil)
+	h := runtime.NewHandler(gate, engine, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil, runtime.Policy{})
 	reply, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 
@@ -320,7 +400,7 @@ func TestHandlerCallbackDenials(t *testing.T) {
 			authz := &mockAuthz{authorized: tc.authorized, err: tc.authzErr}
 
 			h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store,
-				registryWith(tc.verbName, spy.verb(acl.TierAdmin)), authz, nil, nil)
+				registryWith(tc.verbName, spy.verb(acl.TierAdmin)), authz, nil, nil, runtime.Policy{})
 			reply, err := h(context.Background(), callbackInbound(token))
 			require.NoError(t, err)
 
@@ -339,7 +419,7 @@ func TestHandlerCallbackAuthorizeBeforeValidate(t *testing.T) {
 	spy := &spyVerb{}
 	authz := &mockAuthz{authorized: false}
 
-	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil)
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil, runtime.Policy{})
 	_, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 
@@ -354,7 +434,7 @@ func TestHandlerCallbackExecutorError(t *testing.T) {
 	spy := &spyVerb{execErr: errors.New("boom")}
 	authz := &mockAuthz{authorized: true}
 
-	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil)
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, registryWith("act", spy.verb(acl.TierAdmin)), authz, nil, nil, runtime.Policy{})
 	reply, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 	assert.Equal(t, "That didn't go through — please try again.", reply.Notice)
@@ -373,7 +453,7 @@ func TestHandlerCallbackNonResolved(t *testing.T) {
 	reg := registryWith("act", spy.verb(acl.TierAdmin))
 
 	// No store -> expired.
-	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, nil, reg, authz, nil, nil)
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, nil, reg, authz, nil, nil, runtime.Policy{})
 	reply, err := h(context.Background(), callbackInbound("tok"))
 	require.NoError(t, err)
 	assert.Equal(t, "This action has expired.", reply.Notice)
@@ -381,7 +461,7 @@ func TestHandlerCallbackNonResolved(t *testing.T) {
 	// Consumed after one resolve.
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "act"})
-	h = runtime.NewHandler(&mockGate{}, &mockEngine{}, store, reg, authz, nil, nil)
+	h = runtime.NewHandler(&mockGate{}, &mockEngine{}, store, reg, authz, nil, nil, runtime.Policy{})
 	_, err = h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 	reply, err = h(context.Background(), callbackInbound(token))
@@ -403,7 +483,7 @@ func TestHandlerCallbackDemotionDenies(t *testing.T) {
 
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil)
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
 
 	// Demote the clicker after the button was shown, before the click.
 	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierDefault))
@@ -429,7 +509,7 @@ func TestHandlerCallbackSetTierHappyPath(t *testing.T) {
 
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil)
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
 
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)

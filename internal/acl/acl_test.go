@@ -61,89 +61,76 @@ func (failStore) Update(context.Context, string, func(*acl.Record) error) error 
 	return errors.New("boom")
 }
 
-func check(t *testing.T, g *acl.Gate, id string, surface core.Surface) acl.Decision {
+// decide runs the group gate for a user with the given directedness.
+func decide(t *testing.T, g *acl.Gate, id string, directed bool) acl.Decision {
 	t.Helper()
-	d, err := g.Check(context.Background(), core.User{ID: id}, surface)
+	d, err := g.Check(context.Background(), acl.GateInput{
+		User: core.User{ID: id}, Surface: core.SurfaceGroup, Directed: directed,
+	})
 	require.NoError(t, err)
 	return d
 }
 
-// Consent is a hard gate: unknown/declined → ask (never implied yes); granted →
-// serve. A repeat within the throttle window → silent.
-func TestConsentGate(t *testing.T) {
+// The consent × directedness matrix (ADR 0012): consent gates both answering and
+// logging; directedness splits the reply. Consent is never implied.
+func TestConsentGateMatrix(t *testing.T) {
 	store := newMemStore()
 	g := acl.NewGate(store, acl.TierDefault)
 
-	// First-seen (ConsentUnknown) → ask, never serve.
-	assert.Equal(t, acl.DecideAskConsent, check(t, g, "u1", core.SurfaceGroup))
-	// The prompt was recorded (throttle timestamp) but consent stays unknown and
-	// nothing was counted — the minimal-record guarantee.
-	rec := store.recs["u1"]
-	assert.Equal(t, acl.ConsentUnknown, rec.Consent, "consent is never implied")
-	assert.False(t, rec.LastPromptedAt.IsZero(), "prompt time recorded")
-	assert.Equal(t, 0, rec.RateCount, "an unconsented user is not counted")
+	// Unconsented (first-seen): directed → nudge, ambient → silent.
+	assert.Equal(t, acl.DecideNudge, decide(t, g, "u1", true), "unconsented directed → nudge")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "u1", false), "unconsented ambient → ignored")
+	// Nothing was recorded — the minimal-record guarantee: no consent is written,
+	// no rate row is created for a user who never consented.
+	_, recorded := store.recs["u1"]
+	assert.False(t, recorded, "an unconsented user is never recorded")
 
-	// A repeat within the throttle window → silent (no re-prompt).
-	assert.Equal(t, acl.DecideSilent, check(t, g, "u1", core.SurfaceGroup))
+	// Consented: directed → serve, ambient → log-only.
+	store.recs["c1"] = acl.Record{UserID: "c1", Consent: acl.ConsentGranted}
+	assert.Equal(t, acl.DecideServe, decide(t, g, "c1", true), "consented directed → serve")
+	assert.Equal(t, acl.DecideLogOnly, decide(t, g, "c1", false), "consented ambient → log-only")
 
-	// Declined collapses to the same keep-prompting state (past the throttle).
-	store.recs["u2"] = acl.Record{UserID: "u2", Consent: acl.ConsentDeclined}
-	assert.Equal(t, acl.DecideAskConsent, check(t, g, "u2", core.SurfaceGroup))
-
-	// Granted → serve.
-	store.recs["u3"] = acl.Record{UserID: "u3", Consent: acl.ConsentGranted}
-	assert.Equal(t, acl.DecideServe, check(t, g, "u3", core.SurfaceGroup))
+	// Declined collapses to the same unconsented handling (nudge when directed).
+	store.recs["d1"] = acl.Record{UserID: "d1", Consent: acl.ConsentDeclined}
+	assert.Equal(t, acl.DecideNudge, decide(t, g, "d1", true), "declined directed → nudge")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "d1", false), "declined ambient → ignored")
 }
 
-// The consent prompt past the throttle window prompts again.
-func TestConsentPromptThrottleExpires(t *testing.T) {
-	store := newMemStore(acl.Record{
-		UserID:         "u1",
-		Consent:        acl.ConsentUnknown,
-		LastPromptedAt: time.Now().Add(-2 * time.Hour), // older than the 1h throttle
-	})
-	g := acl.NewGate(store, acl.TierDefault)
-	assert.Equal(t, acl.DecideAskConsent, check(t, g, "u1", core.SurfaceGroup))
-}
-
-// Surface reach (ADR 0003): a DM is served only to an admin-approved user; the
-// group surface is membership-bounded upstream. Surface refusal precedes consent.
-func TestSurfaceReach(t *testing.T) {
-	store := newMemStore(
-		acl.Record{UserID: "dm-unapproved", Consent: acl.ConsentGranted},
-		acl.Record{UserID: "dm-approved", Consent: acl.ConsentGranted, DMApproved: true},
-	)
-	g := acl.NewGate(store, acl.TierDefault)
-
-	// Unapproved DM → refuse even though consent is granted (surface gates first).
-	assert.Equal(t, acl.DecideRefuse, check(t, g, "dm-unapproved", core.SurfaceDM))
-	// Approved DM + granted → serve.
-	assert.Equal(t, acl.DecideServe, check(t, g, "dm-approved", core.SurfaceDM))
-	// The same unapproved user in a group is fine (membership is the boundary).
-	assert.Equal(t, acl.DecideServe, check(t, g, "dm-unapproved", core.SurfaceGroup))
-}
-
-// Rate limit (consented users only): under the tier allowance serves, at it
-// refuses; the window reset restores the allowance; unlimited tiers never limit.
-func TestRateLimit(t *testing.T) {
-	// Default tier = throttled (allowance 5).
+// Consented ambient chatter is logged but not rate-counted — logging is cheap and
+// nothing is answered, so it must not consume the answer allowance.
+func TestAmbientLogOnlyNotRateCounted(t *testing.T) {
 	store := newMemStore(acl.Record{UserID: "u1", Consent: acl.ConsentGranted})
-	g := acl.NewGate(store, acl.TierThrottled)
-	for i := 0; i < 5; i++ {
-		assert.Equal(t, acl.DecideServe, check(t, g, "u1", core.SurfaceGroup), "call %d", i+1)
+	g := acl.NewGate(store, acl.TierThrottled) // allowance 5
+
+	for i := 0; i < 10; i++ {
+		require.Equal(t, acl.DecideLogOnly, decide(t, g, "u1", false), "ambient %d", i+1)
 	}
-	assert.Equal(t, acl.DecideRateLimited, check(t, g, "u1", core.SurfaceGroup), "6th over the allowance")
+	assert.Equal(t, 0, store.recs["u1"].RateCount, "ambient chatter never touches the rate counter")
+	// A directed message still has its full allowance available.
+	assert.Equal(t, acl.DecideServe, decide(t, g, "u1", true))
+}
+
+// Rate limit on the directed (answered) path only: under the tier allowance
+// serves, at it rate-limits; a window reset restores it; unlimited tiers never
+// limit.
+func TestRateLimitDirected(t *testing.T) {
+	store := newMemStore(acl.Record{UserID: "u1", Consent: acl.ConsentGranted})
+	g := acl.NewGate(store, acl.TierThrottled) // allowance 5
+	for i := 0; i < 5; i++ {
+		assert.Equal(t, acl.DecideServe, decide(t, g, "u1", true), "call %d", i+1)
+	}
+	assert.Equal(t, acl.DecideRateLimited, decide(t, g, "u1", true), "6th over the allowance")
 
 	// Window reset: an elapsed window restores the allowance.
 	r := store.recs["u1"]
 	r.RateWindowStart = time.Now().Add(-2 * time.Hour)
 	store.recs["u1"] = r
-	assert.Equal(t, acl.DecideServe, check(t, g, "u1", core.SurfaceGroup), "reset restores the allowance")
+	assert.Equal(t, acl.DecideServe, decide(t, g, "u1", true), "reset restores the allowance")
 
 	// An unlimited tier (admin) is never rate-limited.
 	store.recs["admin"] = acl.Record{UserID: "admin", Consent: acl.ConsentGranted, Tier: acl.TierAdmin}
 	for i := 0; i < 50; i++ {
-		require.Equal(t, acl.DecideServe, check(t, g, "admin", core.SurfaceGroup))
+		require.Equal(t, acl.DecideServe, decide(t, g, "admin", true))
 	}
 }
 
@@ -157,7 +144,7 @@ func TestTierResolutionOverrideBeatsDefault(t *testing.T) {
 	})
 	g := acl.NewGate(store, acl.TierThrottled)
 	// At 5 calls a throttled user is over the limit, but the trusted override is not.
-	assert.Equal(t, acl.DecideServe, check(t, g, "vip", core.SurfaceGroup),
+	assert.Equal(t, acl.DecideServe, decide(t, g, "vip", true),
 		"per-user tier override beats the instance default")
 
 	// A user with no override falls to the default (throttled) and is limited at 5.
@@ -165,13 +152,15 @@ func TestTierResolutionOverrideBeatsDefault(t *testing.T) {
 		UserID: "plain", Consent: acl.ConsentGranted,
 		RateCount: 5, RateWindowStart: time.Now(),
 	}
-	assert.Equal(t, acl.DecideRateLimited, check(t, g, "plain", core.SurfaceGroup))
+	assert.Equal(t, acl.DecideRateLimited, decide(t, g, "plain", true))
 }
 
 // A store error fails closed: the gate refuses, never serves on an unknown state.
 func TestFailClosedOnStoreError(t *testing.T) {
 	g := acl.NewGate(failStore{}, acl.TierDefault)
-	d, err := g.Check(context.Background(), core.User{ID: "u1"}, core.SurfaceGroup)
+	d, err := g.Check(context.Background(), acl.GateInput{
+		User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Directed: true,
+	})
 	assert.Error(t, err)
 	assert.Equal(t, acl.DecideRefuse, d)
 }
@@ -191,7 +180,7 @@ func TestBoltStore(t *testing.T) {
 	assert.Equal(t, acl.Record{UserID: "new"}, got)
 	assert.Equal(t, acl.ConsentUnknown, got.Consent)
 
-	rec := acl.Record{UserID: "u1", Consent: acl.ConsentGranted, Tier: acl.TierTrusted, DMApproved: true, RateCount: 3}
+	rec := acl.Record{UserID: "u1", Consent: acl.ConsentGranted, Tier: acl.TierTrusted, RateCount: 3}
 	require.NoError(t, s1.Put(ctx, rec))
 	require.NoError(t, s1.Close())
 
@@ -203,6 +192,5 @@ func TestBoltStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, acl.ConsentGranted, got.Consent)
 	assert.Equal(t, acl.TierTrusted, got.Tier)
-	assert.True(t, got.DMApproved)
 	assert.Equal(t, 3, got.RateCount)
 }

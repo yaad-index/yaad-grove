@@ -38,7 +38,7 @@ func dmInbound(text string) transport.Inbound {
 }
 
 func consentHandler(consent runtimeConsenter) transport.Handler {
-	return runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "ANSWER"}}, nil, nil, nil, nil, consent)
+	return runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "ANSWER"}}, nil, nil, nil, nil, consent, runtime.Policy{})
 }
 
 // runtimeConsenter matches the consenter the handler takes.
@@ -108,7 +108,7 @@ func TestDMConsentSelfRemove(t *testing.T) {
 // 0012), even for a message that looks like a query.
 func TestDMNeverAnswers(t *testing.T) {
 	engine := &mockEngine{reply: core.Reply{Text: "ANSWER"}}
-	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, &mockConsenter{consent: acl.ConsentGranted})
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, &mockConsenter{consent: acl.ConsentGranted}, runtime.Policy{})
 	reply, err := h(context.Background(), dmInbound("what is the meaning of X?"))
 	require.NoError(t, err)
 	assert.False(t, engine.called, "a DM is consent-only, never answered")
@@ -127,7 +127,7 @@ func TestConsentGrantViaButton(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "consent_grant"})
 	// gate is the authorizer + the consenter; no consenter for the message path here.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil)
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
 
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
