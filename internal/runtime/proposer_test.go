@@ -132,7 +132,7 @@ func TestProposalApproveEndToEnd(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, approve)
 
-	h := runtime.NewHandler(nil, nil, store, registry, gate)
+	h := runtime.NewHandler(nil, nil, store, registry, gate, nil)
 	clickReply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
 	assert.Contains(t, clickReply.Notice, "Done")
@@ -150,7 +150,7 @@ func TestProposalDismiss(t *testing.T) {
 	token := putToken(t, store, core.Action{Verb: "dismiss", Label: "Dismiss"})
 
 	// dismiss is unprivileged (TierThrottled), which any subject clears.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}), &mockAuthz{authorized: true})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}), &mockAuthz{authorized: true}, nil)
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
 	assert.Contains(t, reply.Notice, "Done")

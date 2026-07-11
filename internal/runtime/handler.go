@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"time"
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/pending"
+	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -72,7 +74,7 @@ type authorizer interface {
 // and executes — it is not a model query, so it never touches the engine.
 // callbacks may be nil for a text-only bot; a click then can't be resolved and is
 // treated as expired.
-func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer) transport.Handler {
+func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
 		if in.Callback != nil {
 			return resolveCallback(ctx, callbacks, registry, authz, in), nil
@@ -86,6 +88,12 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 		switch decision {
 		case acl.DecideServe:
+			// Consent-gated logging (ADR 0004): DecideServe is the ONLY path where
+			// consent is confirmed, so it is the only place a message is recorded —
+			// ADR 0002's "record nothing without consent" is enforced by this
+			// placement. Logged before answering so an Answer error still captures
+			// the message; a log failure warns and never fails the reply.
+			logServed(ctx, qlog, in)
 			reply, aerr := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text})
 			if aerr != nil {
 				if errors.Is(aerr, budget.ErrOverBudget) {
@@ -109,6 +117,36 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			slog.Warn("unknown gate decision; refusing", "decision", int(decision))
 			return core.Reply{Text: refuseText, Refused: true}, nil
 		}
+	}
+}
+
+// logServed appends a consented message to the quarantine log (ADR 0004). It is
+// called only from the DecideServe branch — consent is confirmed there. A nil log
+// disables logging; a log failure is warned, never surfaced, so it can't break a
+// reply the user is owed.
+func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
+	if qlog == nil {
+		return
+	}
+	if err := qlog.Append(ctx, quarantine.Entry{
+		Time:    time.Now(),
+		UserID:  in.User.ID,
+		Surface: surfaceLabel(in.Surface),
+		Text:    in.Text,
+	}); err != nil {
+		slog.Warn("quarantine log append failed", "err", err)
+	}
+}
+
+// surfaceLabel renders a surface for the log in human-readable form.
+func surfaceLabel(s core.Surface) string {
+	switch s {
+	case core.SurfaceDM:
+		return "dm"
+	case core.SurfaceGroup:
+		return "group"
+	default:
+		return "unknown"
 	}
 }
 
