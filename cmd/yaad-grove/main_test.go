@@ -27,6 +27,22 @@ func TestSimilarityThresholdDefault(t *testing.T) {
 	assert.Equal(t, float32(0.30), cli.Serve.SimilarityThreshold, "block-early 0.30 is the shipped default")
 }
 
+// The transcript is off by default (ADR 0015): without --transcript-log the field
+// is empty, and setting it flows through as the directory path.
+func TestTranscriptLogDefaultOff(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+
+	_, err = parser.Parse([]string{"serve"})
+	require.NoError(t, err)
+	assert.Empty(t, cli.Serve.TranscriptLog, "no transcript by default")
+
+	_, err = parser.Parse([]string{"serve", "--transcript-log", "/tmp/grove-transcripts"})
+	require.NoError(t, err)
+	assert.Equal(t, "/tmp/grove-transcripts", cli.Serve.TranscriptLog)
+}
+
 // Retriever selection (ADR 0017): no embedding config → keyword; an incomplete
 // embedding pair → startup error.
 func TestBuildRetriever(t *testing.T) {

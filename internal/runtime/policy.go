@@ -4,6 +4,7 @@ import (
 	"strings"
 
 	"github.com/yaad-index/yaad-grove/internal/memory"
+	"github.com/yaad-index/yaad-grove/internal/transcript"
 )
 
 // Policy is the surface-split answering policy the handler applies (ADR
@@ -20,6 +21,10 @@ type Policy struct {
 	Memory *memory.Buffer
 	// Inject is how many retained turns may enter a prompt (--memory-inject).
 	Inject int
+	// Transcript is the durable role-tagged conversation record (ADR 0015); nil
+	// means no transcript is written. When set, the consent disclosure also states
+	// that entries persist historically, so opt-in is informed.
+	Transcript transcript.Log
 }
 
 // AdminSet is the configured admin allowlist (ADR 0012): a user is an admin iff
