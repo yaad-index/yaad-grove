@@ -189,17 +189,31 @@ func (a *Adapter) Send(ctx context.Context, replyTo string, reply core.Reply) er
 		return errors.New("telegram: invalid chat id " + strconv.Quote(replyTo))
 	}
 
-	params := &bot.SendMessageParams{ChatID: chatID, Text: reply.Text}
+	plain := reply.Text
+	var markup models.ReplyMarkup
 	if len(reply.Actions) > 0 {
-		if markup, err := a.renderActions(ctx, reply.Actions); err == nil {
-			params.ReplyMarkup = markup
+		if m, err := a.renderActions(ctx, reply.Actions); err == nil {
+			markup = m
 		} else {
 			// Can't mint tokens — surface the actions as text rather than drop them.
 			slog.Warn("telegram: rendering actions as text", "err", a.redact(err))
-			params.Text = reply.Text + transport.ActionsAsText(reply.Actions)
+			plain = reply.Text + transport.ActionsAsText(reply.Actions)
 		}
 	}
-	if _, err := a.bot.SendMessage(ctx, params); err != nil {
+
+	// Render the model's Markdown as Telegram HTML so **bold** / `code` / [links]
+	// display instead of leaking their raw markup (#53). On any send failure — most
+	// likely a malformed-entity 400 from an edge the renderer got wrong — fall back
+	// to the plain text, so a formatting glitch never blocks the message.
+	if htmlText := toTelegramHTML(plain); htmlText != "" {
+		p := &bot.SendMessageParams{ChatID: chatID, Text: htmlText, ParseMode: models.ParseModeHTML, ReplyMarkup: markup}
+		if _, err := a.bot.SendMessage(ctx, p); err == nil {
+			return nil
+		} else {
+			slog.Warn("telegram: HTML send failed; retrying as plain text", "err", a.redact(err))
+		}
+	}
+	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: plain, ReplyMarkup: markup}); err != nil {
 		return a.redact(err)
 	}
 	return nil
