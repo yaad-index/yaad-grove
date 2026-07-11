@@ -43,6 +43,28 @@ func TestLoadPersonaExplicitPresent(t *testing.T) {
 	assert.Equal(t, "custom voice", got)
 }
 
+// The prompt template loads: empty → the embedded default (nil), a valid file
+// parses, and a missing or unparseable path is fatal (ADR 0016).
+func TestLoadPromptTemplate(t *testing.T) {
+	tmpl, err := loadPromptTemplate("")
+	require.NoError(t, err)
+	assert.Nil(t, tmpl, "empty path uses the embedded default")
+
+	p := filepath.Join(t.TempDir(), "p.tmpl")
+	require.NoError(t, os.WriteFile(p, []byte("{{.Scope}}"), 0o600))
+	tmpl, err = loadPromptTemplate(p)
+	require.NoError(t, err)
+	assert.NotNil(t, tmpl)
+
+	_, err = loadPromptTemplate(filepath.Join(t.TempDir(), "nope.tmpl"))
+	assert.Error(t, err, "a missing explicit template is fatal")
+
+	bad := filepath.Join(t.TempDir(), "bad.tmpl")
+	require.NoError(t, os.WriteFile(bad, []byte("{{.Unclosed"), 0o600))
+	_, err = loadPromptTemplate(bad)
+	assert.Error(t, err, "an unparseable template is fatal")
+}
+
 func TestParseMCPServers(t *testing.T) {
 	got, err := parseMCPServers([]string{
 		"search=/usr/bin/mcp-search --vault /data",

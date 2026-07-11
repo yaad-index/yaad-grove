@@ -18,6 +18,7 @@ import (
 	"os/signal"
 	"strings"
 	"syscall"
+	"text/template"
 	"time"
 
 	"github.com/alecthomas/kong"
@@ -61,6 +62,11 @@ type ServeCmd struct {
 	// absence is graceful (no persona layer); an explicitly-set path that can't be
 	// read is a startup error (the operator meant to use one).
 	PersonaFile string `name:"persona-file" help:"Operator persona/behavior file (Markdown) layered into the prompt. Defaults to PERSONA.md in the working dir (absent is fine); an explicitly-set unreadable path is fatal."`
+
+	// PromptTemplate is the optional operator grounding-prompt template (ADR 0016).
+	// Empty uses the embedded default (byte-for-byte the built-in prompt); a set
+	// path that can't be read or parsed is a startup error.
+	PromptTemplate string `name:"prompt-template" help:"Operator grounding-prompt template (Go text/template with {{.Persona}} {{.Scope}} {{.History}} {{.Context}}). Empty uses the built-in default; an unreadable/unparseable path is fatal."`
 
 	ModelBaseURL string `name:"model-base-url" default:"https://api.openai.com/v1" help:"OpenAI-compatible API base URL."`
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
@@ -163,7 +169,14 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	engine := core.New(m, retriever, registry, c.Scope, core.WithPersona(persona))
+	// The optional grounding-prompt template (ADR 0016): empty uses the embedded
+	// default (byte-for-byte the built-in prompt); a set-but-unreadable/unparseable
+	// path fails startup rather than serving a broken prompt.
+	promptTmpl, err := loadPromptTemplate(c.PromptTemplate)
+	if err != nil {
+		return err
+	}
+	engine := core.New(m, retriever, registry, c.Scope, core.WithPersona(persona), core.WithPromptTemplate(promptTmpl))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
@@ -302,6 +315,25 @@ func loadPersona(configuredPath string) (string, error) {
 		return "", fmt.Errorf("persona file %q: %w", path, err)
 	}
 	return string(data), nil
+}
+
+// loadPromptTemplate loads an operator grounding-prompt template (ADR 0016). An
+// empty path uses the embedded default (nil template). A set path that can't be
+// read or parsed is fatal — a broken prompt is a deployment error, not a silent
+// fallback.
+func loadPromptTemplate(path string) (*template.Template, error) {
+	if path == "" {
+		return nil, nil
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("prompt template %q: %w", path, err)
+	}
+	t, err := core.ParsePromptTemplate(string(data))
+	if err != nil {
+		return nil, fmt.Errorf("prompt template %q: %w", path, err)
+	}
+	return t, nil
 }
 
 // parseMCPServers parses "name=command arg1 arg2" specs into server configs.
