@@ -391,6 +391,64 @@ func TestRunDropsPendingBacklog(t *testing.T) {
 	}
 }
 
+// Directed detection (ADR 0012): a reply to the bot, or an @mention / text_mention
+// of it, is directed; ambient chatter is not. @mention offsets are UTF-16, so a
+// mention mid-message (after an emoji) resolves correctly.
+func TestIsDirected(t *testing.T) {
+	a := New(Config{}, nil)
+	a.botID = 100
+	a.botUsername = "grovebot"
+
+	assert.True(t, a.isDirected(&models.Message{Text: "thanks",
+		ReplyToMessage: &models.Message{From: &models.User{ID: 100}}}), "reply to the bot is directed")
+	assert.False(t, a.isDirected(&models.Message{Text: "thanks",
+		ReplyToMessage: &models.Message{From: &models.User{ID: 200}}}), "reply to someone else is not")
+
+	assert.True(t, a.isDirected(&models.Message{Text: "@grovebot help",
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeMention, Offset: 0, Length: 9}}}),
+		"leading @mention of the bot is directed")
+
+	// "🤝 @grovebot hi": the emoji is 2 UTF-16 units, so @grovebot starts at unit 3.
+	assert.True(t, a.isDirected(&models.Message{Text: "🤝 @grovebot hi",
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeMention, Offset: 3, Length: 9}}}),
+		"mid-message @mention after an emoji is directed (UTF-16 offset)")
+
+	assert.False(t, a.isDirected(&models.Message{Text: "@otherbot help",
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeMention, Offset: 0, Length: 9}}}),
+		"a mention of a different handle is not directed")
+
+	assert.True(t, a.isDirected(&models.Message{Text: "hey there",
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeTextMention, Offset: 0, Length: 3, User: &models.User{ID: 100}}}}),
+		"a text_mention of the bot is directed")
+
+	assert.False(t, a.isDirected(&models.Message{Text: "just chatting in the group"}),
+		"ambient chatter is not directed")
+}
+
+// toInbound sets Directed: a DM is always directed; a group message is directed
+// only when aimed at the bot.
+func TestToInboundDirected(t *testing.T) {
+	a := New(Config{AllowedGroups: []string{"999"}}, nil)
+	a.botID = 100
+	a.botUsername = "grovebot"
+
+	in, ok := a.toInbound(msg(555, models.ChatTypePrivate, "hi", 42, "alice"))
+	require.True(t, ok)
+	assert.True(t, in.Directed, "a DM is always directed")
+
+	in, ok = a.toInbound(msg(999, models.ChatTypeSupergroup, "just chatting", 7, "bob"))
+	require.True(t, ok)
+	assert.False(t, in.Directed, "ambient group chatter is not directed")
+
+	in, ok = a.toInbound(&models.Message{
+		From: &models.User{ID: 7}, Chat: models.Chat{ID: 999, Type: models.ChatTypeSupergroup},
+		Text:     "@grovebot help",
+		Entities: []models.MessageEntity{{Type: models.MessageEntityTypeMention, Offset: 0, Length: 9}},
+	})
+	require.True(t, ok)
+	assert.True(t, in.Directed, "a group @mention is directed")
+}
+
 // The bot token never appears in an error surfaced from the transport.
 func TestRedactStripsToken(t *testing.T) {
 	a := New(Config{Token: "super-secret-token"}, nil)

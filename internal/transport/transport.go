@@ -27,6 +27,11 @@ type Inbound struct {
 	// ReplyTo is an opaque, transport-owned handle for where to send the reply
 	// (chat id, thread, etc.). The core never interprets it.
 	ReplyTo string
+	// Directed is true when the message is aimed at the bot: in a group, a reply to
+	// one of the bot's messages or an @mention of it; a DM is always directed. It
+	// distinguishes a message meant for the bot from ambient community chatter,
+	// which the bot logs but never answers (ADR 0012).
+	Directed bool
 	// Callback is set when this inbound is a button click (a Telegram
 	// callback_query) rather than a text message; it is nil for a normal message.
 	// The acting user and surface — the subject the runtime re-authorizes against
