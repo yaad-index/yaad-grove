@@ -53,52 +53,16 @@ func New(vaultDir string, maxChunks int) *FullText {
 func (f *FullText) Retrieve(ctx context.Context, query string) ([]core.Chunk, error) {
 	queryTerms := tokenize(query)
 
-	var scored []scoredChunk
-	order := 0
-	err := filepath.WalkDir(f.VaultDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if cerr := ctx.Err(); cerr != nil {
-			return cerr
-		}
-		if d.IsDir() {
-			if path != f.VaultDir && strings.HasPrefix(d.Name(), ".") {
-				return fs.SkipDir // skip dot-dirs (.git, .obsidian, ...)
-			}
-			return nil
-		}
-		if !strings.EqualFold(filepath.Ext(d.Name()), ".md") {
-			return nil // markdown only
-		}
-		content, rerr := os.ReadFile(path)
-		if rerr != nil {
-			return rerr
-		}
-		rel, rerr := filepath.Rel(f.VaultDir, path)
-		if rerr != nil {
-			return rerr
-		}
-		rel = filepath.ToSlash(rel)
-
-		for _, c := range chunkMarkdown(stripFrontmatter(string(content))) {
-			source := rel
-			if c.heading != "" {
-				source = rel + "#" + c.heading
-			}
-			if s := score(queryTerms, c.text); s > 0 {
-				scored = append(scored, scoredChunk{
-					chunk: core.Chunk{Source: source, Text: strings.TrimSpace(c.text)},
-					score: s,
-					order: order,
-				})
-			}
-			order++
-		}
-		return nil
-	})
+	chunks, err := vaultChunks(ctx, f.VaultDir)
 	if err != nil {
-		return nil, fmt.Errorf("retrieval: scan %s: %w", f.VaultDir, err)
+		return nil, err
+	}
+
+	var scored []scoredChunk
+	for order, c := range chunks {
+		if s := score(queryTerms, c.Text); s > 0 {
+			scored = append(scored, scoredChunk{chunk: c, score: s, order: order})
+		}
 	}
 
 	sort.Slice(scored, func(i, j int) bool {
@@ -124,6 +88,56 @@ func (f *FullText) Retrieve(ctx context.Context, query string) ([]core.Chunk, er
 		out[i] = sc.chunk
 	}
 	return out, nil
+}
+
+// vaultChunks walks vaultDir and returns every curated chunk in scan order — the
+// shared chunking both the keyword and the semantic retriever build on (ADR
+// 0017), so query- and chunk-embedding are over the same units. Each *.md file
+// (dot-dirs skipped) has its frontmatter stripped and is split on headings; a
+// chunk's Source is the file path, plus "#heading" when it has one, and its Text
+// is trimmed. A missing/unreadable vault is an error; an empty vault returns no
+// chunks.
+func vaultChunks(ctx context.Context, vaultDir string) ([]core.Chunk, error) {
+	var chunks []core.Chunk
+	err := filepath.WalkDir(vaultDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
+		if d.IsDir() {
+			if path != vaultDir && strings.HasPrefix(d.Name(), ".") {
+				return fs.SkipDir // skip dot-dirs (.git, .obsidian, ...)
+			}
+			return nil
+		}
+		if !strings.EqualFold(filepath.Ext(d.Name()), ".md") {
+			return nil // markdown only
+		}
+		content, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return rerr
+		}
+		rel, rerr := filepath.Rel(vaultDir, path)
+		if rerr != nil {
+			return rerr
+		}
+		rel = filepath.ToSlash(rel)
+
+		for _, c := range chunkMarkdown(stripFrontmatter(string(content))) {
+			source := rel
+			if c.heading != "" {
+				source = rel + "#" + c.heading
+			}
+			chunks = append(chunks, core.Chunk{Source: source, Text: strings.TrimSpace(c.text)})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("retrieval: scan %s: %w", vaultDir, err)
+	}
+	return chunks, nil
 }
 
 // scoredChunk pairs a chunk with its match score and scan order (for a stable,
