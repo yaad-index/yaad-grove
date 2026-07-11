@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.6.0](https://github.com/yaad-index/yaad-grove/compare/v0.5.0...v0.6.0) (2026-07-11)
+
+
+### Features
+
+* **transcript:** durable role-tagged conversation transcript (ADR 0015) ([#81](https://github.com/yaad-index/yaad-grove/issues/81)) ([c3e52fb](https://github.com/yaad-index/yaad-grove/commit/c3e52fb69a0cae4acb2f4ee1138fd0a46efb193b))
+
+
+### Bug Fixes
+
+* **memory:** language-agnostic follow-up detection (closes [#84](https://github.com/yaad-index/yaad-grove/issues/84)) ([#85](https://github.com/yaad-index/yaad-grove/issues/85)) ([6e4455e](https://github.com/yaad-index/yaad-grove/commit/6e4455e4e8849d7f514aa72ecc912300f82dcda4))
+
 ## [0.5.0](https://github.com/yaad-index/yaad-grove/compare/v0.4.0...v0.5.0) (2026-07-11)
 
 
