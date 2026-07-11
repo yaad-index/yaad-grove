@@ -7,12 +7,25 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/tools"
 )
+
+// The gated default matters: without --similarity-threshold, retrieval must
+// resolve to the block-early 0.30 floor. A dropped default tag would silently
+// flip the shipped default to brain-judges (0.0), so pin it via a real parse.
+func TestSimilarityThresholdDefault(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"serve"})
+	require.NoError(t, err)
+	assert.Equal(t, float32(0.30), cli.Serve.SimilarityThreshold, "block-early 0.30 is the shipped default")
+}
 
 // Retriever selection (ADR 0017): no embedding config → keyword; an incomplete
 // embedding pair → startup error.
