@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.2.0](https://github.com/yaad-index/yaad-grove/compare/v0.1.0...v0.2.0) (2026-07-11)
+
+
+### Features
+
+* **runtime,telegram:** reaction-mode consent nudge (ADR 0012 unit d-reaction) ([#49](https://github.com/yaad-index/yaad-grove/issues/49)) ([8bf86e4](https://github.com/yaad-index/yaad-grove/commit/8bf86e4d302d9230ee98d71723c080d5917bee13))
+* **runtime:** /consent remove — self-withdrawal (ADR 0012 unit c) ([#43](https://github.com/yaad-index/yaad-grove/issues/43)) ([c312019](https://github.com/yaad-index/yaad-grove/commit/c3120194c9b1aeef4079bd6620b9064adda64c1a))
+* **runtime:** DM consent UI — opt-in button + /start + /consent (ADR 0012 unit b) ([#42](https://github.com/yaad-index/yaad-grove/issues/42)) ([2f251f4](https://github.com/yaad-index/yaad-grove/commit/2f251f416ac5e02edb507a2ce17217d44b372fad))
+* **runtime:** surface-split answering + directed-aware group gate (ADR 0012 unit d-core) ([#46](https://github.com/yaad-index/yaad-grove/issues/46)) ([4236dcf](https://github.com/yaad-index/yaad-grove/commit/4236dcf1ab01e1b32fe0468dfa8a33f9553d9027))
+* **telegram:** directed-vs-ambient detection (ADR 0012 unit a) ([#41](https://github.com/yaad-index/yaad-grove/issues/41)) ([383a7ec](https://github.com/yaad-index/yaad-grove/commit/383a7ecd79fb55fc4d742f2bf3a56bb044681dc4))
+
+
+### Bug Fixes
+
+* **runtime:** quarantine log is group-only (BUG-3) ([#38](https://github.com/yaad-index/yaad-grove/issues/38)) ([15ae56a](https://github.com/yaad-index/yaad-grove/commit/15ae56ae26b817b444b9af7cd9d59dd74b1e9f81))
+* **telegram:** drop the pre-online backlog on startup (BUG-2) ([#37](https://github.com/yaad-index/yaad-grove/issues/37)) ([2093111](https://github.com/yaad-index/yaad-grove/commit/20931112e6cede3d3029184de7b8c35ab720b589))
+
 ## 0.1.0 (2026-07-11)
 
 
