@@ -43,6 +43,17 @@ serve:
   # surface (DMs are gated separately by admin approval).
   telegram-allowed-groups: []
 
+  # Conversation transcript (ADR 0015): a durable, role-tagged record of group
+  # conversations — human turns AND the bot's own answers — for operator review
+  # and answer-quality evaluation. It is a directory holding one append-only
+  # <chat-id>.jsonl per chat, kept SEPARATE from the quarantine log and never read
+  # by the answering or curation path (so recording the bot's answers can't drift
+  # the vault). Withdrawal is prospective: /consent remove stops new entries but
+  # keeps past ones; the opt-in disclosure states this when a transcript is active.
+  # Empty (the default) disables it. When set, the directory is created and
+  # validated writable at startup.
+  transcript-log: ""
+
 # --- Planned config (Phase 1 build; not yet read by the scaffold) ---
 #
 # tools:                 # external MCP servers whose tools this bot may call

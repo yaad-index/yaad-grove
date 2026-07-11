@@ -16,8 +16,135 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
+	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
+
+// transcriptMsg is a directed group message with the id/threading fields the
+// transcript records.
+var transcriptMsg = transport.Inbound{
+	User: core.User{ID: "u1", Display: "alice"}, Surface: core.SurfaceGroup,
+	Text: "hello", ReplyTo: "chat-1", Directed: true, MessageID: "m10", ReplyToMessageID: "m9",
+}
+
+// transcriptPolicy wires a Policy with only the transcript log set.
+func transcriptPolicy(t *transcript.MemoryLog) runtime.Policy {
+	return runtime.Policy{Transcript: t}
+}
+
+// A served message records the human turn then the bot's answer (ADR 0015), with
+// the human turn carrying speaker + threading and the bot turn the reply text.
+func TestHandlerTranscriptServedLogsHumanThenBot(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+	gate := &mockGate{decision: acl.DecideServe}
+	engine := &mockEngine{reply: core.Reply{Text: "the answer"}}
+	h := runtime.NewHandler(gate, engine, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+
+	_, err := h(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+
+	e := tlog.Entries()
+	require.Len(t, e, 2, "one human turn, one bot turn")
+	assert.Equal(t, transcript.RoleHuman, e[0].Role)
+	assert.Equal(t, "u1", e[0].UserID)
+	assert.Equal(t, "alice", e[0].Speaker)
+	assert.Equal(t, "hello", e[0].Text)
+	assert.Equal(t, "chat-1", e[0].ChatID)
+	assert.Equal(t, "m10", e[0].MessageID)
+	assert.Equal(t, "m9", e[0].ReplyTo)
+	assert.Equal(t, transcript.RoleBot, e[1].Role)
+	assert.Equal(t, "the answer", e[1].Text)
+	assert.Equal(t, "chat-1", e[1].ChatID)
+}
+
+// A refusal is the bot's real serve-path reply, so it IS recorded as a bot turn —
+// deliberately unlike the memory buffer, which drops refusals (ADR 0015).
+func TestHandlerTranscriptRefusalIsBotTurn(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+	engine := &mockEngine{reply: core.Reply{Text: "that's outside what I can answer", Refused: true}}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+
+	_, err := h(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+
+	e := tlog.Entries()
+	require.Len(t, e, 2, "a refusal still records a bot turn")
+	assert.Equal(t, transcript.RoleBot, e[1].Role)
+	assert.Contains(t, e[1].Text, "outside what I can answer")
+}
+
+// A rate-limited directed message records the human turn plus a system marker
+// (event rate_limited) so the human-turn-without-a-bot-turn gap self-explains; no
+// bot turn (the throttle notice is operational, not the engine's answer).
+func TestHandlerTranscriptRateLimitedMarker(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideRateLimited}, &mockEngine{}, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+
+	_, err := h(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+
+	e := tlog.Entries()
+	require.Len(t, e, 2)
+	assert.Equal(t, transcript.RoleHuman, e[0].Role)
+	assert.Equal(t, transcript.RoleSystem, e[1].Role)
+	assert.Equal(t, transcript.EventRateLimited, e[1].Event)
+	assert.Empty(t, e[1].Text, "a system marker carries no message text")
+	for _, x := range e {
+		assert.NotEqual(t, transcript.RoleBot, x.Role, "no bot turn for a throttled message")
+	}
+}
+
+// Consented ambient chatter records the human turn only — it is not directed, so
+// no answer is expected and there is no gap to mark (ADR 0015).
+func TestHandlerTranscriptLogOnlyNoMarker(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideLogOnly}, &mockEngine{}, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+
+	_, err := h(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+
+	e := tlog.Entries()
+	require.Len(t, e, 1, "ambient chatter is a human turn only")
+	assert.Equal(t, transcript.RoleHuman, e[0].Role)
+}
+
+// The transcript is group-only: a served DM records nothing (ADR 0015).
+func TestHandlerTranscriptGroupOnly(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+
+	_, err := h(context.Background(), transport.Inbound{User: core.User{ID: "d1"}, Surface: core.SurfaceDM, Text: "private", Directed: true})
+	require.NoError(t, err)
+	assert.Empty(t, tlog.Entries(), "a DM is never transcribed")
+}
+
+// Prospective withdrawal is automatic: once a user withdraws, the gate stops
+// serving/logging them (a nudge/silent decision), so no new transcript entries are
+// written — no purge needed, and past entries (written while consented) are never
+// touched (ADR 0015).
+func TestHandlerTranscriptProspectiveOnWithdrawal(t *testing.T) {
+	tlog := &transcript.MemoryLog{}
+
+	// While consented: served → human + bot recorded.
+	served := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+	_, err := served(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+	require.Len(t, tlog.Entries(), 2)
+
+	// After withdrawal the gate no longer serves/logs (nudge for a directed msg):
+	// no new transcript entries, and the earlier two remain.
+	withdrawn := runtime.NewHandler(&mockGate{decision: acl.DecideNudge}, &mockEngine{}, nil, nil, nil, nil, nil, transcriptPolicy(tlog))
+	_, err = withdrawn(context.Background(), transcriptMsg)
+	require.NoError(t, err)
+	assert.Len(t, tlog.Entries(), 2, "no new entries after withdrawal; past entries stay")
+}
+
+// A nil transcript log is a no-op — the bot runs without a transcript (default).
+func TestHandlerTranscriptDisabledIsNoOp(t *testing.T) {
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, nil, nil, runtime.Policy{})
+	_, err := h(context.Background(), transcriptMsg)
+	require.NoError(t, err, "no transcript configured → served normally")
+}
 
 const testTTL = time.Minute
 

@@ -35,6 +35,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/tools"
+	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 	"github.com/yaad-index/yaad-grove/internal/transport/telegram"
 )
@@ -112,6 +113,12 @@ type ServeCmd struct {
 	// vault (ADR 0004), so a later curation pass has data. The answering bot never
 	// reads it. Empty disables logging.
 	QuarantineLog string `name:"quarantine-log" default:"./quarantine.jsonl" help:"Path to the consent-gated community-message log (JSONL, append-only). Empty disables logging." type:"path"`
+
+	// The transcript is the durable, role-tagged conversation record (ADR 0015):
+	// human turns AND the bot's own answers, one append-only <chat-id>.jsonl per
+	// group chat inside this directory. Separate from the quarantine log, never read
+	// by the answering or curation path. Empty disables it (the default).
+	TranscriptLog string `name:"transcript-log" help:"Directory for per-chat conversation transcripts (one <chat-id>.jsonl each; human + bot turns, append-only). Empty disables transcripts." type:"path"`
 
 	// Admins are the platform user ids answered in a DM (ADR 0012). Admin status is
 	// a DM-surface privilege only: in the group an admin is consent-gated like any
@@ -226,6 +233,20 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		defer func() { _ = flog.Close() }()
 		qlog = flog
 	}
+
+	// The conversation transcript (ADR 0015): a durable, role-tagged record kept in a
+	// directory of per-chat files, separate from the quarantine log and never read by
+	// the answering or curation path. The directory is created + validated writable
+	// now, so a misconfigured path fails loud at startup. Empty disables it.
+	var tlog transcript.Log
+	if c.TranscriptLog != "" {
+		dlog, err := transcript.OpenDir(c.TranscriptLog)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = dlog.Close() }()
+		tlog = dlog
+	}
 	// A signal cancels ctx, which drives the whole shutdown: the transport's Run
 	// returns and the deferred Closes fire (LIFO: registry -> qlog -> callbacks ->
 	// acl -> budget). Known Phase-1 limitation: the Telegram library dispatches
@@ -265,10 +286,11 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// MemoryTurns 0 disables it — the bot then answers each message in isolation.
 	convoMemory := memory.New(c.MemoryTurns)
 	policy := runtime.Policy{
-		Admins: runtime.NewAdminSet(c.Admins),
-		Nudge:  nudge,
-		Memory: convoMemory,
-		Inject: c.MemoryInject,
+		Admins:     runtime.NewAdminSet(c.Admins),
+		Nudge:      nudge,
+		Memory:     convoMemory,
+		Inject:     c.MemoryInject,
+		Transcript: tlog,
 	}
 
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
@@ -283,6 +305,10 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if quarantineState == "" {
 		quarantineState = "disabled"
 	}
+	transcriptState := c.TranscriptLog
+	if transcriptState == "" {
+		transcriptState = "disabled"
+	}
 	// Startup line: what is actually live, so the staged wiring (sweeper, logging,
 	// tools) is verifiable at a glance.
 	log.Info("yaad-grove serving",
@@ -294,6 +320,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"callback_db", c.CallbackDB,
 		"callback_sweep", c.CallbackSweepInterval.String(),
 		"quarantine_log", quarantineState,
+		"transcript_log", transcriptState,
 		"persona", persona != "",
 		"memory_turns", c.MemoryTurns,
 		"memory_inject", c.MemoryInject,

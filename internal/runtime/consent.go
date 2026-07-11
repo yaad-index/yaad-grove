@@ -16,15 +16,25 @@ import (
 // it states BOTH that the bot answers directed messages AND that group messages
 // are logged to the knowledge base — opting in covers both, so neither is hidden.
 const (
-	consentDisclosureText = "Before I include you, here's what opting in means:\n" +
+	// The disclosure is assembled from an intro (what opting in covers), an optional
+	// transcript line (added only when a transcript is active — ADR 0015), and a
+	// closing tap instruction, so the tap line always reads last.
+	consentDisclosureIntro = "Before I include you, here's what opting in means:\n" +
 		"• In the group, I'll answer you when you reply to me or @mention me.\n" +
-		"• Your group messages are added to the community knowledge base I answer from.\n" +
-		"Tap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
-	consentGrantedText = "You're opted in — thanks. You can withdraw anytime with /consent remove."
-	consentAlreadyText = "You're already opted in. Send /consent remove to withdraw."
-	consentRemovedText = "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
-	consentErrorText   = "Something went wrong — please try again."
-	consentOptInLabel  = "Opt in"
+		"• Your group messages are added to the community knowledge base I answer from."
+	// consentTranscriptLine states the durable-record posture so "prospective +
+	// disclosed" is coherent: opting in is informed that past entries persist even
+	// after withdrawal (ADR 0015). Included only when the transcript is active.
+	consentTranscriptLine = "\n• Your messages are also kept in a lasting conversation record. Withdrawing stops new entries, but earlier ones stay."
+	consentDisclosureTap  = "\nTap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
+	// consentDisclosureText is the base disclosure with no transcript active — the
+	// pre-0015 wording, unchanged.
+	consentDisclosureText = consentDisclosureIntro + consentDisclosureTap
+	consentGrantedText    = "You're opted in — thanks. You can withdraw anytime with /consent remove."
+	consentAlreadyText    = "You're already opted in. Send /consent remove to withdraw."
+	consentRemovedText    = "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
+	consentErrorText      = "Something went wrong — please try again."
+	consentOptInLabel     = "Opt in"
 )
 
 // consenter reads and writes a user's consent; *acl.Gate satisfies it. Used by
@@ -56,7 +66,10 @@ func isConsentCommand(text string) bool {
 // `/start`, so the surface never falls through to silence. `/consent remove`
 // withdraws and, per ADR 0014, purges the user's turns from the conversation
 // buffer everywhere (an actively-read buffer must stop shaping answers at once).
-func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, in transport.Inbound) core.Reply {
+// The transcript (ADR 0015) is prospective and never read, so withdrawal just
+// stops new entries — no purge here; transcriptActive only adds the durable-record
+// line to the opt-in disclosure so consent is informed.
+func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, transcriptActive bool, in transport.Inbound) core.Reply {
 	switch strings.TrimSpace(in.Text) {
 	case "/consent":
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentGranted); err != nil {
@@ -85,8 +98,14 @@ func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, i
 	if c == acl.ConsentGranted {
 		return core.Reply{Text: consentAlreadyText}
 	}
+	disclosure := consentDisclosureText
+	if transcriptActive {
+		// Insert the durable-record line before the closing tap instruction, so the
+		// disclosure reads intro → logging → transcript → tap.
+		disclosure = consentDisclosureIntro + consentTranscriptLine + consentDisclosureTap
+	}
 	return core.Reply{
-		Text:    consentDisclosureText,
+		Text:    disclosure,
 		Actions: []core.Action{{Verb: verbConsentGrant, Label: consentOptInLabel}},
 	}
 }

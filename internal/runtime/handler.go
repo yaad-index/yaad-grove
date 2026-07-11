@@ -12,6 +12,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
+	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -90,7 +91,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
 				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
 			}
-			return dmConsentFlow(ctx, consent, policy.Memory, in), nil
+			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, in), nil
 		}
 
 		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})
@@ -110,22 +111,42 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		switch decision {
 		case acl.DecideServe, acl.DecideLogOnly, acl.DecideRateLimited:
 			logServed(ctx, qlog, in)
+			// The consented human turn also enters the durable transcript (ADR 0015),
+			// on the same consent gate as the quarantine log and across the same
+			// outcomes. Prospective withdrawal needs no action here: once a user
+			// withdraws, the gate stops classifying them as consented, so this branch
+			// no longer fires for them — new entries simply stop, past ones stay.
+			logTranscriptHuman(ctx, policy.Transcript, in)
 		}
 
 		switch decision {
 		case acl.DecideServe:
-			return answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
+			// The bot's serve-path response — an answer OR a refusal — is the bot's real
+			// reply to the query, so the transcript records it (ADR 0015). This is
+			// deliberately unlike the memory buffer, which drops refusals as useless
+			// prompt context: the transcript is an audit record, so a decline is worth
+			// recording. A silent/empty reply or an engine error leaves no bot turn.
+			if err == nil && !reply.Silent && reply.Text != "" {
+				logTranscriptBot(ctx, policy.Transcript, in, reply.Text)
+			}
+			return reply, err
 		case acl.DecideLogOnly:
 			// Consented ambient chatter: logged + buffered as conversation context
-			// (ADR 0014), no reply.
+			// (ADR 0014), no reply. Not a directed message, so no bot answer is expected
+			// and its human-only transcript entry is not a gap — no marker.
 			rememberUser(policy.Memory, in)
 			return core.Reply{Silent: true}, nil
 		case acl.DecideNudge:
 			return nudgeReply(policy.Nudge), nil
 		case acl.DecideRateLimited:
 			// Still consented content — buffer it (ADR 0014), even though the answer
-			// is throttled.
+			// is throttled. The human turn was transcribed above but the throttle notice
+			// is operational, not a bot turn — leaving a human-turn-without-a-bot-turn
+			// gap. Emit a system marker so the transcript self-explains the silence
+			// rather than reading like a bug (ADR 0015).
 			rememberUser(policy.Memory, in)
+			logTranscriptSystem(ctx, policy.Transcript, in, transcript.EventRateLimited)
 			return core.Reply{Text: rateLimitedText}, nil
 		case acl.DecideSilent:
 			// Unconsented ambient chatter: nothing at all.
@@ -202,6 +223,67 @@ func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
 		Text:    in.Text,
 	}); err != nil {
 		slog.Warn("quarantine log append failed", "err", err)
+	}
+}
+
+// logTranscriptHuman records a consented member's turn in the durable transcript
+// (ADR 0015). Like the quarantine log it is group-only — the transcript is a
+// record of community conversation, and a DM is a private one-to-one, never
+// transcribed. A nil log disables the transcript; a write failure is warned, never
+// surfaced, so it can't break a reply the user is owed. Caller invokes it only on
+// the consent-confirmed decisions, so consent is established before this runs.
+func logTranscriptHuman(ctx context.Context, tlog transcript.Log, in transport.Inbound) {
+	if tlog == nil || in.Surface != core.SurfaceGroup {
+		return
+	}
+	appendTranscript(ctx, tlog, transcript.Entry{
+		Time:      time.Now(),
+		Role:      transcript.RoleHuman,
+		ChatID:    in.ReplyTo,
+		UserID:    in.User.ID,
+		Speaker:   in.User.Display,
+		Text:      in.Text,
+		MessageID: in.MessageID,
+		ReplyTo:   in.ReplyToMessageID,
+	})
+}
+
+// logTranscriptBot records the bot's serve-path response — an answer or a refusal
+// (ADR 0015). Group-only, same as the human turn. The bot's own sent-message id is
+// not threaded in v1 (ADR 0014's deferred bot-turn id), so the entry carries no
+// MessageID.
+func logTranscriptBot(ctx context.Context, tlog transcript.Log, in transport.Inbound, text string) {
+	if tlog == nil || in.Surface != core.SurfaceGroup {
+		return
+	}
+	appendTranscript(ctx, tlog, transcript.Entry{
+		Time:   time.Now(),
+		Role:   transcript.RoleBot,
+		ChatID: in.ReplyTo,
+		Text:   text,
+	})
+}
+
+// logTranscriptSystem records an operational marker that explains why a directed
+// turn has no bot answer (ADR 0015) — currently only the rate-limited case.
+// Group-only. It carries no user or text, just the event.
+func logTranscriptSystem(ctx context.Context, tlog transcript.Log, in transport.Inbound, event string) {
+	if tlog == nil || in.Surface != core.SurfaceGroup {
+		return
+	}
+	appendTranscript(ctx, tlog, transcript.Entry{
+		Time:   time.Now(),
+		Role:   transcript.RoleSystem,
+		ChatID: in.ReplyTo,
+		Event:  event,
+	})
+}
+
+// appendTranscript writes one entry, warning (never failing) on error — the
+// transcript is a best-effort record, like the quarantine log.
+func appendTranscript(ctx context.Context, tlog transcript.Log, e transcript.Entry) {
+	if err := tlog.Append(ctx, e); err != nil {
+		slog.Warn("transcript append failed", "err", err, "role", e.Role)
 	}
 }
 

@@ -3,6 +3,7 @@ package runtime_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -12,6 +13,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
+	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -60,6 +62,32 @@ func TestDMConsentUnconsentedPresentsOptIn(t *testing.T) {
 	assert.Contains(t, reply.Text, "knowledge base", "discloses logging")
 	require.Len(t, reply.Actions, 1)
 	assert.Equal(t, "consent_grant", reply.Actions[0].Verb)
+}
+
+// When a transcript is active, the disclosure adds the durable-record line so
+// opt-in is informed that past entries persist after withdrawal (ADR 0015); with
+// no transcript it stays the base wording.
+func TestDMConsentDisclosureTranscriptLine(t *testing.T) {
+	consent := &mockConsenter{consent: acl.ConsentUnknown}
+
+	// Base (no transcript): no persistence line.
+	base, err := consentHandler(consent)(context.Background(), dmInbound("/start"))
+	require.NoError(t, err)
+	assert.NotContains(t, base.Text, "lasting conversation record")
+
+	// Transcript active: the persistence line appears, and the tap instruction still
+	// reads last.
+	withT := runtime.NewHandler(
+		&mockGate{decision: acl.DecideServe}, &mockEngine{}, nil, nil, nil, nil,
+		&mockConsenter{consent: acl.ConsentUnknown},
+		runtime.Policy{Transcript: &transcript.MemoryLog{}},
+	)
+	reply, err := withT(context.Background(), dmInbound("/start"))
+	require.NoError(t, err)
+	assert.Contains(t, reply.Text, "lasting conversation record", "discloses the durable record")
+	assert.Contains(t, reply.Text, "earlier ones stay", "discloses prospective withdrawal")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(reply.Text), "/consent remove."), "tap instruction stays last")
+	require.Len(t, reply.Actions, 1)
 }
 
 // A bare non-command DM is an implicit /start — it offers the opt-in, never falls
