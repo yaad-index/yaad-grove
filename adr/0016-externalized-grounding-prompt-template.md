@@ -15,6 +15,8 @@ Extract `groundedSystemPrompt` into a Go `text/template` with placeholders `{{.P
 
 `{{.History}}` and `{{.Context}}` are the already-rendered conversation and retrieval blocks (their internal formatting is unchanged), so the template assembles pre-built sections in order rather than re-implementing them. `{{.Query}}` is exposed in the template data for operator use, but the default template does not place it in the system message — the query remains the separate user turn, per the model contract.
 
+**Security — `{{.Query}}` is a footgun.** Interpolating `{{.Query}}` into the *system* message reintroduces raw user content in the system role, which is a **prompt-injection surface**: a user could write system-like instructions and have them carried with system authority. The default deliberately avoids it (the query stays in the user turn). An operator template must not place `{{.Query}}` in the system prompt casually — this is exactly the "keep untrusted input out of the trusted context" principle; the placeholder exists for deliberate, informed use only.
+
 ## Invariant (the acceptance test)
 
 With no `--prompt-template`, the engine renders the embedded default template to the **same output as the pre-refactor `groundedSystemPrompt`, byte-for-byte**, for the same inputs. Externalization is a pure refactor at the default — **zero behavioral change**. This is a stated invariant, not a test footnote.
