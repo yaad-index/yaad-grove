@@ -155,47 +155,60 @@ func (g *Gate) resolveTier(rec Record) Tier {
 // an unconsented user is never counted (they are bounded by the consent-prompt
 // throttle instead), extending that guarantee to the rate path. A store error at
 // any step fails closed (DecideRefuse) — never serve on an unknown state.
+//
+// The whole read-modify-write runs in one Store.Update transaction, so
+// concurrent messages from a user can't double-grant consent or double-count the
+// rate window.
 func (g *Gate) Check(ctx context.Context, user core.User, surface core.Surface) (Decision, error) {
-	rec, err := g.store.Get(ctx, user.ID)
-	if err != nil {
-		return DecideRefuse, err
+	now := time.Now()
+	var decision Decision
+	if err := g.store.Update(ctx, user.ID, func(rec *Record) error {
+		decision = g.decide(rec, surface, now)
+		return nil
+	}); err != nil {
+		return DecideRefuse, err // fail closed on an unknown state
 	}
+	return decision, nil
+}
 
+// decide applies the gate policy to rec in place (the caller persists it in the
+// transaction) and returns the decision.
+func (g *Gate) decide(rec *Record, surface core.Surface, now time.Time) Decision {
 	// Surface reach (ADR 0003): a DM is served only to an admin-approved user; a
 	// group message is already membership-bounded upstream by the transport.
 	if surface == core.SurfaceDM && !rec.DMApproved {
-		return DecideRefuse, nil
+		return DecideRefuse
 	}
 
-	// Consent hard gate (ADR 0002): anything but ConsentGranted is unconsented
-	// (unknown and declined collapse to the same "keep prompting" state). The only
-	// response is the consent prompt, throttled; nothing the user said is recorded.
+	// Consent hard gate (ADR 0002). Opt-in by continuing: an unconsented user who
+	// was already prompted is taken to have opted in by messaging again — as the
+	// consent prompt promises ("if you keep chatting, you're opting in"). This is
+	// checked BEFORE the re-prompt throttle, so the opt-in holds however long
+	// after the prompt the user returns; the throttle only guards the first
+	// prompt. Only ConsentUnknown auto-grants — a user who explicitly declined is
+	// never opted in for them (that path stays a prompt).
 	if rec.Consent != ConsentGranted {
-		now := time.Now()
-		if !rec.LastPromptedAt.IsZero() && now.Sub(rec.LastPromptedAt) < consentPromptThrottle {
-			return DecideSilent, nil // within the throttle window — say nothing
+		if rec.Consent == ConsentUnknown && !rec.LastPromptedAt.IsZero() {
+			rec.Consent = ConsentGranted // fall through to rate-limit + serve
+		} else {
+			if !rec.LastPromptedAt.IsZero() && now.Sub(rec.LastPromptedAt) < consentPromptThrottle {
+				return DecideSilent // within the throttle window — say nothing
+			}
+			rec.LastPromptedAt = now
+			return DecideAskConsent
 		}
-		rec.LastPromptedAt = now
-		if err := g.store.Put(ctx, rec); err != nil {
-			return DecideRefuse, err
-		}
-		return DecideAskConsent, nil
 	}
 
 	// Rate limit (ADR 0003) — consented users only, per-user fairness. The global
 	// spend ceiling (ADR 0006) is the cost backstop, checked on the model-call
 	// path, not here.
-	allow := allowanceFor(g.resolveTier(rec))
-	now := time.Now()
+	allow := allowanceFor(g.resolveTier(*rec))
 	if rec.RateWindowStart.IsZero() || now.Sub(rec.RateWindowStart) >= rateWindow {
 		rec.RateWindowStart, rec.RateCount = now, 0
 	}
 	if allow != unlimitedRate && rec.RateCount >= allow {
-		return DecideRateLimited, nil
+		return DecideRateLimited
 	}
 	rec.RateCount++
-	if err := g.store.Put(ctx, rec); err != nil {
-		return DecideRefuse, err
-	}
-	return DecideServe, nil
+	return DecideServe
 }

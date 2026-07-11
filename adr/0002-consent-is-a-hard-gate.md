@@ -27,6 +27,15 @@ The only state kept for a non-consented user is a minimal ACL row — platform
 user-id, consent flag, rate counter — so the bot can remember their state and
 throttle the reminder. That is operational metadata, not content.
 
+**Clarification (2026-07-11, wiring).** "Saying yes" is realized as **opt-in by
+continuing**: the first message gets the consent ask; a *subsequent* message is
+the opt-in, exactly as the prompt states ("reply with any message to opt in").
+The grant is taken however long after the prompt the user returns — the re-prompt
+throttle governs only how often the ask is shown, never the opt-in. Only the
+not-yet-answered state opts in this way; an explicit decline stays out and is
+never auto-granted (its full divergence from "ignore" is a later refinement).
+This transition was specified in prose above but not wired until v0.1.x.
+
 ## Consequences
 - The privacy promise is simple and total: no consent, no record, no answer.
 - Declining does not make the bot misbehave; it just stays silent-but-for-the-

@@ -20,9 +20,9 @@ import (
 // record is kept to do so.
 const (
 	consentPromptText = "Hi — I answer questions from a curated knowledge base. " +
-		"If you keep chatting with me, you're opting in, and I'll keep a minimal record " +
-		"(just enough to remember your choice), never the content of your messages until you do. " +
-		"Reply to continue, or ignore this if you'd rather not."
+		"To opt in, just reply with any message; ignore this to stay out. " +
+		"I keep only a minimal record (enough to remember your choice), and never the content of " +
+		"your messages until you opt in."
 	refuseText      = "Sorry, I can't help with that here."
 	rateLimitedText = "You've hit the rate limit — please try again shortly."
 	atCapacityText  = "I'm at capacity right now — please try again a little later."
@@ -125,7 +125,10 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // disables logging; a log failure is warned, never surfaced, so it can't break a
 // reply the user is owed.
 func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
-	if qlog == nil {
+	// Group-only (ADR 0004): the growth corpus is community chatter. A served DM is
+	// a private one-to-one exchange (typically an admin), not community content, so
+	// it is never logged.
+	if qlog == nil || in.Surface != core.SurfaceGroup {
 		return
 	}
 	if err := qlog.Append(ctx, quarantine.Entry{

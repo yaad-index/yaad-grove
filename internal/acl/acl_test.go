@@ -68,8 +68,9 @@ func check(t *testing.T, g *acl.Gate, id string, surface core.Surface) acl.Decis
 	return d
 }
 
-// Consent is a hard gate: unknown/declined → ask (never implied yes); granted →
-// serve. A repeat within the throttle window → silent.
+// Consent is a hard gate (ADR 0002): a first-seen user is asked (never implied
+// yes); continuing after the prompt is the opt-in → grant + serve; an explicitly
+// declined user is never auto-granted; granted → serve.
 func TestConsentGate(t *testing.T) {
 	store := newMemStore()
 	g := acl.NewGate(store, acl.TierDefault)
@@ -83,10 +84,14 @@ func TestConsentGate(t *testing.T) {
 	assert.False(t, rec.LastPromptedAt.IsZero(), "prompt time recorded")
 	assert.Equal(t, 0, rec.RateCount, "an unconsented user is not counted")
 
-	// A repeat within the throttle window → silent (no re-prompt).
-	assert.Equal(t, acl.DecideSilent, check(t, g, "u1", core.SurfaceGroup))
+	// The user's next message, now prompted, is the opt-in ("keep chatting, you're
+	// opting in"): serve, the record flips to Granted, and it is now counted.
+	assert.Equal(t, acl.DecideServe, check(t, g, "u1", core.SurfaceGroup))
+	rec = store.recs["u1"]
+	assert.Equal(t, acl.ConsentGranted, rec.Consent, "continuing after the prompt grants consent")
+	assert.Equal(t, 1, rec.RateCount, "the now-consented message is counted")
 
-	// Declined collapses to the same keep-prompting state (past the throttle).
+	// Declined does NOT auto-grant — it stays a prompt, never serves.
 	store.recs["u2"] = acl.Record{UserID: "u2", Consent: acl.ConsentDeclined}
 	assert.Equal(t, acl.DecideAskConsent, check(t, g, "u2", core.SurfaceGroup))
 
@@ -95,15 +100,31 @@ func TestConsentGate(t *testing.T) {
 	assert.Equal(t, acl.DecideServe, check(t, g, "u3", core.SurfaceGroup))
 }
 
-// The consent prompt past the throttle window prompts again.
-func TestConsentPromptThrottleExpires(t *testing.T) {
+// The opt-in isn't time-bounded: an unconsented user who was already prompted
+// opts in by returning even long after the prompt-throttle window elapsed — the
+// grant precedes the re-prompt throttle.
+func TestConsentOptInAfterThrottle(t *testing.T) {
 	store := newMemStore(acl.Record{
 		UserID:         "u1",
 		Consent:        acl.ConsentUnknown,
 		LastPromptedAt: time.Now().Add(-2 * time.Hour), // older than the 1h throttle
 	})
 	g := acl.NewGate(store, acl.TierDefault)
-	assert.Equal(t, acl.DecideAskConsent, check(t, g, "u1", core.SurfaceGroup))
+	assert.Equal(t, acl.DecideServe, check(t, g, "u1", core.SurfaceGroup))
+	assert.Equal(t, acl.ConsentGranted, store.recs["u1"].Consent, "returning opts in regardless of elapsed time")
+}
+
+// A declined user who was recently prompted stays silent, never serves — decline
+// is never overridden by the opt-in-by-continuing path.
+func TestConsentDeclinedNeverServes(t *testing.T) {
+	store := newMemStore(acl.Record{
+		UserID:         "u1",
+		Consent:        acl.ConsentDeclined,
+		LastPromptedAt: time.Now(),
+	})
+	g := acl.NewGate(store, acl.TierDefault)
+	assert.Equal(t, acl.DecideSilent, check(t, g, "u1", core.SurfaceGroup))
+	assert.Equal(t, acl.ConsentDeclined, store.recs["u1"].Consent, "decline is not auto-granted")
 }
 
 // Surface reach (ADR 0003): a DM is served only to an admin-approved user; the
