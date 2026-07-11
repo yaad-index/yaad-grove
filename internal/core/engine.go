@@ -78,6 +78,12 @@ type Reply struct {
 	// ephemeral reply. The runtime sets it to answer a button click (ADR 0009);
 	// it is empty for ordinary message replies.
 	Notice string
+	// Reaction is an emoji the transport attaches to the message that triggered
+	// this reply, rather than sending a new message — a Telegram setMessageReaction
+	// (CapReactions, ADR 0012). The runtime sets it for a reaction-mode consent
+	// nudge; empty leaves the reply a normal message. A transport without reactions
+	// never sees it: the runtime downgrades reaction-mode to text at wiring time.
+	Reaction string
 }
 
 // Action is an interactive affordance offered on a Reply — one button. It is a

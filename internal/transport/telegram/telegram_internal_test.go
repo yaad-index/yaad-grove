@@ -109,6 +109,36 @@ func TestSendSilentAndEmptyDoNotSend(t *testing.T) {
 		"a real reply with no running transport is an error, not a panic")
 }
 
+// react calls setMessageReaction on the triggering message with a single emoji
+// reaction (the reaction-mode consent nudge, ADR 0012).
+func TestReactSetsMessageReaction(t *testing.T) {
+	var gotChat, gotMsg, gotReaction string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/setMessageReaction") {
+			gotChat = r.FormValue("chat_id")
+			gotMsg = r.FormValue("message_id")
+			gotReaction = r.FormValue("reaction")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.react(context.Background(), 555, 42, "🤝"))
+	assert.Equal(t, "555", gotChat)
+	assert.Equal(t, "42", gotMsg)
+	assert.Contains(t, gotReaction, "🤝", "the emoji rides in the reaction list")
+	assert.Contains(t, gotReaction, "emoji", "encoded as an emoji reaction type")
+}
+
+// A reaction before Run surfaces an error rather than a nil-client panic.
+func TestReactWithoutRunningTransportErrors(t *testing.T) {
+	a := New(Config{Token: "tok"}, nil)
+	assert.Error(t, a.react(context.Background(), 555, 42, "🤝"))
+}
+
 // Send renders Actions as an inline keyboard whose callback_data is a token that
 // resolves to the action in the store.
 func TestSendRendersActionsAsKeyboard(t *testing.T) {

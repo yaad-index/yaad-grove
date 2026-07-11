@@ -189,16 +189,30 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	}
 	defer func() { _ = registry.Close() }()
 
+	var tp transport.Transport = telegram.New(telegram.Config{
+		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
+		AllowedGroups: c.TelegramGroups,
+	}, callbacks)
+
 	// The surface-split answering policy (ADR 0012): the admin allowlist (DM
 	// answering) and the consent nudge for an unconsented user who addresses the
-	// bot in a group. Both are per-instance config.
+	// bot in a group. Both are per-instance config. The composition boundary is
+	// where transport capability meets config: a reaction-mode nudge needs a
+	// transport that can react, so it is downgraded to message-mode here when the
+	// transport can't — the handler then only ever emits a nudge the transport can
+	// deliver, and the opt-in instruction is never silently dropped.
+	nudge := runtime.Nudge{
+		Mode:  runtime.NudgeMode(c.NudgeMode),
+		Text:  c.NudgeText,
+		Emoji: c.NudgeEmoji,
+	}
+	if nudge.Mode == runtime.NudgeReaction && !tp.Supports(transport.CapReactions) {
+		log.Warn("nudge-mode 'reaction' unsupported by transport; using message-mode", "transport", tp.Name())
+		nudge.Mode = runtime.NudgeMessage
+	}
 	policy := runtime.Policy{
 		Admins: runtime.NewAdminSet(c.Admins),
-		Nudge: runtime.Nudge{
-			Mode:  runtime.NudgeMode(c.NudgeMode),
-			Text:  c.NudgeText,
-			Emoji: c.NudgeEmoji,
-		},
+		Nudge:  nudge,
 	}
 
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
@@ -208,11 +222,6 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// messages are recorded (ADR 0004) and button clicks resolved.
 	actions := runtime.DefaultRegistry(gate)
 	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate, policy)
-
-	var tp transport.Transport = telegram.New(telegram.Config{
-		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
-		AllowedGroups: c.TelegramGroups,
-	}, callbacks)
 
 	quarantineState := c.QuarantineLog
 	if quarantineState == "" {

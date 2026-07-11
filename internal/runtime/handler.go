@@ -145,11 +145,16 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound) (core.Re
 }
 
 // nudgeReply renders the consent nudge for an unconsented directed message (ADR
-// 0012). This cut delivers message-mode; reaction-mode arrives with the
-// transport reaction path, so a reaction-configured nudge degrades to the message
-// text here rather than dropping the opt-in instruction.
+// 0012): reaction-mode attaches an emoji to the triggering message, message-mode
+// sends the opt-in text. The reaction path is only ever produced for a transport
+// that supports it — the composition boundary downgrades reaction-mode to
+// message-mode when the transport can't react, so the opt-in is never dropped.
 func nudgeReply(n Nudge) core.Reply {
-	return core.Reply{Text: n.resolve().Text}
+	n = n.resolve()
+	if n.Mode == NudgeReaction {
+		return core.Reply{Reaction: n.Emoji}
+	}
+	return core.Reply{Text: n.Text}
 }
 
 // logServed appends a consented group message to the quarantine log (ADR
