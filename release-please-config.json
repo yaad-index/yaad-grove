@@ -3,8 +3,7 @@
   "packages": {
     ".": {
       "release-type": "go",
-      "package-name": "yaad-grove",
-      "release-as": "0.1.0"
+      "package-name": "yaad-grove"
     }
   }
 }
