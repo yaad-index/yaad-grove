@@ -1,0 +1,22 @@
+name: release-please
+
+# Maintains a release PR from Conventional Commits and, on merge, tags the
+# release. The action runs with a PAT (RELEASE_PLEASE_TOKEN), not the default
+# GITHUB_TOKEN: a tag pushed by the default token does not retrigger workflows,
+# so the docker-publish workflow (on tag) would never fire; a PAT-pushed tag
+# does. The secret is set by the maintainer; this only references it by name.
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.RELEASE_PLEASE_TOKEN }}
