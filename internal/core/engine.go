@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 )
 
 // ErrNotImplemented marks scaffold stubs that have structure but no behavior
@@ -52,6 +53,31 @@ type Query struct {
 	User    User
 	Surface Surface
 	Text    string
+	// History is the recent-conversation context to inject (ADR 0014): prior
+	// turns the runtime selected for this query, already ordered chronologically.
+	// Empty means no history (a standalone question or a disabled buffer). It is
+	// context, never a source of facts — grounding still governs factual claims.
+	History []HistoryTurn
+}
+
+// HistoryTurn is one prior conversation turn injected into the answer prompt as
+// context (ADR 0014). It is the core-level view of a memory-buffer turn — enough
+// to render a threaded, timestamped, speaker-attributed line — with no dependency
+// on the memory subsystem; the runtime converts buffer turns into these.
+type HistoryTurn struct {
+	// Speaker is the human display label; empty (with Bot) renders as the assistant.
+	Speaker string
+	// Bot marks the bot's own prior answer.
+	Bot bool
+	// Text is the turn's content.
+	Text string
+	// Time orders and timestamps the turn in the injected block.
+	Time time.Time
+	// MessageID is this turn's id — a target another turn's ReplyTo may point at.
+	MessageID string
+	// ReplyTo is the MessageID this turn replies to, or empty. A ReplyTo whose
+	// target is not among the injected turns renders as "a message not shown".
+	ReplyTo string
 }
 
 // Reply is the engine's platform-neutral response. A transport adapter renders
@@ -286,7 +312,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: groundedSystemPrompt(e.persona, e.scope, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: groundedSystemPrompt(e.persona, e.scope, q.History, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 
@@ -330,16 +356,17 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 // citation), and — when tools are available — the tool-grounding rule into the
 // system message (ADR 0008/0011/0013).
 //
-// Ordering is load-bearing (ADR 0013): persona → scope → grounding → context. The
-// persona shapes voice and manner but comes first, so the grounding contract that
-// follows it can — and explicitly does — override any persona guidance that would
-// relax scope or factual grounding.
+// Ordering is load-bearing (ADR 0013/0014): persona → scope → grounding → recent
+// conversation → retrieved context. The persona shapes voice and comes first; the
+// grounding contract follows and overrides any persona guidance that would relax
+// scope or grounding; the recent-conversation block is injected after grounding
+// so it reads as context, never as a fact source.
 //
 // The refusal contract is domain-anchored: the model answers only questions about
 // the instance's scope/domain and emits the sentinel for anything outside it,
 // even if a tool or the context provides information about it. That is what keeps
 // tools from widening scope.
-func groundedSystemPrompt(persona, scope string, chunks []Chunk, hasTools bool) string {
+func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
 	var b strings.Builder
 	hasPersona := strings.TrimSpace(persona) != ""
 	if hasPersona {
@@ -358,6 +385,7 @@ func groundedSystemPrompt(persona, scope string, chunks []Chunk, hasTools bool) 
 	if hasPersona {
 		b.WriteString(" The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.")
 	}
+	b.WriteString(conversationBlock(history))
 	b.WriteString("\n\nCONTEXT:\n")
 	for _, c := range chunks {
 		b.WriteString("\n[" + c.Source + "]\n")
@@ -365,4 +393,50 @@ func groundedSystemPrompt(persona, scope string, chunks []Chunk, hasTools bool) 
 		b.WriteString("\n")
 	}
 	return b.String()
+}
+
+// conversationBlock renders the injected recent-conversation turns (ADR 0014) as
+// a labelled, threaded, chronological block. It is framed as partial context,
+// never a fact source: only consented participants appear, so a gap — or a reply
+// to "a message not shown" — means not-shown / not-consented, not silence. Each
+// line is timestamped and speaker-attributed; a reply-to whose target is in the
+// injected set names that speaker, else renders "a message not shown". Empty
+// history renders nothing (a standalone question or a disabled buffer).
+func conversationBlock(history []HistoryTurn) string {
+	if len(history) == 0 {
+		return ""
+	}
+	label := make(map[string]string, len(history)) // message id -> speaker, for reply-to threading
+	for _, t := range history {
+		if t.MessageID != "" {
+			label[t.MessageID] = speakerLabel(t)
+		}
+	}
+	var b strings.Builder
+	b.WriteString("\n\nRECENT CONVERSATION (context only, NOT a source of facts; a partial record — only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke):\n")
+	for _, t := range history {
+		b.WriteString("\n[")
+		b.WriteString(t.Time.Format("15:04"))
+		b.WriteString("] ")
+		b.WriteString(speakerLabel(t))
+		if t.ReplyTo != "" {
+			target := label[t.ReplyTo]
+			if target == "" {
+				target = "a message not shown"
+			}
+			b.WriteString(" (reply to " + target + ")")
+		}
+		b.WriteString(": ")
+		b.WriteString(strings.TrimSpace(t.Text))
+	}
+	return b.String()
+}
+
+// speakerLabel renders a turn's author: the human display label, or the assistant
+// for the bot's own turns.
+func speakerLabel(t HistoryTurn) string {
+	if t.Bot || t.Speaker == "" {
+		return "assistant"
+	}
+	return t.Speaker
 }
