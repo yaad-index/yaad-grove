@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.1](https://github.com/yaad-index/yaad-grove/compare/v0.3.0...v0.3.1) (2026-07-11)
+
+
+### Bug Fixes
+
+* **core:** meta follow-ups reach the model + persona-shaped refusals ([#63](https://github.com/yaad-index/yaad-grove/issues/63)) ([9675b1c](https://github.com/yaad-index/yaad-grove/commit/9675b1cd8a495f6a81f5f494ddd16402e58becb6))
+
 ## [0.3.0](https://github.com/yaad-index/yaad-grove/compare/v0.2.1...v0.3.0) (2026-07-11)
 
 
