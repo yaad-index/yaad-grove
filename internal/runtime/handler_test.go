@@ -161,6 +161,24 @@ func TestHandlerLogOnlyLogsAndStaysSilent(t *testing.T) {
 	assert.False(t, engine.called, "ambient chatter is never answered")
 }
 
+// A reaction-mode nudge attaches an emoji to the triggering message and sends no
+// text (ADR 0012); message-mode sends the opt-in text and no reaction.
+func TestHandlerNudgeModes(t *testing.T) {
+	reaction := runtime.Policy{Nudge: runtime.Nudge{Mode: runtime.NudgeReaction, Emoji: "🤝"}}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideNudge}, &mockEngine{}, nil, nil, nil, nil, nil, reaction)
+	reply, err := h(context.Background(), inbound)
+	require.NoError(t, err)
+	assert.Equal(t, "🤝", reply.Reaction, "reaction-mode attaches the emoji")
+	assert.Empty(t, reply.Text, "reaction-mode sends no text")
+
+	// Message-mode (the zero-Policy default) sends text, no reaction.
+	h = runtime.NewHandler(&mockGate{decision: acl.DecideNudge}, &mockEngine{}, nil, nil, nil, nil, nil, runtime.Policy{})
+	reply, err = h(context.Background(), inbound)
+	require.NoError(t, err)
+	assert.Empty(t, reply.Reaction, "message-mode attaches no reaction")
+	assert.Contains(t, reply.Text, "opt in", "message-mode sends the opt-in text")
+}
+
 // A rate-limited message is still consented content, so it is logged even though
 // it isn't answered — directedness/rate change the reply, not whether we log.
 func TestHandlerLogsRateLimitedMessage(t *testing.T) {

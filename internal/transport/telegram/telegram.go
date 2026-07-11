@@ -107,6 +107,15 @@ func (a *Adapter) Run(ctx context.Context, handler transport.Handler) error {
 				slog.Error("telegram handler failed", "err", err)
 				return
 			}
+			// A reaction attaches to the triggering message (ADR 0012), which is in
+			// hand here — the generic Send has only the chat, not the message id. A
+			// reaction-only reply (the reaction-mode nudge) carries no text, so Send
+			// then no-ops; a reply could carry both and would react and reply.
+			if reply.Reaction != "" {
+				if err := a.react(ctx, u.Message.Chat.ID, u.Message.ID, reply.Reaction); err != nil {
+					slog.Error("telegram react failed", "err", a.redact(err))
+				}
+			}
 			if err := a.Send(ctx, in.ReplyTo, reply); err != nil {
 				slog.Error("telegram send failed", "err", err)
 			}
@@ -257,6 +266,25 @@ func (a *Adapter) editToStatus(ctx context.Context, chatID, messageID, text stri
 		ChatID:    chat,
 		MessageID: msg,
 		Text:      text,
+	}); err != nil {
+		return a.redact(err)
+	}
+	return nil
+}
+
+// react attaches a single emoji reaction to a message (ADR 0012 CapReactions).
+// A nil/empty reaction list would clear reactions; the one-element list sets it.
+func (a *Adapter) react(ctx context.Context, chatID int64, messageID int, emoji string) error {
+	if a.bot == nil {
+		return errors.New("telegram: transport not running")
+	}
+	if _, err := a.bot.SetMessageReaction(ctx, &bot.SetMessageReactionParams{
+		ChatID:    chatID,
+		MessageID: messageID,
+		Reaction: []models.ReactionType{{
+			Type:              models.ReactionTypeTypeEmoji,
+			ReactionTypeEmoji: &models.ReactionTypeEmoji{Emoji: emoji},
+		}},
 	}); err != nil {
 		return a.redact(err)
 	}
