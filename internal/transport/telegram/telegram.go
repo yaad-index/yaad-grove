@@ -326,20 +326,26 @@ func (a *Adapter) toInbound(m *models.Message) (transport.Inbound, bool) {
 	if !ok {
 		return transport.Inbound{}, false
 	}
-	return transport.Inbound{
-		User:     userOf(m.From),
-		Surface:  surface,
-		Text:     m.Text,
-		ReplyTo:  strconv.FormatInt(m.Chat.ID, 10),
-		Directed: surface == core.SurfaceDM || a.isDirected(m),
-	}, true
+	in := transport.Inbound{
+		User:       userOf(m.From),
+		Surface:    surface,
+		Text:       m.Text,
+		ReplyTo:    strconv.FormatInt(m.Chat.ID, 10),
+		Directed:   surface == core.SurfaceDM || a.isDirected(m),
+		MessageID:  strconv.Itoa(m.ID),
+		ReplyToBot: a.replyToBot(m),
+	}
+	if m.ReplyToMessage != nil {
+		in.ReplyToMessageID = strconv.Itoa(m.ReplyToMessage.ID)
+	}
+	return in, true
 }
 
 // isDirected reports whether a group message is aimed at the bot: a reply to one
 // of the bot's messages, or an @mention / text-mention of it (ADR 0012). It needs
 // the bot's identity (set in Run); without it, only what can be matched matches.
 func (a *Adapter) isDirected(m *models.Message) bool {
-	if a.botID != 0 && m.ReplyToMessage != nil && m.ReplyToMessage.From != nil && m.ReplyToMessage.From.ID == a.botID {
+	if a.replyToBot(m) {
 		return true
 	}
 	for _, e := range m.Entities {
@@ -357,6 +363,13 @@ func (a *Adapter) isDirected(m *models.Message) bool {
 		}
 	}
 	return false
+}
+
+// replyToBot reports whether m is a reply to one of the bot's own messages — the
+// conversation-memory follow-up signal and one of the directed-detection cases
+// (ADR 0012/0014). It needs the bot's identity (set in Run).
+func (a *Adapter) replyToBot(m *models.Message) bool {
+	return a.botID != 0 && m.ReplyToMessage != nil && m.ReplyToMessage.From != nil && m.ReplyToMessage.From.ID == a.botID
 }
 
 // entityText extracts the substring a Telegram entity covers. Entity offsets and

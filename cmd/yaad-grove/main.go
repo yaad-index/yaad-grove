@@ -26,6 +26,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
@@ -109,6 +110,13 @@ type ServeCmd struct {
 	NudgeMode  string `name:"nudge-mode" default:"message" enum:"message,reaction" help:"How to nudge an unconsented user who addresses the bot in a group: 'message' (text reply) or 'reaction' (emoji)."`
 	NudgeText  string `name:"nudge-text" help:"Message-mode nudge copy (the opt-in instruction). Empty uses a sensible default."`
 	NudgeEmoji string `name:"nudge-emoji" help:"Reaction-mode nudge emoji. Empty uses a sensible default (🤝)."`
+
+	// Conversation memory (ADR 0014): a per-conversation buffer of recent turns so
+	// the bot can answer follow-ups ("tldr", "what about X"). MemoryTurns is how
+	// many turns are RETAINED; MemoryInject is how many actually enter a prompt.
+	// MemoryTurns 0 disables the buffer (each message answered in isolation).
+	MemoryTurns  int `name:"memory-turns" default:"100" help:"Recent conversation turns retained per chat for follow-ups (0 disables)."`
+	MemoryInject int `name:"memory-inject" default:"15" help:"How many retained turns may enter a prompt (the injected slice)."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -225,9 +233,14 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		log.Warn("nudge-mode 'reaction' unsupported by transport; using message-mode", "transport", tp.Name())
 		nudge.Mode = runtime.NudgeMessage
 	}
+	// Conversation memory (ADR 0014): an in-memory per-chat buffer of recent turns.
+	// MemoryTurns 0 disables it — the bot then answers each message in isolation.
+	convoMemory := memory.New(c.MemoryTurns)
 	policy := runtime.Policy{
 		Admins: runtime.NewAdminSet(c.Admins),
 		Nudge:  nudge,
+		Memory: convoMemory,
+		Inject: c.MemoryInject,
 	}
 
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
@@ -254,6 +267,8 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"callback_sweep", c.CallbackSweepInterval.String(),
 		"quarantine_log", quarantineState,
 		"persona", persona != "",
+		"memory_turns", c.MemoryTurns,
+		"memory_inject", c.MemoryInject,
 		"admins", len(policy.Admins),
 		"nudge_mode", c.NudgeMode,
 		"mcp_servers", len(servers),

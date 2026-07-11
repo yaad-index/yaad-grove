@@ -7,6 +7,7 @@ import (
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -52,9 +53,10 @@ func isConsentCommand(text string) bool {
 // backup); `/start`, a bare message, or anything else shows the opt-in button
 // with the disclosure when the user hasn't consented, or their status + the
 // withdraw hint when they already have. A bare non-command DM is an implicit
-// `/start`, so the surface never falls through to silence. (Admin DM answering is
-// wired ahead of this in unit d; `/consent remove` in unit c.)
-func dmConsentFlow(ctx context.Context, consent consenter, in transport.Inbound) core.Reply {
+// `/start`, so the surface never falls through to silence. `/consent remove`
+// withdraws and, per ADR 0014, purges the user's turns from the conversation
+// buffer everywhere (an actively-read buffer must stop shaping answers at once).
+func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, in transport.Inbound) core.Reply {
 	switch strings.TrimSpace(in.Text) {
 	case "/consent":
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentGranted); err != nil {
@@ -69,6 +71,9 @@ func dmConsentFlow(ctx context.Context, consent consenter, in transport.Inbound)
 			slog.Warn("consent removal failed", "err", err)
 			return core.Reply{Text: consentErrorText}
 		}
+		// Purge their buffered turns everywhere (ADR 0014): the buffer is read into
+		// prompts, so a withdrawn user's turns must stop shaping answers immediately.
+		buf.PurgeUser(in.User.ID)
 		return core.Reply{Text: consentRemovedText}
 	}
 
