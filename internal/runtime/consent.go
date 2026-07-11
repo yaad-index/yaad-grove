@@ -21,6 +21,7 @@ const (
 		"Tap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
 	consentGrantedText = "You're opted in — thanks. You can withdraw anytime with /consent remove."
 	consentAlreadyText = "You're already opted in. Send /consent remove to withdraw."
+	consentRemovedText = "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
 	consentErrorText   = "Something went wrong — please try again."
 	consentOptInLabel  = "Opt in"
 )
@@ -40,12 +41,21 @@ type consenter interface {
 // `/start`, so the surface never falls through to silence. (Admin DM answering is
 // wired ahead of this in unit d; `/consent remove` in unit c.)
 func dmConsentFlow(ctx context.Context, consent consenter, in transport.Inbound) core.Reply {
-	if strings.TrimSpace(in.Text) == "/consent" {
+	switch strings.TrimSpace(in.Text) {
+	case "/consent":
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentGranted); err != nil {
 			slog.Warn("consent grant failed", "err", err)
 			return core.Reply{Text: consentErrorText}
 		}
 		return core.Reply{Text: consentGrantedText}
+	case "/consent remove":
+		// Self-withdrawal, always available (ADR 0012). Back to unconsented, so the
+		// user can opt in again later.
+		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentUnknown); err != nil {
+			slog.Warn("consent removal failed", "err", err)
+			return core.Reply{Text: consentErrorText}
+		}
+		return core.Reply{Text: consentRemovedText}
 	}
 
 	c, err := consent.ConsentOf(ctx, in.User.ID)

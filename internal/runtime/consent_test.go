@@ -93,6 +93,17 @@ func TestDMConsentTextGrant(t *testing.T) {
 	assert.Equal(t, []string{"u1"}, consent.granted, "/consent grants the user's consent")
 }
 
+// /consent remove withdraws the sender's own consent (→ ConsentUnknown, re-join
+// possible) and confirms with how to opt back in.
+func TestDMConsentSelfRemove(t *testing.T) {
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	reply, err := consentHandler(consent)(context.Background(), dmInbound("/consent remove"))
+	require.NoError(t, err)
+	assert.Contains(t, reply.Text, "opted out")
+	assert.Contains(t, reply.Text, "/consent to opt back in")
+	assert.Equal(t, acl.ConsentUnknown, consent.consent, "consent is withdrawn to unknown")
+}
+
 // A DM never reaches the engine — the non-admin DM surface is consent-only (ADR
 // 0012), even for a message that looks like a query.
 func TestDMNeverAnswers(t *testing.T) {
