@@ -1,6 +1,6 @@
 # ADR 0017 — Embedding-based multilingual semantic retrieval
 
-**Status:** Proposed
+**Status:** Accepted (2026-07-11)
 **Amends:** ADR 0001 (Retriever interface), ADR 0008/0011 (grounding). Relates to ADR 0006 (spend ceiling).
 
 ## Context
@@ -59,14 +59,14 @@ The recommended embedder should be multilingual; both above are.
 - **Startup index build, endpoint unreachable → fatal.** Semantic was opted into but can't index — a deployment error, fail loud (same posture as `--persona-file`).
 - **Query-time embedding failure (mid-session) → fall back to keyword for that query + `slog.Warn`.** Keyword is the resilience net; a transient endpoint blip degrades to language-blind retrieval, never total failure.
 
-## Ranking, the threshold, and the pre-model block — OPEN DECISION for the gate
+## Ranking and the threshold — the block-early / brain-judge choice IS `--similarity-threshold`
 
-Top-k is reused (k=8). The similarity **threshold is not merely a recall knob — it is what lets the semantic retriever ever return "empty," and thus what keeps the pre-model grounding block alive.** A top-k retriever with *no* floor never returns empty for a non-empty vault: it always hands back k chunks, so the refuse-**without**-a-model-call short-circuit (the load-bearing block ADR 0008/0011 and the "dumb bot blocks before the brain" principle rely on) **never fires in semantic mode** — every off-topic query reaches the model and grounding falls entirely to the model's scope-refusal (`%%OUT_OF_SCOPE%%`). This is exactly the "block early vs. let the brain judge" fork — an architecture decision reserved for the gate, not an implementation default. Two coherent designs:
+Top-k is reused (k=8). The similarity **threshold is not merely a recall knob — it is what lets the semantic retriever ever return "empty," and thus what keeps the pre-model grounding block alive.** A top-k retriever with *no* floor never returns empty for a non-empty vault: it always hands back k chunks, so the refuse-**without**-a-model-call short-circuit (the load-bearing block of ADR 0008/0011, the "dumb bot blocks before the brain" principle) does not fire — every off-topic query reaches the model and grounding falls to the model's scope-refusal (`%%OUT_OF_SCOPE%%`). This is the "block early vs. let the brain judge" choice, and rather than hard-code a philosophy, grove exposes it as **`--similarity-threshold`**:
 
-- **(1) Conservative floor (~0.30) + top-k — RECOMMENDED.** A best match below the floor → empty → the hard block fires *before* the model. Preserves the pre-model block. The empirical floor makes over-refusal a non-issue.
-- **(2) top-k only, no floor.** Everything reaches the model; grounding is the model's scope-refusal only. Matches the "let the brain judge" musing; costs a model call per off-topic query; a weaker, more injection-exposed block.
+- **A floor set (default `0.30`) → block-early.** A best match below the floor → empty → the hard block fires *before* the model. This is the default: it preserves the pre-model block, and the empirical numbers below make over-refusal a non-issue.
+- **`--similarity-threshold=0` → brain-judges.** No floor; every query reaches the model and grounding is the model's scope-refusal only. Costs a model call per off-topic query and a weaker, more injection-exposed block — but it is the operator's choice, not grove's.
 
-`--similarity-threshold` is the knob either way (conservative default under (1); unset/0 under (2)).
+The operator picks the philosophy via one knob; grove ships block-early (0.30) out of the box.
 
 ### Empirical calibration (decision-grade)
 
@@ -79,16 +79,16 @@ Measured with `bge-m3` (a multilingual embedder) on the real Persian query vs. r
 | Persian query ↔ unrelated decoy | **0.23** |
 | Persian query ↔ English query (same meaning) | 0.54 |
 
-Cross-language valid matches (~0.43) sit well below same-language (~0.70) but clearly above noise (~0.23). A floor tuned for same-language (0.5+) would re-introduce over-refusal for the exact Persian case this ADR fixes. **A ~0.30 floor is the safe value** — above noise, below cross-language valid — which is why (1)'s default is 0.30, not 0.5.
+Cross-language valid matches (~0.43) sit well below same-language (~0.70) but clearly above noise (~0.23). A floor tuned for same-language (0.5+) would re-introduce over-refusal for the exact Persian case this ADR fixes. **A ~0.30 floor is the safe value** — above noise, below cross-language valid — which is why the default is 0.30, not 0.5.
 
-## Grounding guarantee — preserved (mechanism depends on the fork)
+## Grounding guarantee — preserved (mechanism depends on the threshold setting)
 
-The guarantee holds under both designs, but the *mechanism* differs and is the crux of the fork:
+The guarantee holds either way; the *mechanism* is what the threshold selects:
 
-- Under **(1)**, retrieval returns top-k chunks above the floor; nothing above the floor → empty → the existing refuse-without-a-model-call short-circuit fires unchanged, so the block is genuinely pre-model.
-- Under **(2)**, semantic retrieval is never empty for a non-empty vault, so the pre-model short-circuit is effectively bypassed and the model's in-prompt scope-refusal (ADR 0008 sentinel) carries the whole guarantee.
+- **Floor set (the default, 0.30):** retrieval returns top-k chunks above the floor; nothing above the floor → empty → the existing refuse-without-a-model-call short-circuit fires unchanged, so the block is genuinely pre-model.
+- **`--similarity-threshold=0`:** semantic retrieval is never empty for a non-empty vault, so the pre-model short-circuit is effectively bypassed and the model's in-prompt scope-refusal (ADR 0008 sentinel) carries the whole guarantee.
 
-Either way a query embed failure that falls back to keyword can still yield empty → refuse. The recommendation (1) keeps the pre-model block load-bearing.
+Either way a query embed failure that falls back to keyword can still yield empty → refuse. The default (0.30) keeps the pre-model block load-bearing.
 
 ## Budget (ADR 0006)
 
