@@ -1,6 +1,6 @@
 # ADR 0010: Proposed actions and informed consent
 
-**Status:** Proposed (2026-07-10)
+**Status:** Accepted (2026-07-10)
 
 ## Context
 

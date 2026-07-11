@@ -1,6 +1,6 @@
 # ADR 0006: Global spend ceiling — a metered, fail-safe cost backstop
 
-**Status:** Proposed (2026-07-09)
+**Status:** Accepted (2026-07-09)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0009: Interactive actions and the callback security spine
 
-**Status:** Proposed (2026-07-10)
+**Status:** Accepted (2026-07-10)
 
 ## Context
 
