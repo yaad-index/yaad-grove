@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.4.0](https://github.com/yaad-index/yaad-grove/compare/v0.3.3...v0.4.0) (2026-07-11)
+
+
+### Features
+
+* **core,cmd:** externalize the grounding prompt into a template (ADR 0016) ([#71](https://github.com/yaad-index/yaad-grove/issues/71)) ([2c96ee4](https://github.com/yaad-index/yaad-grove/commit/2c96ee407f27907250cd9be9ece905bce1cb65a4))
+
+
+### Bug Fixes
+
+* **core:** log the prompt-template exec-error fallback (closes [#73](https://github.com/yaad-index/yaad-grove/issues/73)) ([#74](https://github.com/yaad-index/yaad-grove/issues/74)) ([3112020](https://github.com/yaad-index/yaad-grove/commit/3112020f203f22839a89b7e9514f1d96dfd87d63))
+
 ## [0.3.3](https://github.com/yaad-index/yaad-grove/compare/v0.3.2...v0.3.3) (2026-07-11)
 
 
