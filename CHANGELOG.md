@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.2](https://github.com/yaad-index/yaad-grove/compare/v0.3.1...v0.3.2) (2026-07-11)
+
+
+### Bug Fixes
+
+* keep source grounding internal — don't surface vault refs as dead links ([#66](https://github.com/yaad-index/yaad-grove/issues/66)) ([b956571](https://github.com/yaad-index/yaad-grove/commit/b95657182ee63dd568092e0d0a2a6e3e55e704b0))
+
 ## [0.3.1](https://github.com/yaad-index/yaad-grove/compare/v0.3.0...v0.3.1) (2026-07-11)
 
 
