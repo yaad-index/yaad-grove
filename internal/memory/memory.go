@@ -104,6 +104,26 @@ func (b *Buffer) Purge(chatID, speakerID string) {
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.purgeLocked(chatID, speakerID)
+}
+
+// PurgeUser removes a speaker's turns from EVERY conversation — the consent
+// withdrawal path proper (ADR 0012/0014): consent is per-user, not per-chat, so a
+// withdrawal must clear the user everywhere they've spoken, not only the chat the
+// /consent remove arrived on. The bot's turns are never purged.
+func (b *Buffer) PurgeUser(speakerID string) {
+	if !b.Enabled() || speakerID == "" {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for chatID := range b.convos {
+		b.purgeLocked(chatID, speakerID)
+	}
+}
+
+// purgeLocked drops speakerID's turns from one conversation; the caller holds mu.
+func (b *Buffer) purgeLocked(chatID, speakerID string) {
 	turns := b.convos[chatID]
 	kept := turns[:0]
 	for _, t := range turns {

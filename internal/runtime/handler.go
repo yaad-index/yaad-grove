@@ -9,6 +9,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/transport"
@@ -87,9 +88,9 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		// dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
-				return answer(ctx, engine, in)
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
 			}
-			return dmConsentFlow(ctx, consent, in), nil
+			return dmConsentFlow(ctx, consent, policy.Memory, in), nil
 		}
 
 		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})
@@ -113,13 +114,18 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 		switch decision {
 		case acl.DecideServe:
-			return answer(ctx, engine, in)
+			return answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
 		case acl.DecideLogOnly:
-			// Consented ambient chatter: logged above, no reply.
+			// Consented ambient chatter: logged + buffered as conversation context
+			// (ADR 0014), no reply.
+			rememberUser(policy.Memory, in)
 			return core.Reply{Silent: true}, nil
 		case acl.DecideNudge:
 			return nudgeReply(policy.Nudge), nil
 		case acl.DecideRateLimited:
+			// Still consented content — buffer it (ADR 0014), even though the answer
+			// is throttled.
+			rememberUser(policy.Memory, in)
 			return core.Reply{Text: rateLimitedText}, nil
 		case acl.DecideSilent:
 			// Unconsented ambient chatter: nothing at all.
@@ -134,11 +140,11 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 	}
 }
 
-// answer runs the engine and maps its outcome to a reply: a spend-ceiling breach
-// (ADR 0006) degrades to a capacity notice rather than crashing; any other error
-// propagates. Shared by the group serve path and the admin-DM path.
-func answer(ctx context.Context, engine answerer, in transport.Inbound) (core.Reply, error) {
-	reply, err := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text})
+// answer runs the engine with the selected recent-conversation context (ADR 0014)
+// and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
+// a capacity notice rather than crashing; any other error propagates.
+func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn) (core.Reply, error) {
+	reply, err := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text, History: history})
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
 			return core.Reply{Text: atCapacityText, Refused: true}, nil
@@ -146,6 +152,22 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound) (core.Re
 		return core.Reply{}, err
 	}
 	return reply, nil
+}
+
+// answerRemembering is the memory-aware answer path (ADR 0014): it selects the
+// recent-conversation context, records the sender's turn, answers, then records
+// the bot's answer. Select runs BEFORE the sender's turn is appended, so the
+// current message never appears in its own injected context. A refusal is not
+// buffered (a canned out-of-scope line is not useful follow-up context); a
+// nil/disabled buffer makes the whole thing a plain answer.
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, in transport.Inbound) (core.Reply, error) {
+	history := selectHistory(buf, in, injectN)
+	rememberUser(buf, in)
+	reply, err := answer(ctx, engine, in, history)
+	if err == nil && !reply.Refused {
+		rememberBot(buf, in.ReplyTo, reply.Text)
+	}
+	return reply, err
 }
 
 // nudgeReply renders the consent nudge for an unconsented directed message (ADR

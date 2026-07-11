@@ -73,6 +73,32 @@ func TestToInbound(t *testing.T) {
 	assert.False(t, ok, "a nil message is dropped")
 }
 
+// toInbound carries the message id, the replied-to id, and the reply-to-bot
+// signal used by conversation memory (ADR 0014).
+func TestToInboundMemoryFields(t *testing.T) {
+	a := New(Config{AllowedGroups: []string{"999"}}, nil)
+	a.botID = 42 // the bot's own identity, as Run would set it
+
+	m := msg(999, models.ChatTypeSupergroup, "reply text", 7, "bob")
+	m.ID = 100
+	m.ReplyToMessage = &models.Message{ID: 55, From: &models.User{ID: 42}}
+
+	in, ok := a.toInbound(m)
+	require.True(t, ok)
+	assert.Equal(t, "100", in.MessageID)
+	assert.Equal(t, "55", in.ReplyToMessageID)
+	assert.True(t, in.ReplyToBot, "a reply to the bot's message sets ReplyToBot")
+
+	// A message that is not a reply carries no reply ids and ReplyToBot is false.
+	plain := msg(999, models.ChatTypeSupergroup, "hi", 7, "bob")
+	plain.ID = 101
+	in, ok = a.toInbound(plain)
+	require.True(t, ok)
+	assert.Equal(t, "101", in.MessageID)
+	assert.Empty(t, in.ReplyToMessageID)
+	assert.False(t, in.ReplyToBot)
+}
+
 // The Display falls back to the first name when there is no username.
 func TestToInboundDisplayFallback(t *testing.T) {
 	a := New(Config{}, nil)

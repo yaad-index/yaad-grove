@@ -32,6 +32,15 @@ type Inbound struct {
 	// distinguishes a message meant for the bot from ambient community chatter,
 	// which the bot logs but never answers (ADR 0012).
 	Directed bool
+	// MessageID is the platform id of this message, and ReplyToMessageID the id of
+	// the message it replies to (empty if none). They key the conversation buffer's
+	// turns and its reply-to threading (ADR 0014).
+	MessageID        string
+	ReplyToMessageID string
+	// ReplyToBot is true when this message is a reply to one of the bot's own
+	// messages — the follow-up-gate signal for conversation memory (ADR 0014),
+	// distinct from Directed (which also covers @mentions).
+	ReplyToBot bool
 	// Callback is set when this inbound is a button click (a Telegram
 	// callback_query) rather than a text message; it is nil for a normal message.
 	// The acting user and surface — the subject the runtime re-authorizes against

@@ -1,15 +1,25 @@
 package runtime
 
-import "strings"
+import (
+	"strings"
 
-// Policy is the surface-split answering policy the handler applies (ADR 0012):
-// the admin allowlist (admins are answered in a DM) and the consent nudge shown
-// to an unconsented user who directs a message at the bot in the group. Both are
-// per-instance configuration; the zero Policy is a bot with no admins and an
-// empty nudge (message-mode, no text).
+	"github.com/yaad-index/yaad-grove/internal/memory"
+)
+
+// Policy is the surface-split answering policy the handler applies (ADR
+// 0012/0014): the admin allowlist (admins are answered in a DM), the consent
+// nudge shown to an unconsented user who directs a message at the bot in the
+// group, and the conversation-memory buffer + injection budget. All are
+// per-instance configuration; the zero Policy is a bot with no admins, an empty
+// nudge, and no conversation memory.
 type Policy struct {
 	Admins AdminSet
 	Nudge  Nudge
+	// Memory is the conversation buffer (ADR 0014); nil or disabled means the bot
+	// answers each message in isolation (pre-0014 behavior).
+	Memory *memory.Buffer
+	// Inject is how many retained turns may enter a prompt (--memory-inject).
+	Inject int
 }
 
 // AdminSet is the configured admin allowlist (ADR 0012): a user is an admin iff
