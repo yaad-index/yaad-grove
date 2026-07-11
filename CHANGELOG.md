@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.3.0](https://github.com/yaad-index/yaad-grove/compare/v0.2.1...v0.3.0) (2026-07-11)
+
+
+### Features
+
+* **core,cmd:** persona layer — PERSONA.md injected into the prompt (ADR 0013) ([#58](https://github.com/yaad-index/yaad-grove/issues/58)) ([038bb74](https://github.com/yaad-index/yaad-grove/commit/038bb7462548c64360297c21463c7835f79e7a98))
+* **core:** inject recent-conversation context into the prompt (ADR 0014 slice 2) ([#60](https://github.com/yaad-index/yaad-grove/issues/60)) ([68e1bcb](https://github.com/yaad-index/yaad-grove/commit/68e1bcb81b9f8221413f43a3dff89e6916497c38))
+* **memory:** bounded per-conversation buffer + injection selection (ADR 0014 slice 1) ([#59](https://github.com/yaad-index/yaad-grove/issues/59)) ([0d87a2f](https://github.com/yaad-index/yaad-grove/commit/0d87a2f93fdb10cce50406ba8a9a577e6ec9282a))
+* wire conversation memory end to end (ADR 0014 slice 3) ([#61](https://github.com/yaad-index/yaad-grove/issues/61)) ([35a1a60](https://github.com/yaad-index/yaad-grove/commit/35a1a601830e2299340f3923f2962f05572cb33b))
+
+
+### Bug Fixes
+
+* **telegram:** render Markdown as HTML so formatting shows ([#53](https://github.com/yaad-index/yaad-grove/issues/53)) ([#54](https://github.com/yaad-index/yaad-grove/issues/54)) ([ea00ebb](https://github.com/yaad-index/yaad-grove/commit/ea00ebba6499005a51e74c575eff7cd03be85ec2))
+
 ## [0.2.1](https://github.com/yaad-index/yaad-grove/compare/v0.2.0...v0.2.1) (2026-07-11)
 
 
