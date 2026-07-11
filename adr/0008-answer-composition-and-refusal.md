@@ -1,6 +1,6 @@
 # ADR 0008: Answer composition topology and the refusal mechanism
 
-**Status:** Proposed (2026-07-09)
+**Status:** Accepted (2026-07-09)
 
 ## Context
 

@@ -1,6 +1,6 @@
 # ADR 0007: Consent gate — a silent-throttle decision and consent-before-rate ordering
 
-**Status:** Proposed (2026-07-09)
+**Status:** Accepted (2026-07-09)
 
 ## Context
 

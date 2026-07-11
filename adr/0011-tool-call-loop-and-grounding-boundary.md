@@ -1,6 +1,6 @@
 # ADR 0011: The tool-call loop and the tool↔grounding boundary
 
-**Status:** Proposed (2026-07-11)
+**Status:** Accepted (2026-07-11)
 
 ## Context
 
