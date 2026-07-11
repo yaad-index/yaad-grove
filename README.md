@@ -7,7 +7,7 @@ documenting their own work — and a knowledge base about it. yaad-grove answers
 from that base and its tools, and refuses anything outside them: smart enough to
 understand the question, never allowed out of the bounds you designed.
 
-> **Built by agents.** yaad-grove is designed and implemented by a fleet of AI
+> **Built by agents.** yaad-grove is designed and implemented by a team of AI
 > agents, working through pull requests, independent review, and the
 > architecture decision records in [`adr/`](adr/). See [AGENTS.md](AGENTS.md)
 > for how the project is structured for them.
