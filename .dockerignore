@@ -1,0 +1,8 @@
+# Keep the build context small and free of local state / secrets.
+.git
+.github
+*.db
+*.jsonl
+vault
+Dockerfile
+.dockerignore
