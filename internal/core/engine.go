@@ -16,6 +16,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"text/template"
 	"time"
 )
 
@@ -245,6 +246,9 @@ type Engine struct {
 	// never relaxes scope or grounding — the grounding instruction that follows it
 	// overrides any persona guidance that would.
 	persona string
+	// prompt is the optional operator-supplied grounding template (ADR 0016); nil
+	// uses the embedded default, which reproduces the prior prompt byte-for-byte.
+	prompt *template.Template
 }
 
 // Option configures an Engine at construction. Options keep New's required
@@ -256,6 +260,13 @@ type Option func(*Engine)
 // no-op, so a deployment without a persona file behaves exactly as before.
 func WithPersona(persona string) Option {
 	return func(e *Engine) { e.persona = persona }
+}
+
+// WithPromptTemplate sets the operator-supplied grounding template (ADR 0016). A
+// nil template is a no-op — the engine renders the embedded default, byte-for-byte
+// identical to the prior prompt.
+func WithPromptTemplate(t *template.Template) Option {
+	return func(e *Engine) { e.prompt = t }
 }
 
 // New wires an engine from its collaborators. All are interfaces so the core
@@ -352,7 +363,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: groundedSystemPrompt(e.persona, e.scope, q.History, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, e.persona, e.scope, q.History, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 
@@ -389,50 +400,6 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 
 	// The loop hit its cap without a final answer — refuse rather than hang.
 	return Reply{Text: outOfScopeReply, Refused: true}, nil
-}
-
-// groundedSystemPrompt assembles the optional persona layer, the scope statement,
-// the refusal contract, the retrieved chunks (each tagged with its Source for
-// citation), and — when tools are available — the tool-grounding rule into the
-// system message (ADR 0008/0011/0013).
-//
-// Ordering is load-bearing (ADR 0013/0014): persona → scope → grounding → recent
-// conversation → retrieved context. The persona shapes voice and comes first; the
-// grounding contract follows and overrides any persona guidance that would relax
-// scope or grounding; the recent-conversation block is injected after grounding
-// so it reads as context, never as a fact source.
-//
-// The refusal contract is domain-anchored: the model answers only questions about
-// the instance's scope/domain and emits the sentinel for anything outside it,
-// even if a tool or the context provides information about it. That is what keeps
-// tools from widening scope.
-func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
-	var b strings.Builder
-	hasPersona := strings.TrimSpace(persona) != ""
-	if hasPersona {
-		b.WriteString(strings.TrimSpace(persona))
-		b.WriteString("\n\n---\n\n")
-	}
-	b.WriteString(strings.TrimSpace(scope))
-	b.WriteString("\n\nAnswer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with " +
-		RefusalToken + " (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. " +
-		"For an in-scope question, answer using the CONTEXT below")
-	if hasTools {
-		b.WriteString(" and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope)")
-	}
-	b.WriteString(". Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: " +
-		RefusalToken + " first, then a brief in-voice note.")
-	if hasPersona {
-		b.WriteString(" The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.")
-	}
-	b.WriteString(conversationBlock(history))
-	b.WriteString("\n\nCONTEXT:\n")
-	for _, c := range chunks {
-		b.WriteString("\n[" + c.Source + "]\n")
-		b.WriteString(strings.TrimSpace(c.Text))
-		b.WriteString("\n")
-	}
-	return b.String()
 }
 
 // conversationBlock renders the injected recent-conversation turns (ADR 0014) as
