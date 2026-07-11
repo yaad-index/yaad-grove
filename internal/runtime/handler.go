@@ -125,7 +125,10 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // disables logging; a log failure is warned, never surfaced, so it can't break a
 // reply the user is owed.
 func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
-	if qlog == nil {
+	// Group-only (ADR 0004): the growth corpus is community chatter. A served DM is
+	// a private one-to-one exchange (typically an admin), not community content, so
+	// it is never logged.
+	if qlog == nil || in.Surface != core.SurfaceGroup {
 		return
 	}
 	if err := qlog.Append(ctx, quarantine.Entry{
