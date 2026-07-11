@@ -1,6 +1,8 @@
 package main
 
 import (
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -8,8 +10,26 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/tools"
 )
+
+// Retriever selection (ADR 0017): no embedding config → keyword; an incomplete
+// embedding pair → startup error.
+func TestBuildRetriever(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	r, err := buildRetriever(&ServeCmd{VaultDir: "vault"}, log)
+	require.NoError(t, err)
+	_, isKeyword := r.(*retrieval.FullText)
+	assert.True(t, isKeyword, "no embedding endpoint → keyword retriever (zero-config default)")
+
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
+	assert.Error(t, err, "base-url without model is a startup error")
+
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "bge-m3"}, log)
+	assert.Error(t, err, "model without base-url is a startup error")
+}
 
 // The default persona path (PERSONA.md, working dir) is graceful when absent and
 // used when present; an explicitly-configured path is loaded, and a missing

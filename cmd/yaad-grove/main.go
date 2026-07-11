@@ -27,6 +27,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/embed"
 	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/pending"
@@ -70,6 +71,14 @@ type ServeCmd struct {
 
 	ModelBaseURL string `name:"model-base-url" default:"https://api.openai.com/v1" help:"OpenAI-compatible API base URL."`
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
+
+	// Semantic retrieval (ADR 0017): setting the embedding base-url + model pair
+	// (both together) switches retrieval from keyword to embedding-based, with
+	// keyword as the query-time fallback. Empty pair = keyword (zero-config
+	// default). Key: YAADGROVE_EMBEDDING_API_KEY, falling back to the model key.
+	EmbeddingBaseURL    string  `name:"embedding-base-url" help:"OpenAI-compatible embeddings API base URL. Set with --embedding-model to enable semantic retrieval (e.g. a local Ollama /v1)."`
+	EmbeddingModel      string  `name:"embedding-model" help:"Embedding model id (e.g. text-embedding-3-large, or bge-m3 via Ollama). Set together with --embedding-base-url."`
+	SimilarityThreshold float32 `name:"similarity-threshold" default:"0.30" help:"Semantic-retrieval cosine floor: a chunk must clear it to be retrieved (below the floor for everything → refusal). 0 disables the floor (every query reaches the model)."`
 
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
 
@@ -151,7 +160,13 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
 		Model:   c.ModelName,
 	}))
-	retriever := retrieval.New(c.VaultDir, 8)
+	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
+	// endpoint is configured, with keyword as the query-time fallback. Building the
+	// semantic index embeds the whole vault, so a failure here fails startup.
+	retriever, err := buildRetriever(c, log)
+	if err != nil {
+		return err
+	}
 
 	// The tool registry connects the configured MCP servers; their tools become
 	// this instance's tools (ADR 0001). Zero configured leaves a retrieval-only
@@ -334,6 +349,45 @@ func loadPromptTemplate(path string) (*template.Template, error) {
 		return nil, fmt.Errorf("prompt template %q: %w", path, err)
 	}
 	return t, nil
+}
+
+// retrievalMaxChunks caps how many chunks either retriever returns per query.
+const retrievalMaxChunks = 8
+
+// buildRetriever selects the retriever (ADR 0001/0017). With no embedding endpoint
+// it returns the keyword retriever (the zero-config default). With the embedding
+// base-url + model pair set it builds the semantic retriever — which embeds the
+// whole vault now, so a failure here is a startup error — wrapped with keyword as
+// the query-time fallback. An incomplete pair (one without the other) is a
+// startup error, like the chat-model pair. The embedding key is
+// YAADGROVE_EMBEDDING_API_KEY, falling back to the model key.
+func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
+	keyword := retrieval.New(c.VaultDir, retrievalMaxChunks)
+	base := strings.TrimSpace(c.EmbeddingBaseURL)
+	emodel := strings.TrimSpace(c.EmbeddingModel)
+	if base == "" && emodel == "" {
+		return keyword, nil
+	}
+	if base == "" || emodel == "" {
+		return nil, errors.New("serve: --embedding-base-url and --embedding-model must be set together")
+	}
+	key := os.Getenv("YAADGROVE_EMBEDDING_API_KEY")
+	if key == "" {
+		key = os.Getenv("YAADGROVE_MODEL_API_KEY")
+	}
+	embedder := embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel})
+	semantic, err := retrieval.NewSemantic(context.Background(), c.VaultDir, embedder, retrievalMaxChunks, c.SimilarityThreshold)
+	if err != nil {
+		return nil, fmt.Errorf("serve: build semantic index: %w", err)
+	}
+	// Prominent so the index size — and thus the boot embedding cost — is visible
+	// (ADR 0017 crash-loop caveat).
+	log.Info("semantic retrieval enabled",
+		"embedding_model", emodel,
+		"chunks_indexed", semantic.Len(),
+		"similarity_threshold", c.SimilarityThreshold,
+	)
+	return retrieval.Fallback{Primary: semantic, Secondary: keyword}, nil
 }
 
 // parseMCPServers parses "name=command arg1 arg2" specs into server configs.
