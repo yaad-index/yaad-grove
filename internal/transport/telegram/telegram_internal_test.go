@@ -109,6 +109,56 @@ func TestSendSilentAndEmptyDoNotSend(t *testing.T) {
 		"a real reply with no running transport is an error, not a panic")
 }
 
+// Send renders the model's Markdown as Telegram HTML: the message goes out with
+// parse_mode=HTML and the converted entities (#53).
+func TestSendUsesHTMLParseMode(t *testing.T) {
+	var parseMode, text string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			parseMode = r.FormValue("parse_mode")
+			text = r.FormValue("text")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "see **this**"}))
+	assert.Equal(t, "HTML", parseMode)
+	assert.Equal(t, "see <b>this</b>", text)
+}
+
+// On a Telegram rejection of the HTML message (a malformed-entity 400), Send
+// retries with the raw text and no parse mode, so a formatting glitch never
+// blocks the message (#53).
+func TestSendFallsBackToPlainOnHTMLError(t *testing.T) {
+	var calls int
+	var lastParseMode, lastText string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			calls++
+			lastParseMode = r.FormValue("parse_mode")
+			lastText = r.FormValue("text")
+			if calls == 1 {
+				_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"can't parse entities"}`)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "**x**"}))
+	assert.Equal(t, 2, calls, "an HTML attempt then a plain-text retry")
+	assert.Empty(t, lastParseMode, "the retry carries no parse mode")
+	assert.Equal(t, "**x**", lastText, "the retry sends the raw text")
+}
+
 // react calls setMessageReaction on the triggering message with a single emoji
 // reaction (the reaction-mode consent nudge, ADR 0012).
 func TestReactSetsMessageReaction(t *testing.T) {

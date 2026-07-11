@@ -8,6 +8,7 @@ require (
 	github.com/go-telegram/bot v1.22.0
 	github.com/modelcontextprotocol/go-sdk v1.6.1
 	github.com/stretchr/testify v1.11.1
+	github.com/yuin/goldmark v1.8.2
 	go.etcd.io/bbolt v1.5.0
 )
 
