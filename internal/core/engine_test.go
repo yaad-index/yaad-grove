@@ -6,12 +6,64 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 )
+
+// Recent-conversation history is injected as a labelled, timestamped, threaded
+// block positioned after the grounding contract and before the retrieved CONTEXT
+// (ADR 0014). A reply-to whose target is present names that speaker.
+func TestHistoryInjectedAsContext(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "vault fact"}}}
+	mdl := textModel("ok")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE")
+	tm := time.Date(2026, 7, 11, 9, 30, 0, 0, time.UTC)
+	q := core.Query{Text: "tldr", History: []core.HistoryTurn{
+		{Speaker: "Al", Text: "how do I calibrate?", Time: tm, MessageID: "m1"},
+		{Bot: true, Text: "Turn the blue dial.", Time: tm.Add(time.Minute), MessageID: "m2", ReplyTo: "m1"},
+	}}
+	_, err := e.Answer(context.Background(), q)
+	require.NoError(t, err)
+
+	sys := systemOf(mdl)
+	assert.Contains(t, sys, "RECENT CONVERSATION")
+	assert.Contains(t, sys, "Al: how do I calibrate?")
+	assert.Contains(t, sys, "assistant (reply to Al): Turn the blue dial.")
+	assert.Contains(t, sys, "09:30", "turns are timestamped")
+	assert.Less(t, strings.Index(sys, core.RefusalToken), strings.Index(sys, "RECENT CONVERSATION"),
+		"history follows the grounding contract")
+	assert.Less(t, strings.Index(sys, "RECENT CONVERSATION"), strings.Index(sys, "CONTEXT:"),
+		"history precedes the retrieved context")
+}
+
+// A reply-to whose target is not in the injected set renders "a message not
+// shown" — the reply-to counterpart of the partial-record disclosure.
+func TestHistoryReplyToNotShown(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+	mdl := textModel("ok")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE")
+	q := core.Query{Text: "more", History: []core.HistoryTurn{
+		{Speaker: "Bo", Text: "replying to a gated-out msg", Time: time.Now(), MessageID: "m9", ReplyTo: "gone"},
+	}}
+	_, err := e.Answer(context.Background(), q)
+	require.NoError(t, err)
+	assert.Contains(t, systemOf(mdl), "reply to a message not shown")
+}
+
+// No history leaves the prompt unchanged — no conversation block (backwards-
+// compatible with a disabled buffer / standalone question).
+func TestNoHistoryNoBlock(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+	mdl := textModel("ok")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE")
+	_, err := e.Answer(context.Background(), core.Query{Text: "hi"})
+	require.NoError(t, err)
+	assert.NotContains(t, systemOf(mdl), "RECENT CONVERSATION")
+}
 
 type mockRetriever struct {
 	chunks []core.Chunk
