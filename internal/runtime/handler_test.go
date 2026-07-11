@@ -144,6 +144,21 @@ func TestHandlerLogsServedMessage(t *testing.T) {
 	assert.Equal(t, "hello", entries[0].Text)
 }
 
+// The quarantine log is group-only (ADR 0004): a served group message is logged,
+// a served DM is not (a private one-to-one is not community content).
+func TestHandlerLogsGroupOnly(t *testing.T) {
+	qlog := &quarantine.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, qlog)
+
+	_, err := h(context.Background(), transport.Inbound{User: core.User{ID: "g1"}, Surface: core.SurfaceGroup, Text: "community msg"})
+	require.NoError(t, err)
+	require.Len(t, qlog.Entries(), 1, "a served group message is logged")
+
+	_, err = h(context.Background(), transport.Inbound{User: core.User{ID: "d1"}, Surface: core.SurfaceDM, Text: "private msg"})
+	require.NoError(t, err)
+	assert.Len(t, qlog.Entries(), 1, "a served DM is not logged")
+}
+
 // Every non-serve decision logs nothing — consent is not confirmed, so ADR 0002's
 // "record nothing without consent" holds.
 func TestHandlerDoesNotLogWhenNotServed(t *testing.T) {
