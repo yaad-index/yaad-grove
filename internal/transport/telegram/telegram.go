@@ -130,6 +130,16 @@ func (a *Adapter) Run(ctx context.Context, handler transport.Handler) error {
 	}
 	a.bot = b
 
+	// Drop the pre-online backlog: without this the library drains all updates
+	// queued while the bot was offline, so a user who messaged before boot gets
+	// answered (and re-prompted) on startup. deleteWebhook with drop_pending_updates
+	// clears the queue in polling mode too; the bot then only answers messages
+	// received while it is online. Best-effort — a failure just means the backlog
+	// isn't dropped, not that serving breaks.
+	if _, err := b.DeleteWebhook(ctx, &bot.DeleteWebhookParams{DropPendingUpdates: true}); err != nil {
+		slog.Warn("telegram: could not drop pending backlog on startup", "err", a.redact(err))
+	}
+
 	b.Start(ctx) // blocks until ctx is cancelled
 	return ctx.Err()
 }
