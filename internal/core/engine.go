@@ -212,12 +212,33 @@ type Engine struct {
 	// scope is the instance's system prompt / scope statement that bounds the
 	// bot and drives refusal. Loaded from config.
 	scope string
+	// persona is the optional operator-authored behavioral layer (ADR 0013): it
+	// shapes voice, social handling, and refusal wording, and is prepended to the
+	// system prompt before scope. Empty = no persona layer (current behavior). It
+	// never relaxes scope or grounding — the grounding instruction that follows it
+	// overrides any persona guidance that would.
+	persona string
+}
+
+// Option configures an Engine at construction. Options keep New's required
+// collaborators positional while letting optional layers (like persona) be added
+// without breaking existing callers.
+type Option func(*Engine)
+
+// WithPersona sets the operator-authored persona layer (ADR 0013). Empty is a
+// no-op, so a deployment without a persona file behaves exactly as before.
+func WithPersona(persona string) Option {
+	return func(e *Engine) { e.persona = persona }
 }
 
 // New wires an engine from its collaborators. All are interfaces so the core
 // carries zero transport, provider, or tool dependencies.
-func New(model Model, retriever Retriever, tools Tools, scope string) *Engine {
-	return &Engine{model: model, retriever: retriever, tools: tools, scope: scope}
+func New(model Model, retriever Retriever, tools Tools, scope string, opts ...Option) *Engine {
+	e := &Engine{model: model, retriever: retriever, tools: tools, scope: scope}
+	for _, opt := range opts {
+		opt(e)
+	}
+	return e
 }
 
 // RefusalToken is the sentinel the scope/system prompt instructs the model to
@@ -265,7 +286,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: groundedSystemPrompt(e.scope, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: groundedSystemPrompt(e.persona, e.scope, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 
@@ -304,16 +325,27 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	return Reply{Text: outOfScopeReply, Refused: true}, nil
 }
 
-// groundedSystemPrompt assembles the scope statement, the refusal contract, the
-// retrieved chunks (each tagged with its Source for citation), and — when tools
-// are available — the tool-grounding rule into the system message (ADR 0008/0011).
+// groundedSystemPrompt assembles the optional persona layer, the scope statement,
+// the refusal contract, the retrieved chunks (each tagged with its Source for
+// citation), and — when tools are available — the tool-grounding rule into the
+// system message (ADR 0008/0011/0013).
+//
+// Ordering is load-bearing (ADR 0013): persona → scope → grounding → context. The
+// persona shapes voice and manner but comes first, so the grounding contract that
+// follows it can — and explicitly does — override any persona guidance that would
+// relax scope or factual grounding.
 //
 // The refusal contract is domain-anchored: the model answers only questions about
 // the instance's scope/domain and emits the sentinel for anything outside it,
 // even if a tool or the context provides information about it. That is what keeps
 // tools from widening scope.
-func groundedSystemPrompt(scope string, chunks []Chunk, hasTools bool) string {
+func groundedSystemPrompt(persona, scope string, chunks []Chunk, hasTools bool) string {
 	var b strings.Builder
+	hasPersona := strings.TrimSpace(persona) != ""
+	if hasPersona {
+		b.WriteString(strings.TrimSpace(persona))
+		b.WriteString("\n\n---\n\n")
+	}
 	b.WriteString(strings.TrimSpace(scope))
 	b.WriteString("\n\nAnswer ONLY questions within the scope above. For anything outside that scope, reply with exactly " +
 		RefusalToken + " and nothing else — even if the CONTEXT or a tool provides information about it. " +
@@ -322,7 +354,11 @@ func groundedSystemPrompt(scope string, chunks []Chunk, hasTools bool) string {
 		b.WriteString(" and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope)")
 	}
 	b.WriteString(", and cite the [source] tags you rely on. If you cannot ground an in-scope answer, reply with exactly " +
-		RefusalToken + " and nothing else.\n\nCONTEXT:\n")
+		RefusalToken + " and nothing else.")
+	if hasPersona {
+		b.WriteString(" The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.")
+	}
+	b.WriteString("\n\nCONTEXT:\n")
 	for _, c := range chunks {
 		b.WriteString("\n[" + c.Source + "]\n")
 		b.WriteString(strings.TrimSpace(c.Text))

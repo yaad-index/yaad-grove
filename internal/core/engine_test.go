@@ -114,6 +114,42 @@ func TestAnswerGrounded(t *testing.T) {
 	assert.Equal(t, "how do I install?", mdl.lastMessages[1].Content, "user message is the raw query")
 }
 
+// The persona layer is prepended to the system prompt before scope, and the
+// grounding contract that follows reasserts it cannot relax scope or grounding
+// (ADR 0013).
+func TestPersonaInjectedBeforeScope(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+	mdl := textModel("ok")
+	persona := "You are Grove, warm and concise."
+	e := core.New(mdl, ret, nopTools{}, "You answer about the widget.", core.WithPersona(persona))
+
+	_, err := e.Answer(context.Background(), core.Query{Text: "hi"})
+	require.NoError(t, err)
+
+	sys := systemOf(mdl)
+	require.Contains(t, sys, persona)
+	assert.Less(t, strings.Index(sys, persona), strings.Index(sys, "You answer about the widget."),
+		"persona precedes scope")
+	assert.Contains(t, sys, "persona above sets your voice",
+		"the grounding contract reasserts persona can't relax scope/grounding")
+}
+
+// Without a persona the prompt is unchanged: it begins at scope, with no persona
+// section or override note (backwards-compatible — the WithPersona zero value and
+// omitting the option both mean no layer).
+func TestNoPersonaByDefault(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+	mdl := textModel("ok")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE-LINE", core.WithPersona(""))
+
+	_, err := e.Answer(context.Background(), core.Query{Text: "hi"})
+	require.NoError(t, err)
+
+	sys := systemOf(mdl)
+	assert.True(t, strings.HasPrefix(sys, "SCOPE-LINE"), "system prompt begins at scope when no persona")
+	assert.NotContains(t, sys, "persona above sets your voice", "no override note without a persona")
+}
+
 // Empty retrieval with no tools refuses without a model call.
 func TestAnswerRefusesOnEmptyRetrievalWithoutModelCall(t *testing.T) {
 	mdl := textModel("must not be produced")
