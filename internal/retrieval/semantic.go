@@ -121,5 +121,9 @@ func cosine(a, b []float32) float32 {
 	return float32(dot / (math.Sqrt(na) * math.Sqrt(nb)))
 }
 
+// Len is the number of indexed vault chunks — surfaced in the startup log so the
+// index size (and thus the boot embedding cost) is visible (ADR 0017).
+func (s *Semantic) Len() int { return len(s.chunks) }
+
 // compile-time assertion that Semantic satisfies core.Retriever.
 var _ core.Retriever = (*Semantic)(nil)
