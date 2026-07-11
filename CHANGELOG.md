@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.3.3](https://github.com/yaad-index/yaad-grove/compare/v0.3.2...v0.3.3) (2026-07-11)
+
+
+### Bug Fixes
+
+* **telegram:** strip the bot's own [@mention](https://github.com/mention) from the query ([#68](https://github.com/yaad-index/yaad-grove/issues/68)) ([e787c79](https://github.com/yaad-index/yaad-grove/commit/e787c7953ddc6131cda76295a4296021d0bc3e18))
+
 ## [0.3.2](https://github.com/yaad-index/yaad-grove/compare/v0.3.1...v0.3.2) (2026-07-11)
 
 
