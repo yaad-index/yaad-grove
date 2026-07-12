@@ -15,7 +15,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os/exec"
+	"slices"
 	"strings"
 	"sync"
 
@@ -30,10 +32,36 @@ const clientName = "yaad-grove"
 var clientVersion = "dev"
 
 // ServerConfig points at one MCP server to connect for an instance.
+//
+// Allow/Deny scope which of the server's advertised tools this instance exposes
+// (issue #87): a read-only Q&A bot should not expose a server's write or
+// identity-requiring tools (e.g. a BGG server's post_play, or get_collection which
+// needs a username the model would have to hallucinate). The filter is applied at
+// enumeration, so a non-permitted tool is neither advertised to the model nor
+// routable through Call — it cannot be reached even if the model invents its name.
 type ServerConfig struct {
 	Name    string   // logical name for logs/scoping
 	Command string   // executable to launch the stdio server
 	Args    []string // launch args
+	// Allow, when non-empty, is the exclusive set of tool names to expose — every
+	// other advertised tool is dropped (closed by default, the preferred form).
+	Allow []string
+	// Deny, used only when Allow is empty, drops the named tools and exposes the
+	// rest. Both empty means expose everything (the pre-#87 default).
+	Deny []string
+}
+
+// permits reports whether a tool name is exposed under this server's allow/deny
+// configuration. Allow takes precedence (closed by default); Deny is a subtractive
+// filter; neither set exposes everything.
+func (s ServerConfig) permits(tool string) bool {
+	if len(s.Allow) > 0 {
+		return slices.Contains(s.Allow, tool)
+	}
+	if len(s.Deny) > 0 {
+		return !slices.Contains(s.Deny, tool)
+	}
+	return true
 }
 
 // toolRef binds an advertised tool to the session that serves it. Description
@@ -75,7 +103,7 @@ func New(servers []ServerConfig) *Registry {
 func (r *Registry) Connect(ctx context.Context) error {
 	for _, s := range r.servers {
 		transport := &mcp.CommandTransport{Command: exec.CommandContext(ctx, s.Command, s.Args...)}
-		if err := r.connect(ctx, transport); err != nil {
+		if err := r.connect(ctx, transport, s); err != nil {
 			_ = r.Close()
 			return fmt.Errorf("tools: connect %q: %w", s.Name, err)
 		}
@@ -83,10 +111,15 @@ func (r *Registry) Connect(ctx context.Context) error {
 	return nil
 }
 
-// connect establishes one session over transport and registers its tools. It is
-// split from Connect (which builds a stdio transport per config) so tests can
-// drive it with an in-memory transport against a reference server.
-func (r *Registry) connect(ctx context.Context, transport mcp.Transport) error {
+// connect establishes one session over transport and registers the tools cfg
+// permits. It is split from Connect (which builds a stdio transport per config) so
+// tests can drive it with an in-memory transport against a reference server.
+//
+// The allow/deny filter (issue #87) is applied HERE, at enumeration: a
+// non-permitted tool never enters the registry, so it is absent from Defs (not
+// advertised) AND rejected by Call as unknown (not routable) — the model cannot
+// reach it even by inventing its name.
+func (r *Registry) connect(ctx context.Context, transport mcp.Transport, cfg ServerConfig) error {
 	session, err := r.client.Connect(ctx, transport, nil)
 	if err != nil {
 		return err
@@ -96,6 +129,7 @@ func (r *Registry) connect(ctx context.Context, transport mcp.Transport) error {
 		ref  toolRef
 	}
 	var found []named
+	advertised := map[string]bool{} // every tool the server offered, for allow-list typo detection
 	params := &mcp.ListToolsParams{}
 	for {
 		res, err := session.ListTools(ctx, params)
@@ -104,12 +138,37 @@ func (r *Registry) connect(ctx context.Context, transport mcp.Transport) error {
 			return err
 		}
 		for _, t := range res.Tools {
+			advertised[t.Name] = true
+			if !cfg.permits(t.Name) {
+				slog.Debug("tools: dropping non-permitted tool", "server", cfg.Name, "tool", t.Name)
+				continue
+			}
 			found = append(found, named{t.Name, toolRef{session: session, description: t.Description, inputSchema: t.InputSchema}})
 		}
 		if res.NextCursor == "" {
 			break
 		}
 		params.Cursor = res.NextCursor
+	}
+	// Surface allow/deny entries that matched nothing the server advertised — almost
+	// always an operator typo that would silently narrow (allow) or no-op (deny) the
+	// surface. Warned, not fatal: the server's tool set can legitimately vary.
+	for _, name := range cfg.Allow {
+		if !advertised[name] {
+			slog.Warn("tools: allow-listed tool not advertised by server", "server", cfg.Name, "tool", name)
+		}
+	}
+	for _, name := range cfg.Deny {
+		if !advertised[name] {
+			slog.Warn("tools: deny-listed tool not advertised by server", "server", cfg.Name, "tool", name)
+		}
+	}
+	// When a filter is configured, log a summary at the default level so an operator
+	// can confirm the allow/deny-list actually took effect in prod without turning on
+	// debug — a silently-empty filter would otherwise look identical to a working one.
+	if len(cfg.Allow) > 0 || len(cfg.Deny) > 0 {
+		slog.Info("tools: applied per-server tool filter", "server", cfg.Name,
+			"advertised", len(advertised), "exposed", len(found), "filtered", len(advertised)-len(found))
 	}
 
 	r.mu.Lock()
