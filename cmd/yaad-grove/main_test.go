@@ -156,6 +156,54 @@ func TestApplyToolLists(t *testing.T) {
 	assert.Nil(t, got[0].Deny)
 }
 
+// The kong path (#92): a comma-separated value must reach the field as ONE spec,
+// not fragmented by kong's default []string comma-splitting. This exercises the
+// real parser — the gap that let the crash-looping build ship (the applyToolLists
+// tests fed a pre-split slice and never hit kong).
+func TestMCPFlagsNotCommaSplitByKong(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{
+		"serve",
+		"--mcp-server", "svc=svc-mcp --flag",
+		"--mcp-allow", "svc=search,get_things,get_info",
+		"--mcp-deny", "wiki=post_edit,delete_page",
+	})
+	require.NoError(t, err)
+
+	// Each flag value stays a single, whole spec — commas inside are preserved.
+	assert.Equal(t, []string{"svc=svc-mcp --flag"}, cli.Serve.MCPServers)
+	assert.Equal(t, []string{"svc=search,get_things,get_info"}, cli.Serve.MCPAllow)
+	assert.Equal(t, []string{"wiki=post_edit,delete_page"}, cli.Serve.MCPDeny)
+
+	// End to end through applyToolLists: the CSV becomes the tool list, not junk.
+	// (Only the allow is applied here — its server matches --mcp-server; the deny
+	// above only needed to prove kong parses its comma value whole.)
+	servers, err := parseMCPServers(cli.Serve.MCPServers)
+	require.NoError(t, err)
+	servers, err = applyToolLists(servers, cli.Serve.MCPAllow, nil)
+	require.NoError(t, err)
+	require.Len(t, servers, 1)
+	assert.Equal(t, "svc", servers[0].Name)
+	assert.Equal(t, []string{"search", "get_things", "get_info"}, servers[0].Allow)
+}
+
+// Repeating a flag yields multiple specs (the documented "Repeatable" contract),
+// each still whole.
+func TestMCPFlagsRepeatable(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{
+		"serve",
+		"--mcp-allow", "a=x,y",
+		"--mcp-allow", "b=z",
+	})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a=x,y", "b=z"}, cli.Serve.MCPAllow)
+}
+
 func TestApplyToolListsErrors(t *testing.T) {
 	base := func() []tools.ServerConfig { return []tools.ServerConfig{{Name: "svc", Command: "s"}} }
 
