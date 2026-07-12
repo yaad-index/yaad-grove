@@ -91,6 +91,14 @@ type ServeCmd struct {
 	// "name=command arg1 arg2". Repeatable; empty means a retrieval-only bot.
 	MCPServers []string `name:"mcp-server" help:"An MCP tool server to connect, as 'name=command arg1 arg2' (args are space-separated; no spaces within an arg). Repeatable."`
 
+	// MCPAllow / MCPDeny scope which of a connected server's tools are exposed to
+	// the model (issue #87), each as "server=tool1,tool2". Allow-list is exclusive
+	// (only the listed tools; everything else dropped) and preferred so new tools are
+	// closed by default; deny-list is subtractive. A server may use one or the other,
+	// not both. Empty means all of that server's tools are exposed (prior behavior).
+	MCPAllow []string `name:"mcp-allow" help:"Expose ONLY these tools from a server, as 'server=tool1,tool2' (exclusive allow-list; all others dropped). Repeatable."`
+	MCPDeny  []string `name:"mcp-deny" help:"Drop these tools from a server, as 'server=tool1,tool2' (subtractive deny-list; the rest are exposed). Repeatable. Mutually exclusive with --mcp-allow for the same server."`
+
 	// The global spend ceiling (ADR 0006): the hard cost backstop the model-call
 	// path consults before every call. Conservative default so the bot is
 	// cost-capped out of the box; raise it to the real budget. A non-positive
@@ -179,6 +187,12 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// this instance's tools (ADR 0001). Zero configured leaves a retrieval-only
 	// bot. Connected before the transport starts and closed on shutdown.
 	servers, err := parseMCPServers(c.MCPServers)
+	if err != nil {
+		return err
+	}
+	// Scope each server's exposed tools per --mcp-allow / --mcp-deny (issue #87), so
+	// a read-only bot never advertises or can call a server's write/identity tools.
+	servers, err = applyToolLists(servers, c.MCPAllow, c.MCPDeny)
 	if err != nil {
 		return err
 	}
@@ -433,6 +447,61 @@ func parseMCPServers(specs []string) ([]tools.ServerConfig, error) {
 		out = append(out, tools.ServerConfig{Name: name, Command: fields[0], Args: fields[1:]})
 	}
 	return out, nil
+}
+
+// applyToolLists merges --mcp-allow / --mcp-deny specs onto the parsed servers by
+// name (issue #87). Each spec is "server=tool1,tool2". It fails loud on a spec
+// naming an unconfigured server (a typo would otherwise silently do nothing) and
+// on a server given both an allow and a deny list (ambiguous). The actual
+// tool-name filtering lives in the registry; this only wires config to servers.
+func applyToolLists(servers []tools.ServerConfig, allowSpecs, denySpecs []string) ([]tools.ServerConfig, error) {
+	idx := make(map[string]int, len(servers))
+	for i, s := range servers {
+		idx[s.Name] = i
+	}
+	assign := func(specs []string, kind string, set func(*tools.ServerConfig, []string)) error {
+		for _, spec := range specs {
+			name, csv, ok := strings.Cut(spec, "=")
+			name = strings.TrimSpace(name)
+			if !ok || name == "" {
+				return fmt.Errorf("serve: invalid --mcp-%s %q (want 'server=tool1,tool2')", kind, spec)
+			}
+			i, known := idx[name]
+			if !known {
+				return fmt.Errorf("serve: --mcp-%s %q names unknown server %q (no matching --mcp-server)", kind, spec, name)
+			}
+			list := splitTools(csv)
+			if len(list) == 0 {
+				return fmt.Errorf("serve: --mcp-%s %q lists no tools", kind, spec)
+			}
+			set(&servers[i], list)
+		}
+		return nil
+	}
+	if err := assign(allowSpecs, "allow", func(s *tools.ServerConfig, l []string) { s.Allow = l }); err != nil {
+		return nil, err
+	}
+	if err := assign(denySpecs, "deny", func(s *tools.ServerConfig, l []string) { s.Deny = l }); err != nil {
+		return nil, err
+	}
+	for _, s := range servers {
+		if len(s.Allow) > 0 && len(s.Deny) > 0 {
+			return nil, fmt.Errorf("serve: server %q has both --mcp-allow and --mcp-deny; use one (allow-list is exclusive)", s.Name)
+		}
+	}
+	return servers, nil
+}
+
+// splitTools parses a "tool1,tool2" list, trimming blanks so a stray comma can't
+// inject an empty tool name.
+func splitTools(csv string) []string {
+	var out []string
+	for _, t := range strings.Split(csv, ",") {
+		if t = strings.TrimSpace(t); t != "" {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // VersionCmd prints the build version.

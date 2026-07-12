@@ -28,15 +28,20 @@ func referenceServer() *mcp.Server {
 }
 
 // connectTo wires the registry to server over in-memory transports (server side
-// connected first, per the protocol's initialization ordering).
-func connectTo(t *testing.T, r *Registry, server *mcp.Server) {
+// connected first, per the protocol's initialization ordering). An optional
+// ServerConfig supplies the allow/deny filter; omitted means expose everything.
+func connectTo(t *testing.T, r *Registry, server *mcp.Server, cfg ...ServerConfig) {
 	t.Helper()
 	ctx := context.Background()
+	c := ServerConfig{}
+	if len(cfg) > 0 {
+		c = cfg[0]
+	}
 	clientT, serverT := mcp.NewInMemoryTransports()
 	ss, err := server.Connect(ctx, serverT, nil)
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = ss.Close() })
-	require.NoError(t, r.connect(ctx, clientT))
+	require.NoError(t, r.connect(ctx, clientT, c))
 	t.Cleanup(func() { _ = r.Close() })
 }
 
@@ -98,6 +103,64 @@ func TestMultipleServersAggregate(t *testing.T) {
 	out, err := r.Call(context.Background(), "ping", nil)
 	require.NoError(t, err)
 	assert.Equal(t, "pong", out)
+}
+
+// An allow-list exposes ONLY its tools: a dropped tool is absent from Defs (not
+// advertised) AND rejected by Call as unknown (not routable) — closing the
+// invented-name hole (#87).
+func TestConnectAllowList(t *testing.T) {
+	r := New(nil)
+	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref", Allow: []string{"echo"}})
+
+	assert.ElementsMatch(t, []string{"echo"}, defNames(r), "only the allow-listed tool is advertised")
+
+	// The dropped tool is not callable even by exact name.
+	_, err := r.Call(context.Background(), "boom", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown tool", "a filtered tool is unroutable, not just unadvertised")
+
+	// The allowed tool still works.
+	out, err := r.Call(context.Background(), "echo", map[string]any{"text": "hi"})
+	require.NoError(t, err)
+	assert.Equal(t, "echo: hi", out)
+}
+
+// A deny-list drops its tools and exposes the rest.
+func TestConnectDenyList(t *testing.T) {
+	r := New(nil)
+	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref", Deny: []string{"boom"}})
+
+	assert.ElementsMatch(t, []string{"echo"}, defNames(r), "the denied tool is dropped, the rest exposed")
+	_, err := r.Call(context.Background(), "boom", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown tool")
+}
+
+// No allow/deny list exposes everything (backwards compatible).
+func TestConnectNoListExposesAll(t *testing.T) {
+	r := New(nil)
+	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref"})
+	assert.ElementsMatch(t, []string{"echo", "boom"}, defNames(r))
+}
+
+// permits: allow is exclusive and takes precedence; deny is subtractive; neither
+// exposes all.
+func TestServerConfigPermits(t *testing.T) {
+	assert.True(t, ServerConfig{}.permits("anything"), "no list → all permitted")
+
+	allow := ServerConfig{Allow: []string{"a", "b"}}
+	assert.True(t, allow.permits("a"))
+	assert.False(t, allow.permits("c"), "allow is exclusive")
+
+	deny := ServerConfig{Deny: []string{"x"}}
+	assert.False(t, deny.permits("x"))
+	assert.True(t, deny.permits("y"), "deny is subtractive")
+
+	// Defensive: if both are somehow set, allow wins (config parsing rejects this,
+	// but the predicate must still fail closed to the exclusive list).
+	both := ServerConfig{Allow: []string{"a"}, Deny: []string{"a"}}
+	assert.True(t, both.permits("a"))
+	assert.False(t, both.permits("b"))
 }
 
 // A registry with no servers connects to nothing and lists nothing — no panic.

@@ -61,4 +61,13 @@ serve:
 #     command: some-mcp-server
 #     args: ["--flag"]
 #
+# Per-server tool allow/deny (issue #87): expose only the tools an instance needs.
+# A read-only Q&A bot should drop a server's write or identity-requiring tools
+# (e.g. ones that need a username the model would otherwise hallucinate). Filtering
+# happens at enumeration, so a dropped tool is neither advertised to the model nor
+# callable. Use an allow-list (exclusive — everything else dropped, closed by
+# default) OR a deny-list (subtractive) per server, not both.
+#   mcp-allow: ["example=search,lookup"]     # expose ONLY these
+#   mcp-deny:  ["example=write_thing"]        # expose all EXCEPT these
+#
 # admins: ["<platform-user-id>"]         # who may configure the bot live
