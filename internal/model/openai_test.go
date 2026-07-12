@@ -181,6 +181,39 @@ func TestCompleteToolCalls(t *testing.T) {
 	assert.JSONEq(t, `{"type":"object"}`, string(sent.Tools[0].Function.Parameters))
 }
 
+// A model that emits its NATIVE tool-call syntax in `content` (empty structured
+// tool_calls) is parsed into a real tool call, and no sentinel reaches the text
+// (#88) — the deployed deepseek symptom.
+func TestCompleteParsesNativeToolCall(t *testing.T) {
+	nativeContent := "let me look that up\n\n" +
+		"function<|tool_sep|>search\n" +
+		`{"q":"acme-game"}` + "\n" +
+		"<|tool_call_end|>"
+	// Marshal the whole response so the native newlines/quotes are correctly escaped.
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{
+			{"message": map[string]any{"role": "assistant", "content": nativeContent}},
+		},
+		"usage": map[string]any{"total_tokens": 7},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "deepseek"})
+	res, err := c.Complete(context.Background(), msgs("s", "u"), nil)
+	require.NoError(t, err)
+
+	require.Len(t, res.ToolCalls, 1, "the native call is parsed into a structured tool call")
+	assert.Equal(t, "search", res.ToolCalls[0].Name)
+	assert.Equal(t, "acme-game", res.ToolCalls[0].Arguments["q"])
+	assert.NotContains(t, res.Text, "<|tool_sep|>", "no sentinel reaches the user")
+	assert.NotContains(t, res.Text, "<|tool_call_end|>")
+}
+
 // An assistant tool-call turn and the tool-result turn round-trip their
 // correlation ids on the wire (OpenAI rejects unmatched tool results).
 func TestCompleteRoundTripsToolMessages(t *testing.T) {
