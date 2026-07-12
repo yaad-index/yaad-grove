@@ -154,8 +154,19 @@ func (c *Client) Complete(ctx context.Context, messages []core.Message, tools []
 	if err != nil {
 		return core.Completion{}, err
 	}
+	text := msg.Content
+	// Native tool-call fallback (#88): some models emit a tool call in their native
+	// syntax inside `content` instead of the structured `tool_calls` field. When the
+	// structured field is empty, parse any native calls out of the content so the
+	// tool loop still runs; either way strip the sentinels so they never reach a
+	// user (a structured call plus a stray sentinel still gets scrubbed).
+	if len(toolCalls) == 0 {
+		text, toolCalls = parseNativeToolCalls(text)
+	} else {
+		text = stripToolSentinels(text)
+	}
 	return core.Completion{
-		Text:      msg.Content,
+		Text:      text,
 		ToolCalls: toolCalls,
 		Usage: core.Usage{
 			PromptTokens:     out.Usage.PromptTokens,
