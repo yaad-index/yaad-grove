@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.8.0](https://github.com/yaad-index/yaad-grove/compare/v0.7.0...v0.8.0) (2026-07-12)
+
+
+### Features
+
+* **quarantine:** record chat id for per-chat curation (closes [#96](https://github.com/yaad-index/yaad-grove/issues/96)) ([#97](https://github.com/yaad-index/yaad-grove/issues/97)) ([c9e1161](https://github.com/yaad-index/yaad-grove/commit/c9e11611d9ff5b750ad15a087b54633647069f84))
+
+
+### Bug Fixes
+
+* **cmd:** stop kong comma-splitting the MCP flag values (closes [#92](https://github.com/yaad-index/yaad-grove/issues/92), closes [#93](https://github.com/yaad-index/yaad-grove/issues/93)) ([#94](https://github.com/yaad-index/yaad-grove/issues/94)) ([76ed23d](https://github.com/yaad-index/yaad-grove/commit/76ed23d3858507d7f8f2a42e1b48b3a371a51790))
+
 ## [0.7.0](https://github.com/yaad-index/yaad-grove/compare/v0.6.0...v0.7.0) (2026-07-12)
 
 
