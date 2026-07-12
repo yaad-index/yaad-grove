@@ -89,6 +89,31 @@ func TestFileLogConcurrentAppends(t *testing.T) {
 	}
 }
 
+// The chat id round-trips through the JSONL so a curation pass can group a chat's
+// messages (issue #96).
+func TestEntryChatIDRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.jsonl")
+	l, err := quarantine.OpenFile(path)
+	require.NoError(t, err)
+	require.NoError(t, l.Append(context.Background(), quarantine.Entry{ChatID: "-100", UserID: "u1", Surface: "group", Text: "hi"}))
+	require.NoError(t, l.Close())
+
+	entries := readLog(t, path)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "-100", entries[0].ChatID)
+}
+
+// Back-compat: a log line written before the chat_id field existed still parses,
+// leaving ChatID empty rather than failing the curation pass (issue #96).
+func TestEntryBackCompatNoChatID(t *testing.T) {
+	legacy := `{"time":"2026-01-01T00:00:00Z","user_id":"u1","surface":"group","text":"old line"}`
+	var e quarantine.Entry
+	require.NoError(t, json.Unmarshal([]byte(legacy), &e))
+	assert.Empty(t, e.ChatID, "a pre-chat_id entry parses with an empty ChatID")
+	assert.Equal(t, "u1", e.UserID)
+	assert.Equal(t, "old line", e.Text)
+}
+
 func readLog(t *testing.T, path string) []quarantine.Entry {
 	t.Helper()
 	f, err := os.Open(path)

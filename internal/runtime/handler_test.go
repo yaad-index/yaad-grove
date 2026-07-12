@@ -273,6 +273,7 @@ func TestHandlerLogsServedMessage(t *testing.T) {
 	assert.Equal(t, "u1", entries[0].UserID)
 	assert.Equal(t, "group", entries[0].Surface)
 	assert.Equal(t, "hello", entries[0].Text)
+	assert.Equal(t, "chat-1", entries[0].ChatID, "the chat id is logged for per-chat curation (#96)")
 }
 
 // Consented ambient chatter (DecideLogOnly) is logged but draws no reply.

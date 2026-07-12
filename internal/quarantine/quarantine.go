@@ -19,9 +19,13 @@ import (
 )
 
 // Entry is one logged community message — the minimal record a later curation
-// pass needs, and nothing the answering side ever reads.
+// pass needs, and nothing the answering side ever reads. ChatID carries which
+// chat the message came from so curation can work per-chat (issue #96). It is
+// back-compatible: older lines written before this field simply unmarshal to an
+// empty ChatID.
 type Entry struct {
 	Time    time.Time `json:"time"`
+	ChatID  string    `json:"chat_id"`
 	UserID  string    `json:"user_id"`
 	Surface string    `json:"surface"`
 	Text    string    `json:"text"`
