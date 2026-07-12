@@ -89,15 +89,22 @@ type ServeCmd struct {
 
 	// MCPServers lists the external tool servers to connect (ADR 0001), each as
 	// "name=command arg1 arg2". Repeatable; empty means a retrieval-only bot.
-	MCPServers []string `name:"mcp-server" help:"An MCP tool server to connect, as 'name=command arg1 arg2' (args are space-separated; no spaces within an arg). Repeatable."`
+	//
+	// sep:"none" disables kong's default comma-splitting of a []string value, so each
+	// flag value is one whole "name=..." spec (repeat the flag for more) and a spec's
+	// OWN commas survive — critical for the allow/deny tool lists below, whose values
+	// are comma-separated tool names. Without it, `--mcp-allow 'svc=a,b,c'` fragments
+	// into ["svc=a","b","c"] and the b/c pieces lose their "svc=" prefix (#92).
+	MCPServers []string `name:"mcp-server" sep:"none" help:"An MCP tool server to connect, as 'name=command arg1 arg2' (args are space-separated; no spaces within an arg). Repeatable."`
 
 	// MCPAllow / MCPDeny scope which of a connected server's tools are exposed to
 	// the model (issue #87), each as "server=tool1,tool2". Allow-list is exclusive
 	// (only the listed tools; everything else dropped) and preferred so new tools are
 	// closed by default; deny-list is subtractive. A server may use one or the other,
 	// not both. Empty means all of that server's tools are exposed (prior behavior).
-	MCPAllow []string `name:"mcp-allow" help:"Expose ONLY these tools from a server, as 'server=tool1,tool2' (exclusive allow-list; all others dropped). Repeatable."`
-	MCPDeny  []string `name:"mcp-deny" help:"Drop these tools from a server, as 'server=tool1,tool2' (subtractive deny-list; the rest are exposed). Repeatable. Mutually exclusive with --mcp-allow for the same server."`
+	// sep:"none" keeps the comma-separated tool list as one value (see MCPServers).
+	MCPAllow []string `name:"mcp-allow" sep:"none" help:"Expose ONLY these tools from a server, as 'server=tool1,tool2' (exclusive allow-list; all others dropped). Repeatable."`
+	MCPDeny  []string `name:"mcp-deny" sep:"none" help:"Drop these tools from a server, as 'server=tool1,tool2' (subtractive deny-list; the rest are exposed). Repeatable. Mutually exclusive with --mcp-allow for the same server."`
 
 	// The global spend ceiling (ADR 0006): the hard cost backstop the model-call
 	// path consults before every call. Conservative default so the bot is
