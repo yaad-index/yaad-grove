@@ -132,6 +132,48 @@ func TestParseMCPServersEmpty(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+// applyToolLists merges allow/deny specs onto servers by name (#87): allow-list is
+// exclusive, deny-list subtractive, both empty leaves the server open.
+func TestApplyToolLists(t *testing.T) {
+	base := func() []tools.ServerConfig {
+		return []tools.ServerConfig{{Name: "svc", Command: "s"}, {Name: "wiki", Command: "w"}}
+	}
+
+	got, err := applyToolLists(base(), []string{"svc=search, lookup"}, nil)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"search", "lookup"}, got[0].Allow, "allow-list parsed + trimmed")
+	assert.Nil(t, got[0].Deny)
+	assert.Nil(t, got[1].Allow, "an unlisted server is untouched (all tools)")
+
+	got, err = applyToolLists(base(), nil, []string{"svc=write_thing,remove"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"write_thing", "remove"}, got[0].Deny)
+
+	// No specs → servers unchanged (backwards compatible).
+	got, err = applyToolLists(base(), nil, nil)
+	require.NoError(t, err)
+	assert.Nil(t, got[0].Allow)
+	assert.Nil(t, got[0].Deny)
+}
+
+func TestApplyToolListsErrors(t *testing.T) {
+	base := func() []tools.ServerConfig { return []tools.ServerConfig{{Name: "svc", Command: "s"}} }
+
+	// Naming a server with no --mcp-server is a typo guard.
+	_, err := applyToolLists(base(), []string{"nope=search"}, nil)
+	assert.ErrorContains(t, err, "unknown server")
+
+	// Both allow and deny for the same server is ambiguous.
+	_, err = applyToolLists(base(), []string{"svc=search"}, []string{"svc=write_thing"})
+	assert.ErrorContains(t, err, "both")
+
+	// Malformed / empty specs.
+	_, err = applyToolLists(base(), []string{"noequals"}, nil)
+	assert.Error(t, err)
+	_, err = applyToolLists(base(), []string{"svc="}, nil)
+	assert.ErrorContains(t, err, "no tools")
+}
+
 func TestParseMCPServersInvalid(t *testing.T) {
 	for _, spec := range []string{
 		"noequals",   // missing name=command separator
