@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.7.0](https://github.com/yaad-index/yaad-grove/compare/v0.6.0...v0.7.0) (2026-07-12)
+
+
+### Features
+
+* **tools:** per-instance MCP tool allow/deny-list (closes [#87](https://github.com/yaad-index/yaad-grove/issues/87)) ([#89](https://github.com/yaad-index/yaad-grove/issues/89)) ([f6a4dd4](https://github.com/yaad-index/yaad-grove/commit/f6a4dd472254082b54127310bd450378283c9509))
+
+
+### Bug Fixes
+
+* **model:** parse native tool-call format so sentinels don't leak (closes [#88](https://github.com/yaad-index/yaad-grove/issues/88)) ([#90](https://github.com/yaad-index/yaad-grove/issues/90)) ([ce689bc](https://github.com/yaad-index/yaad-grove/commit/ce689bc6de82e2d12ff5f8b92f5675e4b5c9adce))
+
 ## [0.6.0](https://github.com/yaad-index/yaad-grove/compare/v0.5.0...v0.6.0) (2026-07-11)
 
 
