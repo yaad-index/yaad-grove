@@ -218,6 +218,7 @@ func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
 	}
 	if err := qlog.Append(ctx, quarantine.Entry{
 		Time:    time.Now(),
+		ChatID:  in.ReplyTo, // the chat id — the same handle memory + the transcript key on
 		UserID:  in.User.ID,
 		Surface: surfaceLabel(in.Surface),
 		Text:    in.Text,
