@@ -97,6 +97,34 @@ func TestToInboundMemoryFields(t *testing.T) {
 	assert.Equal(t, "101", in.MessageID)
 	assert.Empty(t, in.ReplyToMessageID)
 	assert.False(t, in.ReplyToBot)
+	assert.Empty(t, in.ReplyToText)
+}
+
+// The replied-to message's inline text + author are captured so the bot can answer
+// a reply about a message it never buffered (ADR 0014). A non-text parent yields
+// empty ReplyToText.
+func TestToInboundCapturesReplyText(t *testing.T) {
+	a := New(Config{AllowedGroups: []string{"999"}}, nil)
+
+	m := msg(999, models.ChatTypeSupergroup, "what does this mean?", 7, "bob")
+	m.ReplyToMessage = &models.Message{
+		ID:   55,
+		From: &models.User{ID: 9, Username: "carol"},
+		Text: "the launch slips to Q3",
+	}
+	in, ok := a.toInbound(m)
+	require.True(t, ok)
+	assert.Equal(t, "55", in.ReplyToMessageID)
+	assert.Equal(t, "the launch slips to Q3", in.ReplyToText)
+	assert.Equal(t, "carol", in.ReplyToSender)
+
+	// A non-text parent (e.g. a photo) has empty Text → no reply-context.
+	m2 := msg(999, models.ChatTypeSupergroup, "and this?", 7, "bob")
+	m2.ReplyToMessage = &models.Message{ID: 56, From: &models.User{ID: 9, Username: "carol"}}
+	in, ok = a.toInbound(m2)
+	require.True(t, ok)
+	assert.Equal(t, "56", in.ReplyToMessageID)
+	assert.Empty(t, in.ReplyToText, "a non-text parent yields no reply-context")
 }
 
 // Topic scoping (#98): with a topic allow-list on a group, a message in a listed

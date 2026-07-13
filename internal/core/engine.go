@@ -60,6 +60,12 @@ type Query struct {
 	// Empty means no history (a standalone question or a disabled buffer). It is
 	// context, never a source of facts — grounding still governs factual claims.
 	History []HistoryTurn
+	// ReplyContext is the message this query replies to, injected verbatim as
+	// context (ADR 0014): when a user replies to some earlier message and asks about
+	// it, the platform delivers that message inline, so the bot can see it even
+	// though it was never buffered. Empty when the query isn't a reply. Like History
+	// it is context, not a fact source — grounding still governs factual claims.
+	ReplyContext string
 }
 
 // HistoryTurn is one prior conversation turn injected into the answer prompt as
@@ -353,17 +359,17 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 	tools := e.tools.Defs()
 	// Nothing to ground on, no tool that could, AND no conversation to meta-operate
-	// on: refuse without a model call. History is the exception — a meta follow-up
-	// like "tldr" has no vault chunks yet must still reach the model to summarize
-	// the recent conversation (ADR 0014), so an empty retrieval alone must not
-	// short-circuit it. The grounding contract in the prompt still refuses a
-	// genuine off-domain question.
-	if len(chunks) == 0 && len(tools) == 0 && len(q.History) == 0 {
+	// on: refuse without a model call. History AND a reply-context are exceptions — a
+	// meta follow-up like "tldr", or a reply asking about an inlined earlier message,
+	// has no vault chunks yet must still reach the model (ADR 0014), so an empty
+	// retrieval alone must not short-circuit them. The grounding contract in the
+	// prompt still refuses a genuine off-domain question.
+	if len(chunks) == 0 && len(tools) == 0 && len(q.History) == 0 && q.ReplyContext == "" {
 		return Reply{Text: outOfScopeReply, Refused: true}, nil
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, q.History, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, q.History, q.ReplyContext, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 

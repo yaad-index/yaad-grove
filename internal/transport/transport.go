@@ -41,6 +41,14 @@ type Inbound struct {
 	// messages — the follow-up-gate signal for conversation memory (ADR 0014),
 	// distinct from Directed (which also covers @mentions).
 	ReplyToBot bool
+	// ReplyToText is the text of the message this one replies to, when the platform
+	// delivers it inline (ADR 0014). It lets the bot answer a reply about an
+	// arbitrary earlier message it never buffered — the replied-to content is
+	// injected as context straight from the update, buffer-independent. Empty when
+	// the message isn't a reply or the platform doesn't inline the parent (e.g. a
+	// cross-chat reply). ReplyToSender is that message's author display name, if known.
+	ReplyToText   string
+	ReplyToSender string
 	// Callback is set when this inbound is a button click (a Telegram
 	// callback_query) rather than a text message; it is nil for a normal message.
 	// The acting user and surface — the subject the runtime re-authorizes against
