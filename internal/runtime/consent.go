@@ -11,31 +11,13 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
-// Consent-flow copy (ADR 0012). Phase-1 constants; per-instance / localized text
-// is the i18n unit's job (#25). The disclosure is the informed-consent surface:
-// it states BOTH that the bot answers directed messages AND that group messages
-// are logged to the knowledge base — opting in covers both, so neither is hidden.
-const (
-	// The disclosure is assembled from an intro (what opting in covers), an optional
-	// transcript line (added only when a transcript is active — ADR 0015), and a
-	// closing tap instruction, so the tap line always reads last.
-	consentDisclosureIntro = "Before I include you, here's what opting in means:\n" +
-		"• In the group, I'll answer you when you reply to me or @mention me.\n" +
-		"• Your group messages are added to the community knowledge base I answer from."
-	// consentTranscriptLine states the durable-record posture so "prospective +
-	// disclosed" is coherent: opting in is informed that past entries persist even
-	// after withdrawal (ADR 0015). Included only when the transcript is active.
-	consentTranscriptLine = "\n• Your messages are also kept in a lasting conversation record. Withdrawing stops new entries, but earlier ones stay."
-	consentDisclosureTap  = "\nTap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
-	// consentDisclosureText is the base disclosure with no transcript active — the
-	// pre-0015 wording, unchanged.
-	consentDisclosureText = consentDisclosureIntro + consentDisclosureTap
-	consentGrantedText    = "You're opted in — thanks. You can withdraw anytime with /consent remove."
-	consentAlreadyText    = "You're already opted in. Send /consent remove to withdraw."
-	consentRemovedText    = "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
-	consentErrorText      = "Something went wrong — please try again."
-	consentOptInLabel     = "Opt in"
-)
+// Consent-flow copy (ADR 0012) is localized through the language-pack catalog
+// (ADR 0018 / #25): the disclosure, grant/withdraw acks, and error text all resolve
+// per-language, with English from en.yaml. The disclosure is the informed-consent
+// surface — it states BOTH that the bot answers directed messages AND that group
+// messages are logged — assembled from an intro, an optional transcript line (only
+// when a transcript is active, ADR 0015), and a closing tap instruction so the tap
+// line reads last.
 
 // consenter reads and writes a user's consent; *acl.Gate satisfies it. Used by
 // the DM consent flow.
@@ -69,43 +51,44 @@ func isConsentCommand(text string) bool {
 // The transcript (ADR 0015) is prospective and never read, so withdrawal just
 // stops new entries — no purge here; transcriptActive only adds the durable-record
 // line to the opt-in disclosure so consent is informed.
-func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, transcriptActive bool, in transport.Inbound) core.Reply {
+func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, transcriptActive bool, strs Strings, in transport.Inbound) core.Reply {
 	switch strings.TrimSpace(in.Text) {
 	case "/consent":
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentGranted); err != nil {
 			slog.Warn("consent grant failed", "err", err)
-			return core.Reply{Text: consentErrorText}
+			return core.Reply{Text: strs.Get(StrConsentError)}
 		}
-		return core.Reply{Text: consentGrantedText}
+		return core.Reply{Text: strs.Get(StrConsentGranted)}
 	case "/consent remove":
 		// Self-withdrawal, always available (ADR 0012). Back to unconsented, so the
 		// user can opt in again later.
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentUnknown); err != nil {
 			slog.Warn("consent removal failed", "err", err)
-			return core.Reply{Text: consentErrorText}
+			return core.Reply{Text: strs.Get(StrConsentError)}
 		}
 		// Purge their buffered turns everywhere (ADR 0014): the buffer is read into
 		// prompts, so a withdrawn user's turns must stop shaping answers immediately.
 		buf.PurgeUser(in.User.ID)
-		return core.Reply{Text: consentRemovedText}
+		return core.Reply{Text: strs.Get(StrConsentRemoved)}
 	}
 
 	c, err := consent.ConsentOf(ctx, in.User.ID)
 	if err != nil {
 		slog.Warn("consent read failed", "err", err)
-		return core.Reply{Text: consentErrorText}
+		return core.Reply{Text: strs.Get(StrConsentError)}
 	}
 	if c == acl.ConsentGranted {
-		return core.Reply{Text: consentAlreadyText}
+		return core.Reply{Text: strs.Get(StrConsentAlready)}
 	}
-	disclosure := consentDisclosureText
+	// Assemble intro → (transcript line, if active) → tap so the tap instruction
+	// reads last (ADR 0015).
+	disclosure := strs.Get(StrConsentDisclosureIntro)
 	if transcriptActive {
-		// Insert the durable-record line before the closing tap instruction, so the
-		// disclosure reads intro → logging → transcript → tap.
-		disclosure = consentDisclosureIntro + consentTranscriptLine + consentDisclosureTap
+		disclosure += strs.Get(StrConsentTranscriptLine)
 	}
+	disclosure += strs.Get(StrConsentDisclosureTap)
 	return core.Reply{
 		Text:    disclosure,
-		Actions: []core.Action{{Verb: verbConsentGrant, Label: consentOptInLabel}},
+		Actions: []core.Action{{Verb: verbConsentGrant, Label: strs.Get(StrConsentOptInLabel)}},
 	}
 }

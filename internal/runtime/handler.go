@@ -16,27 +16,12 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
-// Phase-1 reply copy. Constants for now; a later config pass can override.
-const (
-	refuseText      = "Sorry, I can't help with that here."
-	rateLimitedText = "You've hit the rate limit — please try again shortly."
-	atCapacityText  = "I'm at capacity right now — please try again a little later."
-
-	// Callback (button-click) acknowledgements, shown as an ephemeral toast (ADR
-	// 0009). Every outcome toasts — a click is never a silent drop. Expired and
-	// already-used are distinguished on purpose: same dead button, different cause.
-	callbackDoneText     = "Done ✓"
-	callbackExpiredText  = "This action has expired."
-	callbackConsumedText = "Already completed."
-	callbackErrorText    = "Something went wrong — please try again."
-
-	// Denials on a resolved callback (ADR 0009 T3). Each fails closed and toasts a
-	// reason; none reaches the executor.
-	callbackDeniedText      = "You don't have permission to do that."
-	callbackUnknownVerbText = "That action is no longer available."
-	callbackInvalidText     = "That action can't be completed as requested."
-	callbackFailedText      = "That didn't go through — please try again."
-)
+// The bot's reply copy — refusal, rate-limit, capacity, and the button-click
+// acknowledgement toasts (ADR 0009) — is localized through the language-pack
+// catalog (ADR 0018 / #25), resolved per instance from Policy.Strings. Every
+// callback outcome still toasts (a click is never a silent drop); expired and
+// already-used stay distinct (same dead button, different cause), and each denial
+// (ADR 0009 T3) fails closed with a reason before the executor is reached.
 
 // checker is the group access/consent gate the handler runs ahead of the engine;
 // the concrete *acl.Gate satisfies it. It is an interface so the handler's
@@ -77,7 +62,7 @@ type authorizer interface {
 func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry *Registry, authz authorizer, qlog quarantine.Log, consent consenter, policy Policy) transport.Handler {
 	return func(ctx context.Context, in transport.Inbound) (core.Reply, error) {
 		if in.Callback != nil {
-			return resolveCallback(ctx, callbacks, registry, authz, in), nil
+			return resolveCallback(ctx, callbacks, registry, authz, in, policy.Strings), nil
 		}
 		// DM routing (ADR 0012). Consent commands run the consent flow for everyone,
 		// including admins: an admin is consent-gated in the group like anyone, so
@@ -89,16 +74,16 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		// dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
-				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in)
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings)
 			}
-			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, in), nil
+			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, policy.Strings, in), nil
 		}
 
 		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})
 		if err != nil {
 			// Fail closed: never serve on an unknown gate state.
 			slog.Warn("consent gate check failed; refusing", "err", err)
-			return core.Reply{Text: refuseText, Refused: true}, nil
+			return core.Reply{Text: policy.Strings.Get(StrRefuse), Refused: true}, nil
 		}
 
 		// Consent-gated logging (ADR 0004/0012): every consented group message is
@@ -121,7 +106,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 		switch decision {
 		case acl.DecideServe:
-			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in)
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings)
 			// The bot's serve-path response — an answer OR a refusal — is the bot's real
 			// reply to the query, so the transcript records it (ADR 0015). This is
 			// deliberately unlike the memory buffer, which drops refusals as useless
@@ -138,7 +123,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			rememberUser(policy.Memory, in)
 			return core.Reply{Silent: true}, nil
 		case acl.DecideNudge:
-			return nudgeReply(policy.Nudge), nil
+			return nudgeReply(policy.Nudge, policy.Strings), nil
 		case acl.DecideRateLimited:
 			// Still consented content — buffer it (ADR 0014), even though the answer
 			// is throttled. The human turn was transcribed above but the throttle notice
@@ -147,16 +132,16 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			// rather than reading like a bug (ADR 0015).
 			rememberUser(policy.Memory, in)
 			logTranscriptSystem(ctx, policy.Transcript, in, transcript.EventRateLimited)
-			return core.Reply{Text: rateLimitedText}, nil
+			return core.Reply{Text: policy.Strings.Get(StrRateLimited)}, nil
 		case acl.DecideSilent:
 			// Unconsented ambient chatter: nothing at all.
 			return core.Reply{Silent: true}, nil
 		case acl.DecideRefuse:
-			return core.Reply{Text: refuseText, Refused: true}, nil
+			return core.Reply{Text: policy.Strings.Get(StrRefuse), Refused: true}, nil
 		default:
 			// An unrecognized decision fails closed.
 			slog.Warn("unknown gate decision; refusing", "decision", int(decision))
-			return core.Reply{Text: refuseText, Refused: true}, nil
+			return core.Reply{Text: policy.Strings.Get(StrRefuse), Refused: true}, nil
 		}
 	}
 }
@@ -164,7 +149,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // answer runs the engine with the selected recent-conversation context (ADR 0014)
 // and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
 // a capacity notice rather than crashing; any other error propagates.
-func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn) (core.Reply, error) {
+func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings) (core.Reply, error) {
 	reply, err := engine.Answer(ctx, core.Query{
 		User:         in.User,
 		Surface:      in.Surface,
@@ -174,7 +159,7 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 	})
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
-			return core.Reply{Text: atCapacityText, Refused: true}, nil
+			return core.Reply{Text: strs.Get(StrAtCapacity), Refused: true}, nil
 		}
 		return core.Reply{}, err
 	}
@@ -187,10 +172,10 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 // current message never appears in its own injected context. A refusal is not
 // buffered (a canned out-of-scope line is not useful follow-up context); a
 // nil/disabled buffer makes the whole thing a plain answer.
-func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound) (core.Reply, error) {
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings) (core.Reply, error) {
 	history := selectHistory(buf, in, injectN, window)
 	rememberUser(buf, in)
-	reply, err := answer(ctx, engine, in, history)
+	reply, err := answer(ctx, engine, in, history, strs)
 	if err == nil && !reply.Refused {
 		rememberBot(buf, in.ReplyTo, reply.Text)
 	}
@@ -202,12 +187,16 @@ func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer,
 // sends the opt-in text. The reaction path is only ever produced for a transport
 // that supports it — the composition boundary downgrades reaction-mode to
 // message-mode when the transport can't react, so the opt-in is never dropped.
-func nudgeReply(n Nudge) core.Reply {
+func nudgeReply(n Nudge, strs Strings) core.Reply {
 	n = n.resolve()
 	if n.Mode == NudgeReaction {
 		return core.Reply{Reaction: n.Emoji}
 	}
-	return core.Reply{Text: n.Text}
+	text := n.Text
+	if text == "" {
+		text = strs.Get(StrNudge) // no operator override → the language-pack default
+	}
+	return core.Reply{Text: text}
 }
 
 // logServed appends a consented group message to the quarantine log (ADR
@@ -311,25 +300,25 @@ func surfaceLabel(s core.Surface) string {
 // on a fresh resolve, executes the verb — always returning an ephemeral
 // acknowledgement (Reply.Notice), never a new message. A dead button reports
 // expired vs already-completed distinctly; every path toasts, none is silent.
-func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Registry, authz authorizer, in transport.Inbound) core.Reply {
+func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Registry, authz authorizer, in transport.Inbound, strs Strings) core.Reply {
 	if callbacks == nil {
-		return core.Reply{Notice: callbackExpiredText}
+		return core.Reply{Notice: strs.Get(StrCallbackExpired)}
 	}
 	action, status, err := callbacks.Resolve(ctx, in.Callback.Token)
 	if err != nil {
 		// Fail closed: a store error is not a licence to act — just acknowledge.
 		slog.Warn("callback resolve failed", "err", err)
-		return core.Reply{Notice: callbackErrorText}
+		return core.Reply{Notice: strs.Get(StrCallbackError)}
 	}
 	switch status {
 	case pending.Resolved:
-		return executeAction(ctx, registry, authz, in.User, action)
+		return executeAction(ctx, registry, authz, in.User, action, strs)
 	case pending.Consumed:
-		return core.Reply{Notice: callbackConsumedText}
+		return core.Reply{Notice: strs.Get(StrCallbackConsumed)}
 	case pending.Expired:
-		return core.Reply{Notice: callbackExpiredText}
+		return core.Reply{Notice: strs.Get(StrCallbackExpired)}
 	default:
-		return core.Reply{Notice: callbackErrorText}
+		return core.Reply{Notice: strs.Get(StrCallbackError)}
 	}
 }
 
@@ -341,27 +330,27 @@ func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Reg
 // denial fails closed and toasts a reason; the executor is reached only on the
 // authorized, valid path. On success the toast is the source of truth and any
 // status line rides in Text for the transport's best-effort message edit.
-func executeAction(ctx context.Context, registry *Registry, authz authorizer, subject core.User, action core.Action) core.Reply {
+func executeAction(ctx context.Context, registry *Registry, authz authorizer, subject core.User, action core.Action, strs Strings) core.Reply {
 	if registry == nil {
-		return core.Reply{Notice: callbackUnknownVerbText}
+		return core.Reply{Notice: strs.Get(StrCallbackUnknownVerb)}
 	}
 	verb, ok := registry.Lookup(action.Verb)
 	if !ok {
-		return core.Reply{Notice: callbackUnknownVerbText}
+		return core.Reply{Notice: strs.Get(StrCallbackUnknownVerb)}
 	}
 
 	authorized, err := authz.Authorize(ctx, subject, verb.MinTier)
 	if err != nil {
 		slog.Warn("callback authorize failed; denying", "verb", action.Verb, "err", err)
-		return core.Reply{Notice: callbackDeniedText} // fail closed
+		return core.Reply{Notice: strs.Get(StrCallbackDenied)} // fail closed
 	}
 	if !authorized {
-		return core.Reply{Notice: callbackDeniedText}
+		return core.Reply{Notice: strs.Get(StrCallbackDenied)}
 	}
 
 	if verb.Validate != nil {
 		if err := verb.Validate(action.Params); err != nil {
-			return core.Reply{Notice: callbackInvalidText}
+			return core.Reply{Notice: strs.Get(StrCallbackInvalid)}
 		}
 	}
 
@@ -370,7 +359,7 @@ func executeAction(ctx context.Context, registry *Registry, authz authorizer, su
 		// The action did not commit; the token is already single-use-consumed, so a
 		// fresh action must be re-offered rather than auto-retried.
 		slog.Error("callback verb failed", "verb", action.Verb, "err", err)
-		return core.Reply{Notice: callbackFailedText}
+		return core.Reply{Notice: strs.Get(StrCallbackFailed)}
 	}
-	return core.Reply{Notice: callbackDoneText, Text: statusLine}
+	return core.Reply{Notice: strs.Get(StrCallbackDone), Text: statusLine}
 }

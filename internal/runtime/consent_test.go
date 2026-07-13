@@ -155,7 +155,7 @@ func TestConsentGrantViaButton(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "consent_grant"})
 	// gate is the authorizer + the consenter; no consenter for the message path here.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate, nil), gate, nil, nil, runtime.Policy{})
 
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)

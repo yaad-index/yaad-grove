@@ -91,26 +91,26 @@ func DismissVerb() Verb {
 // 0012). It grants the acting subject's OWN consent — no cross-user grant — so it
 // is unprivileged (TierThrottled: anyone may opt themselves in). The confirmation
 // names the withdraw path.
-func ConsentGrantVerb(setter consentSetter) Verb {
+func ConsentGrantVerb(setter consentSetter, strs Strings) Verb {
 	return Verb{
 		MinTier: acl.TierThrottled,
 		Execute: func(ctx context.Context, subject core.User, _ map[string]string) (string, error) {
 			if err := setter.SetConsent(ctx, subject.ID, acl.ConsentGranted); err != nil {
 				return "", err
 			}
-			return consentGrantedText, nil
+			return strs.Get(StrConsentGranted), nil
 		},
 	}
 }
 
 // DefaultRegistry registers the Phase-1 verbs: the unprivileged echo/dismiss
 // baselines, the self-service consent_grant, and the set_tier admin verb — all
-// over the acl gate.
-func DefaultRegistry(gate gateWriter) *Registry {
+// over the acl gate. strs localizes any user-facing verb output (ADR 0018).
+func DefaultRegistry(gate gateWriter, strs Strings) *Registry {
 	r := NewRegistry()
 	r.Register(verbEcho, EchoVerb())
 	r.Register(verbDismiss, DismissVerb())
-	r.Register(verbConsentGrant, ConsentGrantVerb(gate))
+	r.Register(verbConsentGrant, ConsentGrantVerb(gate, strs))
 	r.Register(verbSetTier, SetTierVerb(gate))
 	return r
 }

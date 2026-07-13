@@ -26,6 +26,11 @@ type Policy struct {
 	// turn for it to count as a follow-up (ADR 0018 recency gate). Zero means only
 	// replies qualify.
 	FollowupWindow time.Duration
+	// Strings is the resolved language-pack message catalog (ADR 0018 / #25): the
+	// bot's user-facing operational text (consent, nudge, rate-limit, toasts) for
+	// the selected language. Nil falls back to the embedded en pack, so a zero
+	// Policy still has English.
+	Strings Strings
 	// Transcript is the durable role-tagged conversation record (ADR 0015); nil
 	// means no transcript is written. When set, the consent disclosure also states
 	// that entries persist historically, so opt-in is informed.
@@ -80,22 +85,19 @@ type Nudge struct {
 // Nudge copy defaults (ADR 0012). Constants for now; the i18n unit (#25) will
 // route these through a catalog.
 const (
-	// DefaultNudgeText is the message-mode opt-in instruction. It points at the DM
-	// consent flow, the only place consent is granted.
-	DefaultNudgeText = "To chat with me here, opt in first: DM me and tap the opt-in button (or send /consent)."
 	// DefaultNudgeEmoji is the reaction-mode glyph — a handshake, an unobtrusive
-	// "let's connect" that doesn't add noise to the group.
+	// "let's connect" that doesn't add noise to the group. (Emoji is not localized;
+	// the message-mode text comes from the language pack — the "nudge" catalog key.)
 	DefaultNudgeEmoji = "🤝"
 )
 
-// resolve fills unset fields with the Phase-1 defaults, so a partial config (or
-// the zero Nudge) still produces a usable nudge.
+// resolve fills unset Mode/Emoji with the Phase-1 defaults, so a partial config
+// (or the zero Nudge) still produces a usable nudge. The message-mode Text is left
+// as-is: an empty Text means "use the language-pack default", filled at send time
+// (nudgeReply) so it localizes.
 func (n Nudge) resolve() Nudge {
 	if n.Mode == "" {
 		n.Mode = NudgeMessage
-	}
-	if n.Text == "" {
-		n.Text = DefaultNudgeText
 	}
 	if n.Emoji == "" {
 		n.Emoji = DefaultNudgeEmoji

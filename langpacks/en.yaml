@@ -4,10 +4,33 @@
 # the value here. English needs no extra prompt guidance, so `prompt` is empty and
 # the assembled prompt is unchanged from a bot with no language pack.
 #
-# `strings` is reserved for the user-facing operational messages (consent, nudge,
-# rate-limit, …) that move here in a later increment (issue #25); it is empty for
-# now.
+# `strings` is the bot's user-facing operational messages (ADR 0018 / #25). This
+# file is their source of truth; other packs override per key. The runtime looks
+# these up by id — keep the ids in sync with internal/runtime/strings.go.
 code: en
 name: English
 prompt: ""
-strings: {}
+strings:
+  consent_disclosure_intro: |-
+    Before I include you, here's what opting in means:
+    • In the group, I'll answer you when you reply to me or @mention me.
+    • Your group messages are added to the community knowledge base I answer from.
+  consent_transcript_line: "\n• Your messages are also kept in a lasting conversation record. Withdrawing stops new entries, but earlier ones stay."
+  consent_disclosure_tap: "\nTap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
+  consent_granted: "You're opted in — thanks. You can withdraw anytime with /consent remove."
+  consent_already: "You're already opted in. Send /consent remove to withdraw."
+  consent_removed: "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
+  consent_error: "Something went wrong — please try again."
+  consent_opt_in_label: "Opt in"
+  nudge: "To chat with me here, opt in first: DM me and tap the opt-in button (or send /consent)."
+  refuse: "Sorry, I can't help with that here."
+  rate_limited: "You've hit the rate limit — please try again shortly."
+  at_capacity: "I'm at capacity right now — please try again a little later."
+  callback_done: "Done ✓"
+  callback_expired: "This action has expired."
+  callback_consumed: "Already completed."
+  callback_error: "Something went wrong — please try again."
+  callback_denied: "You don't have permission to do that."
+  callback_unknown_verb: "That action is no longer available."
+  callback_invalid: "That action can't be completed as requested."
+  callback_failed: "That didn't go through — please try again."

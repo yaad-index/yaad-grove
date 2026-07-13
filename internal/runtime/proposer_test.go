@@ -119,7 +119,7 @@ func TestProposalApproveEndToEnd(t *testing.T) {
 	gate := acl.NewGate(aclStore, acl.TierDefault)
 	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierAdmin)) // approver is admin
 
-	registry := runtime.DefaultRegistry(gate)
+	registry := runtime.DefaultRegistry(gate, nil)
 	proposer := runtime.NewStaticProposer(promoteBob)
 	proposals, err := proposer.Propose(ctx)
 	require.NoError(t, err)
@@ -152,7 +152,7 @@ func TestProposalDismiss(t *testing.T) {
 	token := putToken(t, store, core.Action{Verb: "dismiss", Label: "Dismiss"})
 
 	// dismiss is unprivileged (TierThrottled), which any subject clears.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}), &mockAuthz{authorized: true}, nil, nil, runtime.Policy{})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(&stubSetter{}, nil), &mockAuthz{authorized: true}, nil, nil, runtime.Policy{})
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
 	assert.Contains(t, reply.Notice, "Done")

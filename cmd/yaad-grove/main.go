@@ -361,7 +361,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// writer. The handler routes by surface (ADR 0012): admin DMs answer, other
 	// DMs manage consent, group messages pass the consent gate; consented group
 	// messages are recorded (ADR 0004) and button clicks resolved.
-	actions := runtime.DefaultRegistry(gate)
+	actions := runtime.DefaultRegistry(gate, runtime.Strings(pack.Strings))
 	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate, policy)
 
 	quarantineState := c.QuarantineLog
