@@ -20,11 +20,11 @@ const recencyFloor = 3
 // Call it with the CURRENT query before appending the current turn: the buffer
 // then holds only prior turns, so the recency floor is prior context, not an echo
 // of the message being answered.
-func (b *Buffer) Select(chatID, query string, replyToBot bool, injectN int) []Turn {
+func (b *Buffer) Select(chatID, query string, isReply bool, injectN int) []Turn {
 	if !b.Enabled() || injectN <= 0 {
 		return nil
 	}
-	if !IsFollowUp(query, replyToBot) {
+	if !IsFollowUp(query, isReply) {
 		return nil // standalone question — no history, pre-0014 behavior
 	}
 
@@ -99,13 +99,16 @@ var referentialPrefix = []string{
 const shortMessageMaxTokens = 2
 
 // IsFollowUp is the v1 heuristic (ADR 0014): does the message reference prior
-// context? A reply to the bot always does; otherwise a very short message (a brief
+// context? A reply to ANY message always does — replying is itself the signal it
+// continues an earlier turn, whether the parent was the bot's or another user's
+// (the recency+relevance Select then brings in the recent turns, including the
+// replied-to one, which is the newest). Otherwise a very short message (a brief
 // ack/continuation in any language), or an English meta-request or leading
 // referential word. It is intentionally cheap and improvable — a miss degrades to
 // an isolated answer, and a false hit costs only up to the inject budget, so no
 // separate knob is warranted.
-func IsFollowUp(query string, replyToBot bool) bool {
-	if replyToBot {
+func IsFollowUp(query string, isReply bool) bool {
+	if isReply {
 		return true
 	}
 	q := strings.ToLower(strings.TrimSpace(query))

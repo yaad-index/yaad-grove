@@ -15,7 +15,10 @@ import (
 // turn: the buffer then holds only prior turns, so the current message never
 // appears in its own injected context. A nil buffer is a safe no-op.
 func selectHistory(buf *memory.Buffer, in transport.Inbound, injectN int) []core.HistoryTurn {
-	turns := buf.Select(in.ReplyTo, in.Text, in.ReplyToBot, injectN)
+	// Any reply is a follow-up (ADR 0014): a reply to another user's message
+	// continues that thread just as a reply to the bot does, so the gate opens on
+	// ReplyToMessageID, not only the reply-to-bot signal.
+	turns := buf.Select(in.ReplyTo, in.Text, in.ReplyToMessageID != "", injectN)
 	if len(turns) == 0 {
 		return nil
 	}

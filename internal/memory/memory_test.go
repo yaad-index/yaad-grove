@@ -64,13 +64,15 @@ func TestPurge(t *testing.T) {
 // counts; a plain standalone question does not.
 func TestIsFollowUp(t *testing.T) {
 	cases := []struct {
-		name       string
-		query      string
-		replyToBot bool
-		want       bool
+		name    string
+		query   string
+		isReply bool
+		want    bool
 	}{
-		// Existing signals.
-		{"reply-to-bot always counts", "what is the capital?", true, true},
+		// A reply to ANY message is a follow-up (not just a reply to the bot): the
+		// isReply flag opens the gate regardless of the question text.
+		{"any reply counts (even a standalone-looking question)", "what is the capital?", true, true},
+		{"a reply to another user's message counts too", "how do I install the widget?", true, true},
 		{"meta request", "tldr", false, true},
 		{"meta prefix", "more please", false, true},
 		{"meta with punctuation", "why?", false, true},
@@ -95,8 +97,24 @@ func TestIsFollowUp(t *testing.T) {
 		{"whitespace only", "   ", false, false},
 	}
 	for _, tc := range cases {
-		assert.Equal(t, tc.want, memory.IsFollowUp(tc.query, tc.replyToBot), tc.name)
+		assert.Equal(t, tc.want, memory.IsFollowUp(tc.query, tc.isReply), tc.name)
 	}
+}
+
+// A reply to another user (not the bot) still pulls history: an otherwise
+// standalone-looking question, when it's a reply, injects the recent turns.
+func TestSelectAnyReplyInjectsHistory(t *testing.T) {
+	b := memory.New(10)
+	b.Append("chat", turn("u1", "Al", "the widget calibrates with the blue dial"))
+	b.Append("chat", turn("u2", "Bo", "which dial though?"))
+
+	// isReply=true, even though the text alone wouldn't trip a cue.
+	got := b.Select("chat", "how do I install the widget?", true, 5)
+	assert.NotEmpty(t, got, "a reply injects recent history regardless of the text")
+
+	// The same text, not a reply and not cue-bearing, stays standalone.
+	assert.Nil(t, b.Select("chat", "how do I install the widget?", false, 5),
+		"a non-reply standalone question pulls no history")
 }
 
 // The end-to-end gate: a short non-English ack pulls recent history from the
