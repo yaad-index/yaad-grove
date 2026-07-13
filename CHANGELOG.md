@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.12.0](https://github.com/yaad-index/yaad-grove/compare/v0.11.0...v0.12.0) (2026-07-13)
+
+
+### Features
+
+* **memory:** language-neutral recency follow-up gate (ADR 0018, PR1) ([#108](https://github.com/yaad-index/yaad-grove/issues/108)) ([66bdfa7](https://github.com/yaad-index/yaad-grove/commit/66bdfa7a7f33d79e68ecf2453997613d195f0275))
+
 ## [0.11.0](https://github.com/yaad-index/yaad-grove/compare/v0.10.0...v0.11.0) (2026-07-13)
 
 
