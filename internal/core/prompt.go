@@ -21,7 +21,7 @@ const defaultPromptText = `{{if .Persona}}{{.Persona}}
 
 {{end}}{{.Scope}}
 
-Answer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the CONTEXT below{{if .HasTools}} and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.{{end}}{{if .Asker}}
+Answer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the CONTEXT below{{if .HasTools}} and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.{{end}}{{.Language}}{{if .Asker}}
 
 The person asking is {{.Asker}}. You may address them by name when it feels natural — it is not required.{{end}}{{.ReplyContext}}{{.History}}{{.Context}}`
 
@@ -46,6 +46,10 @@ type promptData struct {
 	Scope    string
 	HasTools bool
 	History  string
+	// Language is the pre-rendered language-pack guidance block (ADR 0018): a
+	// standing instruction (like Persona/Scope) placed after the grounding contract
+	// and before the per-query content. Empty (the base language) renders nothing.
+	Language string
 	// ReplyContext is the pre-rendered replied-to-message block (ADR 0014): when the
 	// query is a reply, the message it replies to, framed as quoted context. Empty
 	// when the query isn't a reply. Placed alongside History — conversational
@@ -65,13 +69,14 @@ type promptData struct {
 // assembles the persona/scope/grounding scaffolding around the pre-rendered
 // conversation and context blocks. A template execution error falls back to the
 // default render, so a runtime glitch can never drop the grounding contract.
-func renderPrompt(tmpl *template.Template, query, asker, persona, scope string, history []HistoryTurn, replyContext string, chunks []Chunk, hasTools bool) string {
+func renderPrompt(tmpl *template.Template, query, asker, persona, scope, language string, history []HistoryTurn, replyContext string, chunks []Chunk, hasTools bool) string {
 	if tmpl == nil {
 		tmpl = defaultPromptTemplate
 	}
 	data := promptData{
 		Persona:      strings.TrimSpace(persona),
 		Scope:        strings.TrimSpace(scope),
+		Language:     languageBlock(language),
 		HasTools:     hasTools,
 		History:      conversationBlock(history),
 		ReplyContext: replyBlock(replyContext),
@@ -92,6 +97,17 @@ func renderPrompt(tmpl *template.Template, query, asker, persona, scope string, 
 		return fb.String()
 	}
 	return b.String()
+}
+
+// languageBlock renders the selected language pack's prompt guidance as a standing
+// instruction block (ADR 0018). Empty (the base language) renders nothing, so the
+// prompt is byte-identical to a bot with no language pack.
+func languageBlock(language string) string {
+	language = strings.TrimSpace(language)
+	if language == "" {
+		return ""
+	}
+	return "\n\n" + language
 }
 
 // replyBlock renders the message the query replies to as quoted context (ADR
@@ -129,5 +145,5 @@ func contextBlock(chunks []Chunk) string {
 // groundedSystemPrompt renders the DEFAULT prompt — the byte-for-byte reference
 // the golden test pins and the behavior a bot without --prompt-template gets.
 func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
-	return renderPrompt(defaultPromptTemplate, "", "", persona, scope, history, "", chunks, hasTools)
+	return renderPrompt(defaultPromptTemplate, "", "", persona, scope, "", history, "", chunks, hasTools)
 }

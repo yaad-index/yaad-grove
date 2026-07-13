@@ -1,0 +1,13 @@
+# en.yaml — the base / reference language pack (ADR 0018).
+#
+# English is the base every other pack overlays: any key a pack omits inherits
+# the value here. English needs no extra prompt guidance, so `prompt` is empty and
+# the assembled prompt is unchanged from a bot with no language pack.
+#
+# `strings` is reserved for the user-facing operational messages (consent, nudge,
+# rate-limit, …) that move here in a later increment (issue #25); it is empty for
+# now.
+code: en
+name: English
+prompt: ""
+strings: {}

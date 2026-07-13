@@ -27,6 +27,17 @@ func TestSimilarityThresholdDefault(t *testing.T) {
 	assert.Equal(t, float32(0.30), cli.Serve.SimilarityThreshold, "block-early 0.30 is the shipped default")
 }
 
+// The language pack defaults to "en" (ADR 0018): without --language the base pack
+// loads, adding no prompt guidance.
+func TestLanguageDefault(t *testing.T) {
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"serve"})
+	require.NoError(t, err)
+	assert.Equal(t, "en", cli.Serve.Language, "default language is the base pack, en")
+}
+
 // The transcript is off by default (ADR 0015): without --transcript-log the field
 // is empty, and setting it flows through as the directory path.
 func TestTranscriptLogDefaultOff(t *testing.T) {

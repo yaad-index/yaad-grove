@@ -24,6 +24,15 @@ serve:
   model-base-url: https://api.openai.com/v1
   model-name: gpt-4o-mini
 
+  # Language pack (issue #65 / ADR 0018): selects the language whose prompt
+  # guidance is layered into the system prompt (e.g. "answer in Persian"). Built-in
+  # packs (en, fa, …) ship embedded in the binary; a new language is a PR adding
+  # langpacks/<code>.yaml. Default "en" is the base and adds nothing. Follow-up
+  # detection is language-neutral (a recency signal), so packs carry no follow-up
+  # terms. An external directory can add/override packs beyond the embedded ones.
+  # language: fa
+  # langpacks-dir: /etc/yaad-grove/langpacks
+
   # Retrieval mode (issue #65): how lexical + semantic retrieval combine.
   #   keyword  — lexical only (the zero-config default when no embeddings are set)
   #   semantic — embeddings, with keyword as an error-fallback (prior default)

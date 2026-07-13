@@ -39,6 +39,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 	"github.com/yaad-index/yaad-grove/internal/transport/telegram"
+	"github.com/yaad-index/yaad-grove/langpacks"
 )
 
 // version is the build version, overridden at link time via -ldflags.
@@ -69,7 +70,14 @@ type ServeCmd struct {
 	// PromptTemplate is the optional operator grounding-prompt template (ADR 0016).
 	// Empty uses the embedded default (byte-for-byte the built-in prompt); a set
 	// path that can't be read or parsed is a startup error.
-	PromptTemplate string `name:"prompt-template" help:"Operator grounding-prompt template (Go text/template with {{.Persona}} {{.Scope}} {{.History}} {{.Context}}). Empty uses the built-in default; an unreadable/unparseable path is fatal."`
+	PromptTemplate string `name:"prompt-template" help:"Operator grounding-prompt template (Go text/template with {{.Persona}} {{.Scope}} {{.Language}} {{.Asker}} {{.ReplyContext}} {{.History}} {{.Context}}). Empty uses the built-in default; an unreadable/unparseable path is fatal."`
+
+	// Language selects the language pack (ADR 0018): its prompt guidance is layered
+	// into the system prompt, and follow-up detection stays language-neutral (the
+	// recency gate). Default "en" (the base, which adds nothing). LangpacksDir is an
+	// optional external dir to add/override packs beyond the embedded built-ins.
+	Language     string `name:"language" default:"en" help:"Language pack to load (e.g. 'en', 'fa'); its prompt guidance is layered into the system prompt. Unknown language is fatal."`
+	LangpacksDir string `name:"langpacks-dir" help:"Optional external directory of <code>.yaml packs, added to / overriding the embedded built-ins." type:"path"`
 
 	ModelBaseURL string `name:"model-base-url" default:"https://api.openai.com/v1" help:"OpenAI-compatible API base URL."`
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
@@ -239,7 +247,15 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	engine := core.New(m, retriever, registry, c.Scope, core.WithPersona(persona), core.WithPromptTemplate(promptTmpl))
+	// The language pack (ADR 0018): its prompt guidance is layered into the system
+	// prompt. Loaded before the engine so an unknown/malformed pack fails startup
+	// rather than serving without it. The base "en" adds nothing.
+	pack, err := langpacks.Load(c.Language, c.LangpacksDir)
+	if err != nil {
+		return err
+	}
+	engine := core.New(m, retriever, registry, c.Scope,
+		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
@@ -369,6 +385,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"quarantine_log", quarantineState,
 		"transcript_log", transcriptState,
 		"persona", persona != "",
+		"language", pack.Code,
 		"memory_turns", c.MemoryTurns,
 		"memory_inject", c.MemoryInject,
 		"admins", len(policy.Admins),
