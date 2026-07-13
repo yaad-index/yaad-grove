@@ -3,6 +3,7 @@ package memory
 import (
 	"sort"
 	"strings"
+	"time"
 	"unicode"
 )
 
@@ -17,15 +18,19 @@ const recencyFloor = 3
 // always) with the most relevant retained turns, capped at injectN and returned
 // in chronological order so the injected context stays threaded and time-ordered.
 //
+// The follow-up gate is language-neutral (ADR 0014/0018): a reply is always a
+// follow-up (isReply); otherwise the message is a follow-up only when its sender
+// is mid-conversation — they already have a (non-bot) turn in this chat within
+// window. There are no keyword or per-language heuristics. window <= 0 makes
+// non-replies never qualify (replies-only mode). Once the gate passes, the
+// language-agnostic token-overlap scorer picks what to inject.
+//
 // Call it with the CURRENT query before appending the current turn: the buffer
 // then holds only prior turns, so the recency floor is prior context, not an echo
 // of the message being answered.
-func (b *Buffer) Select(chatID, query string, isReply bool, injectN int) []Turn {
+func (b *Buffer) Select(chatID, query, senderID string, isReply bool, injectN int, window time.Duration) []Turn {
 	if !b.Enabled() || injectN <= 0 {
 		return nil
-	}
-	if !IsFollowUp(query, isReply) {
-		return nil // standalone question — no history, pre-0014 behavior
 	}
 
 	b.mu.Lock()
@@ -33,6 +38,22 @@ func (b *Buffer) Select(chatID, query string, isReply bool, injectN int) []Turn 
 	b.mu.Unlock()
 	if len(turns) == 0 {
 		return nil
+	}
+
+	// Non-reply follow-up gate: the sender must be mid-conversation — a prior
+	// (non-bot) turn of theirs in this chat, within window. A reply always passes.
+	if !isReply {
+		deadline := time.Now().Add(-window)
+		mid := false
+		for _, t := range turns {
+			if !t.Bot && t.SpeakerID == senderID && t.Time.After(deadline) {
+				mid = true
+				break
+			}
+		}
+		if !mid {
+			return nil // standalone — no history, pre-0014 behavior
+		}
 	}
 
 	chosen := make(map[int]bool, injectN)
@@ -79,62 +100,6 @@ func (b *Buffer) Select(chatID, query string, isReply bool, injectN int) []Turn 
 		}
 	}
 	return out
-}
-
-// followUpMeta are short meta-requests that only make sense against prior context.
-var followUpMeta = []string{
-	"tldr", "tl;dr", "summarize", "summary", "more", "continue",
-	"go on", "why", "shorter", "elaborate", "expand",
-}
-
-// referentialPrefix are leading words that point back at prior context.
-var referentialPrefix = []string{
-	"it ", "it's ", "that ", "this ", "they ", "those ", "these ", "what about ",
-}
-
-// shortMessageMaxTokens is the word-token ceiling under which a message is taken
-// as a follow-up regardless of language (ADR 0014). A one- or two-word reply
-// ("yes", "بله", "why not") carries almost no standalone meaning, so against an
-// existing buffer it is far more likely a continuation than a fresh question.
-const shortMessageMaxTokens = 2
-
-// IsFollowUp is the v1 heuristic (ADR 0014): does the message reference prior
-// context? A reply to ANY message always does — replying is itself the signal it
-// continues an earlier turn, whether the parent was the bot's or another user's
-// (the recency+relevance Select then brings in the recent turns, including the
-// replied-to one, which is the newest). Otherwise a very short message (a brief
-// ack/continuation in any language), or an English meta-request or leading
-// referential word. It is intentionally cheap and improvable — a miss degrades to
-// an isolated answer, and a false hit costs only up to the inject budget, so no
-// separate knob is warranted.
-func IsFollowUp(query string, isReply bool) bool {
-	if isReply {
-		return true
-	}
-	q := strings.ToLower(strings.TrimSpace(query))
-	if q == "" {
-		return false
-	}
-	// Language-agnostic signal: a very short message is treated as a follow-up. The
-	// English cue lists below can't reach non-English acks ("بله", "آره"), but a
-	// low word-token count is script-neutral, so a short Persian/Arabic/etc. reply
-	// is caught the same as "yes"/"go on". (Non-space-segmented scripts collapse to
-	// one token and so also lean follow-up — acceptable per the false-hit rationale
-	// above; the buffer-empty guard in Select means a wrong hit injects nothing.)
-	if n := len(strings.FieldsFunc(q, notWord)); n >= 1 && n <= shortMessageMaxTokens {
-		return true
-	}
-	for _, m := range followUpMeta {
-		if q == m || strings.HasPrefix(q, m+" ") || strings.HasPrefix(q, m+"?") {
-			return true
-		}
-	}
-	for _, p := range referentialPrefix {
-		if strings.HasPrefix(q, p) {
-			return true
-		}
-	}
-	return false
 }
 
 // terms tokenizes a query into distinct lowercase word tokens for scoring,

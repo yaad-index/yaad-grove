@@ -38,7 +38,7 @@ func TestDisabledBufferIsNoOp(t *testing.T) {
 	assert.False(t, b.Enabled())
 	b.Append("chat", turn("u1", "Al", "hi"))
 	assert.Empty(t, b.Recent("chat", 5))
-	assert.Nil(t, b.Select("chat", "tldr", true, 5))
+	assert.Nil(t, b.Select("chat", "tldr", "u1", true, 5, time.Hour))
 }
 
 // Purge removes a speaker's turns and only theirs — the bot's turns and other
@@ -60,86 +60,47 @@ func TestPurge(t *testing.T) {
 	assert.Len(t, b.Recent("chat", 10), 2, "empty speaker id is a no-op")
 }
 
-// The follow-up gate: a reply to the bot, a meta request, or a referential lead
-// counts; a plain standalone question does not.
-func TestIsFollowUp(t *testing.T) {
-	cases := []struct {
-		name    string
-		query   string
-		isReply bool
-		want    bool
-	}{
-		// A reply to ANY message is a follow-up (not just a reply to the bot): the
-		// isReply flag opens the gate regardless of the question text.
-		{"any reply counts (even a standalone-looking question)", "what is the capital?", true, true},
-		{"a reply to another user's message counts too", "how do I install the widget?", true, true},
-		{"meta request", "tldr", false, true},
-		{"meta prefix", "more please", false, true},
-		{"meta with punctuation", "why?", false, true},
-		{"referential lead", "what about the second one", false, true},
-		{"pronoun lead", "it doesn't work", false, true},
+// The follow-up gate is a language-neutral recency signal (ADR 0018): a non-reply
+// is a follow-up only when its sender is mid-conversation — a prior non-bot turn
+// of theirs in this chat within the window. No keywords, no language heuristics.
+func TestSelectRecencyGate(t *testing.T) {
+	window := time.Hour
 
-		// Short-message heuristic — language-agnostic (#84). A brief ack in any
-		// language is a follow-up even when it isn't a platform reply.
-		{"persian yes", "بله", false, true},
-		{"persian yeah", "آره", false, true},
-		{"persian why", "چرا", false, true},
-		{"persian yes with punctuation", "بله؟", false, true},
-		{"persian two-word ack", "بله لطفا", false, true},
-		{"english one-word ack", "yes", false, true},
-		{"english two-word ack", "go ahead", false, true},
-
-		// Guards: a longer standalone question — English or not — is NOT a follow-up,
-		// so a fresh question still injects no history.
-		{"standalone english question", "how do I install the widget?", false, false},
-		{"standalone persian question", "قوانین این بازی چیست", false, false},
-		{"empty", "", false, false},
-		{"whitespace only", "   ", false, false},
-	}
-	for _, tc := range cases {
-		assert.Equal(t, tc.want, memory.IsFollowUp(tc.query, tc.isReply), tc.name)
-	}
-}
-
-// A reply to another user (not the bot) still pulls history: an otherwise
-// standalone-looking question, when it's a reply, injects the recent turns.
-func TestSelectAnyReplyInjectsHistory(t *testing.T) {
+	// A sender with a recent prior turn is mid-conversation → non-reply injects
+	// (regardless of the query text — nothing language-specific).
 	b := memory.New(10)
 	b.Append("chat", turn("u1", "Al", "the widget calibrates with the blue dial"))
-	b.Append("chat", turn("u2", "Bo", "which dial though?"))
+	assert.NotEmpty(t, b.Select("chat", "قوانین این بازی چیست", "u1", false, 5, window),
+		"a sender with a recent turn is mid-conversation → follow-up, any language")
 
-	// isReply=true, even though the text alone wouldn't trip a cue.
-	got := b.Select("chat", "how do I install the widget?", true, 5)
-	assert.NotEmpty(t, got, "a reply injects recent history regardless of the text")
+	// A sender who hasn't spoken → standalone, even though others have.
+	assert.Nil(t, b.Select("chat", "how do I install?", "stranger", false, 5, window),
+		"a sender with no prior turn is not mid-conversation → standalone")
 
-	// The same text, not a reply and not cue-bearing, stays standalone.
-	assert.Nil(t, b.Select("chat", "how do I install the widget?", false, 5),
-		"a non-reply standalone question pulls no history")
+	// window 0 → replies-only: even a mid-conversation sender's non-reply is standalone.
+	assert.Nil(t, b.Select("chat", "and the red one?", "u1", false, 5, 0),
+		"window 0 = replies only")
+
+	// A sender whose only turn predates the window → standalone.
+	old := memory.New(10)
+	old.Append("chat", memory.Turn{SpeakerID: "u1", Speaker: "Al", Text: "long ago", Time: time.Now().Add(-2 * time.Hour)})
+	assert.Nil(t, old.Select("chat", "still there?", "u1", false, 5, window),
+		"a sender whose last turn predates the window → standalone")
+
+	// Only a bot turn present → the sender is not mid-conversation.
+	botOnly := memory.New(10)
+	botOnly.Append("chat", memory.Turn{Bot: true, Text: "hello", Time: time.Now()})
+	assert.Nil(t, botOnly.Select("chat", "hi", "u1", false, 5, window),
+		"a bot turn doesn't make the sender mid-conversation")
 }
 
-// The end-to-end gate: a short non-English ack pulls recent history from the
-// buffer, where before it would have answered in isolation (#84).
-func TestSelectShortNonEnglishFollowUpInjectsHistory(t *testing.T) {
+// A reply always injects, bypassing the recency gate — even when its sender has no
+// prior turn of their own (ADR 0018 / #105).
+func TestSelectReplyBypassesRecency(t *testing.T) {
 	b := memory.New(10)
 	b.Append("chat", turn("u1", "Al", "the widget calibrates with the blue dial"))
-	b.Append("chat", memory.Turn{Bot: true, Text: "turn the blue dial clockwise", Time: time.Now(), MessageID: "b1"})
-
-	// "بله" ("yes") as a non-reply short ack — the reported symptom (#84).
-	got := b.Select("chat", "بله", false, 5)
-	assert.NotEmpty(t, got, "a short non-English ack injects recent history instead of answering in isolation")
-
-	// A standalone non-English question still gates to nothing.
-	assert.Nil(t, b.Select("chat", "قوانین این بازی چیست", false, 5),
-		"a fresh non-English question pulls no history")
-}
-
-// Select gates on follow-up: a standalone question injects nothing even with a
-// full buffer.
-func TestSelectGatesStandalone(t *testing.T) {
-	b := memory.New(10)
-	b.Append("chat", turn("u1", "Al", "the widget installs via script"))
-	assert.Nil(t, b.Select("chat", "how do I install?", false, 5),
-		"a standalone question pulls no history")
+	assert.NotEmpty(t, b.Select("chat", "what does this mean?", "newcomer", true, 5, time.Hour),
+		"a reply injects history even from a sender with no prior turn")
 }
 
 // Select returns a recency floor plus relevant turns, capped at injectN and in
@@ -155,7 +116,7 @@ func TestSelectRecencyAndRelevance(t *testing.T) {
 	b.Append("chat", turn("u2", "Bo", "recent two"))
 	b.Append("chat", turn("u1", "Al", "recent three"))
 
-	got := b.Select("chat", "tell me more about widget calibration", true, 5)
+	got := b.Select("chat", "tell me more about widget calibration", "u1", true, 5, time.Hour)
 	require.NotEmpty(t, got)
 	assert.LessOrEqual(t, len(got), 5, "capped at injectN")
 
@@ -177,7 +138,7 @@ func TestSelectCap(t *testing.T) {
 	for i := 0; i < 10; i++ {
 		b.Append("chat", turn("u1", "Al", "widget widget widget"))
 	}
-	got := b.Select("chat", "widget", true, 3)
+	got := b.Select("chat", "widget", "u1", true, 3, time.Hour)
 	assert.Len(t, got, 3, "never more than injectN")
 }
 
