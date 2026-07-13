@@ -361,6 +361,14 @@ func (a *Adapter) toInbound(m *models.Message) (transport.Inbound, bool) {
 	}
 	if m.ReplyToMessage != nil {
 		in.ReplyToMessageID = strconv.Itoa(m.ReplyToMessage.ID)
+		// Carry the replied-to message's text + author inline (#reply-context): it
+		// lets the bot answer a reply about a message it never buffered. A non-text
+		// parent (photo/sticker) has empty Text and is simply skipped; a cross-chat
+		// reply arrives with ReplyToMessage nil and never reaches here.
+		in.ReplyToText = strings.TrimSpace(m.ReplyToMessage.Text)
+		if m.ReplyToMessage.From != nil {
+			in.ReplyToSender = userOf(m.ReplyToMessage.From).Display
+		}
 	}
 	return in, true
 }

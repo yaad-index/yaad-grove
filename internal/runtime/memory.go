@@ -36,6 +36,22 @@ func selectHistory(buf *memory.Buffer, in transport.Inbound, injectN int) []core
 	return out
 }
 
+// replyContextOf builds the replied-to-message context for the engine (ADR 0014):
+// the inline text of the message this query replies to, prefixed with its author
+// when known. Empty when the query isn't a reply or the platform didn't inline the
+// parent. It is buffer-independent — the replied-to message need never have been
+// seen by the bot; the engine frames it as quoted context.
+func replyContextOf(in transport.Inbound) string {
+	text := strings.TrimSpace(in.ReplyToText)
+	if text == "" {
+		return ""
+	}
+	if sender := strings.TrimSpace(in.ReplyToSender); sender != "" {
+		return sender + ": " + text
+	}
+	return text
+}
+
 // rememberUser records the sender's turn in the conversation buffer — a consented
 // group turn or an admin DM turn (ADR 0014). A nil/disabled buffer is a no-op.
 func rememberUser(buf *memory.Buffer, in transport.Inbound) {

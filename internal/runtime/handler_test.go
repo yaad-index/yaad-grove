@@ -276,6 +276,27 @@ func TestHandlerLogsServedMessage(t *testing.T) {
 	assert.Equal(t, "chat-1", entries[0].ChatID, "the chat id is logged for per-chat curation (#96)")
 }
 
+// A reply carries the replied-to message text into the engine's Query as
+// reply-context, prefixed with its sender (ADR 0014) — buffer-independent.
+func TestHandlerThreadsReplyContext(t *testing.T) {
+	engine := &mockEngine{reply: core.Reply{Text: "ok"}}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, nil, runtime.Policy{})
+
+	in := transport.Inbound{
+		User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "what's this?", ReplyTo: "chat-1", Directed: true,
+		ReplyToMessageID: "m9", ReplyToText: "the launch slips to Q3", ReplyToSender: "carol",
+	}
+	_, err := h(context.Background(), in)
+	require.NoError(t, err)
+	assert.Equal(t, "carol: the launch slips to Q3", engine.gotQuery.ReplyContext, "replied-to text + sender reach the engine")
+
+	// A non-reply carries no reply-context.
+	plain := transport.Inbound{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "hi", ReplyTo: "chat-1", Directed: true}
+	_, err = h(context.Background(), plain)
+	require.NoError(t, err)
+	assert.Empty(t, engine.gotQuery.ReplyContext, "a non-reply has no reply-context")
+}
+
 // The sender's display-name handle is logged for curation attribution (#99).
 func TestHandlerLogsHandle(t *testing.T) {
 	qlog := &quarantine.MemoryLog{}

@@ -227,6 +227,20 @@ func TestAnswerRefusesOnEmptyRetrievalWithoutModelCall(t *testing.T) {
 	assert.NotEmpty(t, reply.Text)
 }
 
+// A reply about an inlined earlier message reaches the model even with empty
+// retrieval and no tools — the reply-context is the short-circuit exception (ADR
+// 0014), and the replied-to text is injected into the system prompt as context.
+func TestAnswerWithReplyContextReachesModel(t *testing.T) {
+	mdl := textModel("answering about the replied-to message")
+	e := core.New(mdl, mockRetriever{chunks: nil}, nopTools{}, "scope")
+
+	reply, err := e.Answer(context.Background(), core.Query{Text: "what does this mean?", ReplyContext: "carol: the launch slips to Q3"})
+	require.NoError(t, err)
+	assert.False(t, reply.Refused, "a reply-context query is not short-circuit-refused")
+	assert.Equal(t, 1, mdl.calls, "the model is called despite empty retrieval")
+	assert.Contains(t, systemOf(mdl), "the launch slips to Q3", "the replied-to text is injected as context")
+}
+
 // A sentinel-led decline is a refusal, and the persona-voiced note after the
 // marker is what the user sees — the marker itself is stripped (ADR 0013).
 func TestAnswerRefusesOnModelSentinel(t *testing.T) {

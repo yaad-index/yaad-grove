@@ -165,7 +165,13 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
 // a capacity notice rather than crashing; any other error propagates.
 func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn) (core.Reply, error) {
-	reply, err := engine.Answer(ctx, core.Query{User: in.User, Surface: in.Surface, Text: in.Text, History: history})
+	reply, err := engine.Answer(ctx, core.Query{
+		User:         in.User,
+		Surface:      in.Surface,
+		Text:         in.Text,
+		History:      history,
+		ReplyContext: replyContextOf(in),
+	})
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
 			return core.Reply{Text: atCapacityText, Refused: true}, nil
