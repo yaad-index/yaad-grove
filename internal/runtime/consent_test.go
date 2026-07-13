@@ -143,6 +143,55 @@ func TestDMNeverAnswers(t *testing.T) {
 	assert.NotEqual(t, "ANSWER", reply.Text)
 }
 
+// A non-en Strings catalog on the Policy flows end to end through the handler: the
+// consent disclosure, the opt-in button label, the group nudge, and the rate-limit
+// reply all render from the catalog, not the embedded en fallback. This guards the
+// wiring the strings_test.go isolation tests can't see — that a Policy carrying a
+// language catalog actually localizes the whole consent/nudge path (ADR 0018 / #25),
+// so a Policy that omits Strings (nil) doesn't silently answer in English.
+func TestPolicyStringsLocalizesUserFacingPaths(t *testing.T) {
+	// Sentinel "language": distinctive values for the keys these paths render, so an
+	// en fallback would be unmistakable in the assertions below.
+	cat := runtime.Strings{
+		runtime.StrConsentDisclosureIntro: "INTRO_XX ",
+		runtime.StrConsentDisclosureTap:   "TAP_XX",
+		runtime.StrConsentOptInLabel:      "OPTIN_XX",
+		runtime.StrNudge:                  "NUDGE_XX",
+		runtime.StrRateLimited:            "RATELIMIT_XX",
+	}
+
+	// Consent disclosure + opt-in label render from the catalog.
+	consentH := runtime.NewHandler(
+		&mockGate{decision: acl.DecideServe}, &mockEngine{}, nil, nil, nil, nil,
+		&mockConsenter{consent: acl.ConsentUnknown},
+		runtime.Policy{Strings: cat},
+	)
+	reply, err := consentH(context.Background(), dmInbound("/start"))
+	require.NoError(t, err)
+	assert.Contains(t, reply.Text, "INTRO_XX", "disclosure intro renders from the catalog, not en")
+	assert.Contains(t, reply.Text, "TAP_XX", "tap line renders from the catalog")
+	require.Len(t, reply.Actions, 1)
+	assert.Equal(t, "OPTIN_XX", reply.Actions[0].Label, "opt-in label renders from the catalog")
+
+	// The group nudge (message mode) and the rate-limit reply render from the
+	// catalog too — the two other Policy.Strings-routed group paths.
+	nudgeH := runtime.NewHandler(
+		&mockGate{decision: acl.DecideNudge}, &mockEngine{}, nil, nil, nil, nil, nil,
+		runtime.Policy{Nudge: runtime.Nudge{Mode: runtime.NudgeMessage}, Strings: cat},
+	)
+	nudge, err := nudgeH(context.Background(), inbound)
+	require.NoError(t, err)
+	assert.Contains(t, nudge.Text, "NUDGE_XX", "the nudge renders from the catalog")
+
+	limitH := runtime.NewHandler(
+		&mockGate{decision: acl.DecideRateLimited}, &mockEngine{}, nil, nil, nil, nil, nil,
+		runtime.Policy{Strings: cat},
+	)
+	limited, err := limitH(context.Background(), inbound)
+	require.NoError(t, err)
+	assert.Contains(t, limited.Text, "RATELIMIT_XX", "the rate-limit reply renders from the catalog")
+}
+
 // The opt-in button end to end: tapping it runs the consent_grant verb, which
 // grants the clicker's own consent through the real gate.
 func TestConsentGrantViaButton(t *testing.T) {
@@ -155,7 +204,7 @@ func TestConsentGrantViaButton(t *testing.T) {
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "consent_grant"})
 	// gate is the authorizer + the consenter; no consenter for the message path here.
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate, nil), gate, nil, nil, runtime.Policy{})
 
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)

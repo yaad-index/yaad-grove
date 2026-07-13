@@ -1,11 +1,37 @@
 # fa.yaml — Persian language pack (ADR 0018), the second sample.
 #
-# It overlays the base (en): it sets only what differs — here, prompt guidance to
-# answer in Persian. Every key it omits (e.g. every `strings` entry, once those
-# ship) inherits from en.
+# It overlays the base (en): it sets only what differs. Every key it omits inherits
+# from en, so a pack states only what it translates.
+#
+# The `strings` below carry a native Persian register (هکسره + نیم‌فاصله/ZWNJ verified).
+# Intro-bullet note: the `•` bullets start LTR; if a transport renders them
+# left-to-right, prepend an RLM (U+200F) per bullet line — verify in-surface.
 code: fa
 name: فارسی
 prompt: |
   Answer in Persian (فارسی) unless the user writes to you in another language, in
   which case reply in that language. Use natural, conversational Persian.
-strings: {}
+strings:
+  consent_disclosure_intro: |-
+    پیش از آنکه شما را اضافه کنم، پیوستن یعنی:
+    • در گروه، وقتی به پیام من پاسخ دهید یا مرا منشن کنید، پاسختان را می‌دهم.
+    • پیام‌های گروهی شما به پایگاهِ دانشی که از آن پاسخ می‌دهم افزوده می‌شوند.
+  consent_transcript_line: "\n• پیام‌های شما در یک سابقه‌ی گفت‌وگوی ماندگار هم نگهداری می‌شوند. با انصراف، ثبتِ پیام‌های تازه متوقف می‌شود اما پیام‌های پیشین باقی می‌مانند."
+  consent_disclosure_tap: "\nبرای پیوستن، دکمه‌ی زیر را بزنید (یا /consent بفرستید). هر زمان بخواهید می‌توانید با /consent remove انصراف دهید."
+  consent_granted: "پیوستید، ممنون. هر زمان بخواهید می‌توانید با /consent remove انصراف دهید."
+  consent_already: "شما پیش‌تر پیوسته‌اید. برای انصراف /consent remove بفرستید."
+  consent_removed: "انصراف شما ثبت شد — دیگر پیام‌هایتان را ثبت نمی‌کنم و پاسخی نمی‌دهم. برای پیوستن دوباره، هر زمان /consent بفرستید."
+  consent_error: "مشکلی پیش آمد — لطفاً دوباره تلاش کنید."
+  consent_opt_in_label: "پیوستن"
+  nudge: "برای گفت‌وگو با من در اینجا، ابتدا بپیوندید: به من پیام خصوصی بدهید و دکمه‌ی پیوستن را بزنید (یا /consent بفرستید)."
+  refuse: "ببخشید، در این مورد نمی‌توانم اینجا کمکی کنم."
+  rate_limited: "به سقفِ تعداد پیام رسیدید — لطفاً کمی بعد دوباره تلاش کنید."
+  at_capacity: "در حال حاضر ظرفیتِ پاسخ‌گویی ندارم — لطفاً کمی بعد دوباره تلاش کنید."
+  callback_done: "انجام شد ✓"
+  callback_expired: "این کنش منقضی شده است."
+  callback_consumed: "این کنش پیش‌تر انجام شده است."
+  callback_error: "مشکلی پیش آمد — لطفاً دوباره تلاش کنید."
+  callback_denied: "شما اجازه‌ی این کار را ندارید."
+  callback_unknown_verb: "این کنش دیگر در دسترس نیست."
+  callback_invalid: "این کنش به این شکل قابل انجام نیست."
+  callback_failed: "انجام نشد — لطفاً دوباره تلاش کنید."

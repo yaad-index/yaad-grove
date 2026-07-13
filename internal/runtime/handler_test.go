@@ -702,7 +702,7 @@ func TestHandlerCallbackDemotionDenies(t *testing.T) {
 
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate, nil), gate, nil, nil, runtime.Policy{})
 
 	// Demote the clicker after the button was shown, before the click.
 	require.NoError(t, gate.SetTier(ctx, "u1", acl.TierDefault))
@@ -728,7 +728,7 @@ func TestHandlerCallbackSetTierHappyPath(t *testing.T) {
 
 	store := pending.NewMemoryStore(testTTL)
 	token := putToken(t, store, core.Action{Verb: "set_tier", Params: map[string]string{"user": "target", "tier": "trusted"}})
-	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate), gate, nil, nil, runtime.Policy{})
+	h := runtime.NewHandler(nil, nil, store, runtime.DefaultRegistry(gate, nil), gate, nil, nil, runtime.Policy{})
 
 	reply, err := h(ctx, callbackInbound(token))
 	require.NoError(t, err)
