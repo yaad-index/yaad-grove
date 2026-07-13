@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.11.0](https://github.com/yaad-index/yaad-grove/compare/v0.10.0...v0.11.0) (2026-07-13)
+
+
+### Features
+
+* **memory:** honor replies — any reply is a follow-up + inject the replied-to text (ADR 0014) ([#105](https://github.com/yaad-index/yaad-grove/issues/105)) ([d34ea0b](https://github.com/yaad-index/yaad-grove/commit/d34ea0b9469a0d00dab962bb78e6d7e718805f02))
+
 ## [0.10.0](https://github.com/yaad-index/yaad-grove/compare/v0.9.0...v0.10.0) (2026-07-13)
 
 
