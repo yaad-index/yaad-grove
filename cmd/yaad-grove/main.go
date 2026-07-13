@@ -35,6 +35,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
+	"github.com/yaad-index/yaad-grove/internal/store"
 	"github.com/yaad-index/yaad-grove/internal/tools"
 	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
@@ -447,29 +448,22 @@ func loadPromptTemplate(path string) (*template.Template, error) {
 	return t, nil
 }
 
-// retrievalMaxChunks caps how many chunks either retriever returns per query.
+// retrievalMaxChunks caps how many chunks a retrieval returns per query.
 const retrievalMaxChunks = 8
 
-// Retrieval modes (#65): how the lexical and semantic retrievers combine.
-const (
-	retrievalModeKeyword  = "keyword"  // lexical only
-	retrievalModeSemantic = "semantic" // embeddings, with keyword as an error-fallback (prior default)
-	retrievalModeHybrid   = "hybrid"   // RRF fusion of both, always
-)
-
-// buildRetriever selects the retriever (ADR 0001/0017, issue #65). The keyword
-// (lexical) retriever is always available. When the embedding base-url + model
-// pair is set it also builds the semantic retriever — which embeds the whole vault
-// now, so a failure here is a startup error. An incomplete pair (one without the
-// other) is a startup error, like the chat-model pair. The embedding key is
-// YAADGROVE_EMBEDDING_API_KEY, falling back to the model key.
+// buildRetriever builds the retrieval query step over a config-selected Store
+// (ADR 0001/0017/0019). It reads the curated vault into documents, indexes them
+// into the default `memory` backend (embedding every chunk when embeddings are
+// configured — so a failure here is a startup error, not a silent unindexed bot,
+// ADR 0017), and returns the Planner that composes the backend's primitives. The
+// embedding key is YAADGROVE_EMBEDDING_API_KEY, falling back to the model key.
 //
-// --retrieval-mode picks how they combine: keyword (lexical only), semantic
-// (embeddings with a keyword error-fallback — the prior default behavior), or
+// --retrieval-mode picks how the primitives combine: keyword (lexical only),
+// semantic (embeddings with a keyword error-fallback — the prior default), or
 // hybrid (RRF fusion of both, always). The default is hybrid when embeddings are
-// configured, else keyword. semantic and hybrid both require embeddings.
+// configured, else keyword. semantic and hybrid both require embeddings. An
+// incomplete embedding pair (one without the other) is a startup error.
 func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
-	keyword := retrieval.New(c.VaultDir, retrievalMaxChunks)
 	base := strings.TrimSpace(c.EmbeddingBaseURL)
 	emodel := strings.TrimSpace(c.EmbeddingModel)
 	embeddingsSet := base != "" || emodel != ""
@@ -478,49 +472,52 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 	}
 
 	// Resolve the mode: an unset mode defaults to hybrid when embeddings are on (the
-	// new best default), else keyword (the zero-config default).
+	// best default), else keyword (the zero-config default).
 	mode := strings.TrimSpace(c.RetrievalMode)
 	if mode == "" {
 		if embeddingsSet {
-			mode = retrievalModeHybrid
+			mode = retrieval.ModeHybrid
 		} else {
-			mode = retrievalModeKeyword
+			mode = retrieval.ModeKeyword
 		}
 	}
-	if mode == retrievalModeKeyword {
-		return keyword, nil
-	}
-	if mode != retrievalModeSemantic && mode != retrievalModeHybrid {
+	if mode != retrieval.ModeKeyword && mode != retrieval.ModeSemantic && mode != retrieval.ModeHybrid {
 		return nil, fmt.Errorf("serve: unknown --retrieval-mode %q (want keyword, semantic, or hybrid)", mode)
 	}
-	if !embeddingsSet {
+	if mode != retrieval.ModeKeyword && !embeddingsSet {
 		return nil, fmt.Errorf("serve: --retrieval-mode %q requires --embedding-base-url and --embedding-model", mode)
 	}
 
-	key := os.Getenv("YAADGROVE_EMBEDDING_API_KEY")
-	if key == "" {
-		key = os.Getenv("YAADGROVE_MODEL_API_KEY")
+	// An embedder only when embeddings are configured; keyword mode leaves it nil.
+	var embedder embed.Embedder
+	if embeddingsSet {
+		key := os.Getenv("YAADGROVE_EMBEDDING_API_KEY")
+		if key == "" {
+			key = os.Getenv("YAADGROVE_MODEL_API_KEY")
+		}
+		embedder = embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel})
 	}
-	embedder := embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel})
-	semantic, err := retrieval.NewSemantic(context.Background(), c.VaultDir, embedder, retrievalMaxChunks, c.SimilarityThreshold)
+
+	// Read the vault and index it into the memory backend. Index embeds every chunk
+	// (when an embedder is set), so this is where the boot embedding cost lands.
+	docs, err := retrieval.VaultDocs(context.Background(), c.VaultDir)
 	if err != nil {
-		return nil, fmt.Errorf("serve: build semantic index: %w", err)
+		return nil, fmt.Errorf("serve: read vault: %w", err)
 	}
+	mem := store.NewMemory(embedder, c.SimilarityThreshold)
+	if err := mem.Index(context.Background(), docs); err != nil {
+		return nil, fmt.Errorf("serve: build retrieval index: %w", err)
+	}
+
 	// Prominent so the index size — and thus the boot embedding cost — is visible
 	// (ADR 0017 crash-loop caveat).
-	log.Info("semantic retrieval enabled",
-		"retrieval_mode", mode,
-		"embedding_model", emodel,
-		"chunks_indexed", semantic.Len(),
-		"similarity_threshold", c.SimilarityThreshold,
-	)
-	if mode == retrievalModeHybrid {
-		// Fuse lexical + semantic every query, so proper-noun / "which episode" queries
-		// come in via the lexical leg even when the semantic leg is empty (#65).
-		return retrieval.NewHybrid(retrievalMaxChunks, keyword, semantic), nil
+	attrs := []any{"retrieval_mode", mode, "chunks_indexed", mem.Len()}
+	if embeddingsSet {
+		attrs = append(attrs, "embedding_model", emodel, "similarity_threshold", c.SimilarityThreshold)
 	}
-	// semantic: the prior behavior — semantic with keyword as the error-fallback.
-	return retrieval.Fallback{Primary: semantic, Secondary: keyword}, nil
+	log.Info("retrieval index built", attrs...)
+
+	return retrieval.NewPlanner(mem, embedder, mode, retrievalMaxChunks), nil
 }
 
 // parseTopicAllowList parses "chatid=topicid1,topicid2" specs into a group→topics

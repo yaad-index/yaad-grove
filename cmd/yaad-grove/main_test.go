@@ -54,15 +54,27 @@ func TestTranscriptLogDefaultOff(t *testing.T) {
 	assert.Equal(t, "/tmp/grove-transcripts", cli.Serve.TranscriptLog)
 }
 
-// Retriever selection (ADR 0017): no embedding config → keyword; an incomplete
-// embedding pair → startup error.
+// tempVault writes a one-file curated vault under a temp dir and returns its
+// path — buildRetriever now indexes the vault at startup (ADR 0019), even in
+// keyword mode, so a valid vault must exist for the no-error cases.
+func tempVault(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "note.md"), []byte("# Note\nhello world\n"), 0o600))
+	return dir
+}
+
+// Retriever selection (ADR 0017/0019): no embedding config → a keyword-mode
+// planner; an incomplete embedding pair → startup error (rejected before the
+// vault is read).
 func TestBuildRetriever(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	r, err := buildRetriever(&ServeCmd{VaultDir: "vault"}, log)
+	r, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
 	require.NoError(t, err)
-	_, isKeyword := r.(*retrieval.FullText)
-	assert.True(t, isKeyword, "no embedding endpoint → keyword retriever (zero-config default)")
+	p, ok := r.(*retrieval.Planner)
+	require.True(t, ok, "buildRetriever returns a Planner")
+	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "no embedding endpoint → keyword mode (zero-config default)")
 
 	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
 	assert.Error(t, err, "base-url without model is a startup error")
@@ -78,11 +90,12 @@ func TestBuildRetriever(t *testing.T) {
 func TestBuildRetrieverMode(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	// keyword mode returns the lexical retriever even with no embeddings.
-	r, err := buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "keyword"}, log)
+	// keyword mode returns a keyword-mode planner even with no embeddings.
+	r, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t), RetrievalMode: "keyword"}, log)
 	require.NoError(t, err)
-	_, isKeyword := r.(*retrieval.FullText)
-	assert.True(t, isKeyword, "keyword mode → lexical retriever")
+	p, ok := r.(*retrieval.Planner)
+	require.True(t, ok, "buildRetriever returns a Planner")
+	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "keyword mode → keyword-mode planner")
 
 	// semantic / hybrid without embeddings configured is a startup error.
 	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log)
