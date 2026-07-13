@@ -276,6 +276,20 @@ func TestHandlerLogsServedMessage(t *testing.T) {
 	assert.Equal(t, "chat-1", entries[0].ChatID, "the chat id is logged for per-chat curation (#96)")
 }
 
+// The sender's display-name handle is logged for curation attribution (#99).
+func TestHandlerLogsHandle(t *testing.T) {
+	qlog := &quarantine.MemoryLog{}
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{reply: core.Reply{Text: "a"}}, nil, nil, nil, qlog, nil, runtime.Policy{})
+
+	in := transport.Inbound{User: core.User{ID: "u1", Display: "alice"}, Surface: core.SurfaceGroup, Text: "hi", ReplyTo: "chat-1", Directed: true}
+	_, err := h(context.Background(), in)
+	require.NoError(t, err)
+
+	entries := qlog.Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "alice", entries[0].Handle, "the sender's handle is logged")
+}
+
 // Consented ambient chatter (DecideLogOnly) is logged but draws no reply.
 func TestHandlerLogOnlyLogsAndStaysSilent(t *testing.T) {
 	qlog := &quarantine.MemoryLog{}

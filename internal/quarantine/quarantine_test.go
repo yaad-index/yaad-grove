@@ -110,8 +110,30 @@ func TestEntryBackCompatNoChatID(t *testing.T) {
 	var e quarantine.Entry
 	require.NoError(t, json.Unmarshal([]byte(legacy), &e))
 	assert.Empty(t, e.ChatID, "a pre-chat_id entry parses with an empty ChatID")
+	assert.Empty(t, e.Handle, "a pre-handle entry parses with an empty Handle")
 	assert.Equal(t, "u1", e.UserID)
 	assert.Equal(t, "old line", e.Text)
+}
+
+// The human-readable handle round-trips so curation can attribute a message to a
+// person (#99); an entry with no handle omits the field (omitempty).
+func TestEntryHandleRoundTrips(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "q.jsonl")
+	l, err := quarantine.OpenFile(path)
+	require.NoError(t, err)
+	require.NoError(t, l.Append(context.Background(), quarantine.Entry{UserID: "7", Handle: "bob", Surface: "group", Text: "hi"}))
+	require.NoError(t, l.Append(context.Background(), quarantine.Entry{UserID: "8", Surface: "group", Text: "anon"})) // no handle
+	require.NoError(t, l.Close())
+
+	entries := readLog(t, path)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "bob", entries[0].Handle)
+	assert.Empty(t, entries[1].Handle, "a user with no name has an empty handle")
+
+	// omitempty: the empty-handle line carries no "handle" key at all.
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, strings.Split(string(raw), "\n")[1], "handle", "an empty handle is omitted from the JSON")
 }
 
 func readLog(t *testing.T, path string) []quarantine.Entry {

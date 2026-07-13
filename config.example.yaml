@@ -60,6 +60,13 @@ serve:
   # surface (DMs are gated separately by admin approval).
   telegram-allowed-groups: []
 
+  # Forum topic scoping (issue #98): restrict a forum group to specific topics.
+  # Each entry is 'chatid=topicid1,topicid2' — the bot answers ONLY in those
+  # topics of that group and stays silent in the rest. A group not listed here is
+  # answered in all its topics (today's behavior). Replies always land in the
+  # topic the question was asked in, regardless of this list.
+  # telegram-allowed-topics: ["-1001234567890=2,7"]
+
   # Conversation transcript (ADR 0015): a durable, role-tagged record of group
   # conversations — human turns AND the bot's own answers — for operator review
   # and answer-quality evaluation. It is a directory holding one append-only

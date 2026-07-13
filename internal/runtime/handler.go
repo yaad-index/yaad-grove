@@ -220,6 +220,7 @@ func logServed(ctx context.Context, qlog quarantine.Log, in transport.Inbound) {
 		Time:    time.Now(),
 		ChatID:  in.ReplyTo, // the chat id — the same handle memory + the transcript key on
 		UserID:  in.User.ID,
+		Handle:  in.User.Display, // human-readable name for curation attribution (#99)
 		Surface: surfaceLabel(in.Surface),
 		Text:    in.Text,
 	}); err != nil {

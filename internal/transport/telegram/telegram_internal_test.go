@@ -99,6 +99,67 @@ func TestToInboundMemoryFields(t *testing.T) {
 	assert.False(t, in.ReplyToBot)
 }
 
+// Topic scoping (#98): with a topic allow-list on a group, a message in a listed
+// topic is served and one in an unlisted topic is dropped; a group with no list
+// answers in every topic (unchanged); DMs are never topic-gated.
+func TestToInboundTopicScoping(t *testing.T) {
+	a := New(Config{
+		AllowedGroups: []string{"999", "888"},
+		AllowedTopics: map[int64][]int{999: {12, 34}}, // 999 restricted; 888 unrestricted
+	}, nil)
+
+	// 999: an allowed topic is served, an unlisted topic (and General, thread 0) dropped.
+	allowed := msg(999, models.ChatTypeSupergroup, "hi", 7, "bob")
+	allowed.MessageThreadID = 12
+	_, ok := a.toInbound(allowed)
+	assert.True(t, ok, "a listed topic is served")
+
+	disallowed := msg(999, models.ChatTypeSupergroup, "hi", 7, "bob")
+	disallowed.MessageThreadID = 99
+	_, ok = a.toInbound(disallowed)
+	assert.False(t, ok, "an unlisted topic is dropped")
+
+	general := msg(999, models.ChatTypeSupergroup, "hi", 7, "bob") // thread 0 = General
+	_, ok = a.toInbound(general)
+	assert.False(t, ok, "General (thread 0) is dropped when a topic list is set and omits it")
+
+	// 888: no list → every topic served.
+	any := msg(888, models.ChatTypeSupergroup, "hi", 7, "bob")
+	any.MessageThreadID = 7777
+	_, ok = a.toInbound(any)
+	assert.True(t, ok, "a group without a topic list answers in all topics")
+
+	// A DM is never topic-gated.
+	dm := msg(555, models.ChatTypePrivate, "hi", 42, "alice")
+	_, ok = a.toInbound(dm)
+	assert.True(t, ok, "DMs are not topic-scoped")
+}
+
+// A reply carries the originating message's topic (message_thread_id) so a forum
+// answer stays in its topic (#98). sendTo is what Run calls.
+func TestSendToCarriesThreadID(t *testing.T) {
+	var threadID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			threadID = r.FormValue("message_thread_id")
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":999,"type":"supergroup"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.sendTo(context.Background(), 999, 42, core.Reply{Text: "in topic"}))
+	assert.Equal(t, "42", threadID, "the reply targets the originating topic")
+
+	// The interface Send (no thread) targets General — thread 0 is omitted from the
+	// request (message_thread_id is omitempty), so the reply lands in General.
+	threadID = "unset"
+	require.NoError(t, a.Send(context.Background(), "999", core.Reply{Text: "general"}))
+	assert.Empty(t, threadID, "a threadless send omits message_thread_id (General topic)")
+}
+
 // The bot's own @mention is stripped from the query so the model doesn't answer
 // the handle; other users' mentions stay, and UTF-16 offsets are honored.
 func TestStripBotMentions(t *testing.T) {
