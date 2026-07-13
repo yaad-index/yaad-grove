@@ -78,6 +78,25 @@ func TestSourcesNotSurfaced(t *testing.T) {
 	assert.NotContains(t, sys, "cite the [source] tags you rely on", "the old cite-the-sources instruction is gone")
 }
 
+// The language pack's guidance (ADR 0018) is injected into the system prompt when
+// set via WithLanguage, and absent otherwise.
+func TestLanguageInjected(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+
+	mdl := textModel("ok")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE", core.WithLanguage("Answer in Persian."))
+	_, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.Contains(t, systemOf(mdl), "Answer in Persian.", "the pack guidance is in the system prompt")
+
+	// No language → no injection (base-language behavior).
+	mdl2 := textModel("ok")
+	e2 := core.New(mdl2, ret, nopTools{}, "SCOPE")
+	_, err = e2.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.NotContains(t, systemOf(mdl2), "Answer in Persian.")
+}
+
 type mockRetriever struct {
 	chunks []core.Chunk
 	err    error

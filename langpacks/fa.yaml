@@ -1,0 +1,11 @@
+# fa.yaml — Persian language pack (ADR 0018), the second sample.
+#
+# It overlays the base (en): it sets only what differs — here, prompt guidance to
+# answer in Persian. Every key it omits (e.g. every `strings` entry, once those
+# ship) inherits from en.
+code: fa
+name: فارسی
+prompt: |
+  Answer in Persian (فارسی) unless the user writes to you in another language, in
+  which case reply in that language. Use natural, conversational Persian.
+strings: {}

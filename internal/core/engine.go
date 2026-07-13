@@ -255,6 +255,11 @@ type Engine struct {
 	// prompt is the optional operator-supplied grounding template (ADR 0016); nil
 	// uses the embedded default, which reproduces the prior prompt byte-for-byte.
 	prompt *template.Template
+	// language is the selected language pack's prompt guidance (ADR 0018): opaque
+	// per-instance text injected into the system prompt (e.g. "answer in Persian").
+	// Empty = the base language, which adds nothing — the engine knows no specific
+	// language, it just injects whatever the pack provides.
+	language string
 }
 
 // Option configures an Engine at construction. Options keep New's required
@@ -273,6 +278,13 @@ func WithPersona(persona string) Option {
 // identical to the prior prompt.
 func WithPromptTemplate(t *template.Template) Option {
 	return func(e *Engine) { e.prompt = t }
+}
+
+// WithLanguage sets the selected language pack's prompt guidance (ADR 0018). Empty
+// (the base language) is a no-op, so a bot on the default language renders exactly
+// as before.
+func WithLanguage(prompt string) Option {
+	return func(e *Engine) { e.language = prompt }
 }
 
 // New wires an engine from its collaborators. All are interfaces so the core
@@ -369,7 +381,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, q.History, q.ReplyContext, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, e.language, q.History, q.ReplyContext, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 
