@@ -347,12 +347,17 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// Conversation memory (ADR 0014): an in-memory per-chat buffer of recent turns.
 	// MemoryTurns 0 disables it — the bot then answers each message in isolation.
 	convoMemory := memory.New(c.MemoryTurns)
+	// The language-pack message catalog (ADR 0018 / #25) localizes every
+	// user-facing operational string — the policy's consent/nudge/rate-limit copy
+	// and the registry's verb toasts alike — so one instance speaks one language.
+	strs := runtime.Strings(pack.Strings)
 	policy := runtime.Policy{
 		Admins:         runtime.NewAdminSet(c.Admins),
 		Nudge:          nudge,
 		Memory:         convoMemory,
 		Inject:         c.MemoryInject,
 		FollowupWindow: c.FollowupWindow,
+		Strings:        strs,
 		Transcript:     tlog,
 	}
 
@@ -361,7 +366,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// writer. The handler routes by surface (ADR 0012): admin DMs answer, other
 	// DMs manage consent, group messages pass the consent gate; consented group
 	// messages are recorded (ADR 0004) and button clicks resolved.
-	actions := runtime.DefaultRegistry(gate, runtime.Strings(pack.Strings))
+	actions := runtime.DefaultRegistry(gate, strs)
 	handler := runtime.NewHandler(gate, engine, callbacks, actions, gate, qlog, gate, policy)
 
 	quarantineState := c.QuarantineLog
