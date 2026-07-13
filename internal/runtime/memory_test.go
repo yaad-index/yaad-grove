@@ -55,7 +55,7 @@ func TestHandlerDMTldrReachesModelWithHistory(t *testing.T) {
 	buf := memory.New(20)
 	model := &capModel{}
 	engine := core.New(model, condRetriever{}, noTools{}, "You answer about the widget.")
-	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"}), Memory: buf, Inject: 15}
+	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"}), Memory: buf, Inject: 15, FollowupWindow: time.Hour}
 	consent := &mockConsenter{consent: acl.ConsentGranted}
 	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, consent, policy)
 
@@ -92,7 +92,7 @@ func groupMsg(id, text, msgID string, replyToBot bool) transport.Inbound {
 func TestHandlerSelectBeforeAppend(t *testing.T) {
 	buf := memory.New(10)
 	engine := &mockEngine{reply: core.Reply{Text: "answer"}}
-	policy := runtime.Policy{Memory: buf, Inject: 10}
+	policy := runtime.Policy{Memory: buf, Inject: 10, FollowupWindow: time.Hour}
 	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, nil, policy)
 
 	// First message: buffer empty, so no history.
@@ -114,20 +114,28 @@ func TestHandlerSelectBeforeAppend(t *testing.T) {
 	assert.Contains(t, texts, "answer", "the bot's prior answer is buffered and injected")
 }
 
-// A standalone question pulls no history even with a full buffer (the follow-up
-// gate), and a served turn is still recorded for later follow-ups.
+// A sender who is NOT mid-conversation gets no history — the recency gate (ADR
+// 0018): a first message, or a message from a sender who hasn't spoken, is
+// standalone even with a populated buffer. Served turns are still recorded for
+// later follow-ups.
 func TestHandlerStandaloneNoHistory(t *testing.T) {
 	buf := memory.New(10)
 	engine := &mockEngine{reply: core.Reply{Text: "answer"}}
-	policy := runtime.Policy{Memory: buf, Inject: 10}
+	policy := runtime.Policy{Memory: buf, Inject: 10, FollowupWindow: time.Hour}
 	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, engine, nil, nil, nil, nil, nil, policy)
 
+	// u1's first message: no prior turn of theirs → not mid-conversation → standalone.
 	_, err := h(context.Background(), groupMsg("u1", "how do I install the widget?", "m1", false))
 	require.NoError(t, err)
-	_, err = h(context.Background(), groupMsg("u1", "how do I uninstall the widget?", "m2", false))
+	assert.Empty(t, engine.gotQuery.History, "a sender's first message injects no history")
+
+	// A different, unseen sender is standalone too, even though u1 has now spoken.
+	_, err = h(context.Background(), groupMsg("u2", "how do I uninstall the widget?", "m2", false))
 	require.NoError(t, err)
-	assert.Empty(t, engine.gotQuery.History, "a standalone question injects no history")
-	// But the buffer did record the turns (a later follow-up would see them).
+	assert.Empty(t, engine.gotQuery.History, "a sender who hasn't spoken before is standalone")
+
+	// But the turns were recorded — a reply, or either sender's next message, would
+	// now see them.
 	assert.NotEmpty(t, buf.Recent("chat", 10))
 }
 

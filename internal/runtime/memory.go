@@ -14,11 +14,11 @@ import (
 // disabled or the message is standalone. Call it BEFORE recording the current
 // turn: the buffer then holds only prior turns, so the current message never
 // appears in its own injected context. A nil buffer is a safe no-op.
-func selectHistory(buf *memory.Buffer, in transport.Inbound, injectN int) []core.HistoryTurn {
-	// Any reply is a follow-up (ADR 0014): a reply to another user's message
-	// continues that thread just as a reply to the bot does, so the gate opens on
-	// ReplyToMessageID, not only the reply-to-bot signal.
-	turns := buf.Select(in.ReplyTo, in.Text, in.ReplyToMessageID != "", injectN)
+func selectHistory(buf *memory.Buffer, in transport.Inbound, injectN int, window time.Duration) []core.HistoryTurn {
+	// Follow-up gate (ADR 0014/0018): a reply is always a follow-up (any reply, not
+	// just to the bot); otherwise the sender must be mid-conversation — a prior turn
+	// in this chat within window. Language-neutral; no keyword heuristics.
+	turns := buf.Select(in.ReplyTo, in.Text, in.User.ID, in.ReplyToMessageID != "", injectN, window)
 	if len(turns) == 0 {
 		return nil
 	}

@@ -89,7 +89,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		// dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
-				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in)
 			}
 			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, in), nil
 		}
@@ -121,7 +121,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 		switch decision {
 		case acl.DecideServe:
-			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, in)
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in)
 			// The bot's serve-path response — an answer OR a refusal — is the bot's real
 			// reply to the query, so the transcript records it (ADR 0015). This is
 			// deliberately unlike the memory buffer, which drops refusals as useless
@@ -187,8 +187,8 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 // current message never appears in its own injected context. A refusal is not
 // buffered (a canned out-of-scope line is not useful follow-up context); a
 // nil/disabled buffer makes the whole thing a plain answer.
-func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, in transport.Inbound) (core.Reply, error) {
-	history := selectHistory(buf, in, injectN)
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound) (core.Reply, error) {
+	history := selectHistory(buf, in, injectN, window)
 	rememberUser(buf, in)
 	reply, err := answer(ctx, engine, in, history)
 	if err == nil && !reply.Refused {

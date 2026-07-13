@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"strings"
+	"time"
 
 	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/transcript"
@@ -21,6 +22,10 @@ type Policy struct {
 	Memory *memory.Buffer
 	// Inject is how many retained turns may enter a prompt (--memory-inject).
 	Inject int
+	// FollowupWindow is how far back a non-reply message's sender must have a prior
+	// turn for it to count as a follow-up (ADR 0018 recency gate). Zero means only
+	// replies qualify.
+	FollowupWindow time.Duration
 	// Transcript is the durable role-tagged conversation record (ADR 0015); nil
 	// means no transcript is written. When set, the consent disclosure also states
 	// that entries persist historically, so opt-in is informed.

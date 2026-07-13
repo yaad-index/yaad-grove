@@ -168,6 +168,12 @@ type ServeCmd struct {
 	// MemoryTurns 0 disables the buffer (each message answered in isolation).
 	MemoryTurns  int `name:"memory-turns" default:"100" help:"Recent conversation turns retained per chat for follow-ups (0 disables)."`
 	MemoryInject int `name:"memory-inject" default:"15" help:"How many retained turns may enter a prompt (the injected slice)."`
+
+	// FollowupWindow gates non-reply follow-ups by a language-neutral recency signal
+	// (ADR 0018): a non-reply is treated as a follow-up only if its sender already
+	// has a turn in the chat within this window. A reply is always a follow-up. Zero
+	// means replies-only.
+	FollowupWindow time.Duration `name:"followup-window" default:"30m" help:"How far back to look for a sender's prior turn when deciding if a non-reply is a follow-up. 0 = replies only."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -326,11 +332,12 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// MemoryTurns 0 disables it — the bot then answers each message in isolation.
 	convoMemory := memory.New(c.MemoryTurns)
 	policy := runtime.Policy{
-		Admins:     runtime.NewAdminSet(c.Admins),
-		Nudge:      nudge,
-		Memory:     convoMemory,
-		Inject:     c.MemoryInject,
-		Transcript: tlog,
+		Admins:         runtime.NewAdminSet(c.Admins),
+		Nudge:          nudge,
+		Memory:         convoMemory,
+		Inject:         c.MemoryInject,
+		FollowupWindow: c.FollowupWindow,
+		Transcript:     tlog,
 	}
 
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
