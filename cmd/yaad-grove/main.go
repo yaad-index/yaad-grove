@@ -97,6 +97,13 @@ type ServeCmd struct {
 	// embeddings are configured, else keyword. semantic/hybrid require embeddings.
 	RetrievalMode string `name:"retrieval-mode" help:"How lexical + semantic retrieval combine: 'keyword', 'semantic', or 'hybrid' (RRF fusion). Default: hybrid when embeddings are set, else keyword. semantic/hybrid require --embedding-*."`
 
+	// StoreDimensions (ADR 0019) names the frontmatter fields to index for
+	// structured lookup (e.g. games, hosts). Declaring any enables the kb_enumerate
+	// tool over them: the model can list EVERY document whose dimension carries a
+	// value (a completeness query top-k retrieval can't answer). Empty = no
+	// structured lookup. Set in config.yaml under serve, like other options.
+	StoreDimensions []string `name:"store-dimensions" help:"Frontmatter fields to index for structured lookup (e.g. 'games,hosts'); enables the kb_enumerate tool. Empty disables it."`
+
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
 
 	// The ACL store persists consent, tier, and rate state (ADR 0002/0003); it
@@ -214,7 +221,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
 	// endpoint is configured, with keyword as the query-time fallback. Building the
 	// semantic index embeds the whole vault, so a failure here fails startup.
-	retriever, err := buildRetriever(c, log)
+	retriever, kbStore, err := buildRetriever(c, log)
 	if err != nil {
 		return err
 	}
@@ -233,6 +240,10 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	registry := tools.New(servers)
+	// The instance's tool set is the MCP registry plus, when structured dimensions
+	// are declared, the built-in kb_enumerate structured-lookup tool over the store
+	// (ADR 0019). With no dimensions, WithEnumerate returns the registry unchanged.
+	toolset := tools.WithEnumerate(registry, kbStore, c.StoreDimensions)
 
 	// The optional persona layer (ADR 0013): operator-authored behavior prepended
 	// to the system prompt ahead of scope/grounding. Load before the engine so a
@@ -255,7 +266,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	engine := core.New(m, retriever, registry, c.Scope,
+	engine := core.New(m, retriever, toolset, c.Scope,
 		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
@@ -397,7 +408,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"admins", len(policy.Admins),
 		"nudge_mode", c.NudgeMode,
 		"mcp_servers", len(servers),
-		"tools", len(registry.Defs()),
+		"tools", len(toolset.Defs()),
 		"spend_remaining_tokens", meter.Remaining(),
 	)
 
@@ -463,12 +474,12 @@ const retrievalMaxChunks = 8
 // hybrid (RRF fusion of both, always). The default is hybrid when embeddings are
 // configured, else keyword. semantic and hybrid both require embeddings. An
 // incomplete embedding pair (one without the other) is a startup error.
-func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
+func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store, error) {
 	base := strings.TrimSpace(c.EmbeddingBaseURL)
 	emodel := strings.TrimSpace(c.EmbeddingModel)
 	embeddingsSet := base != "" || emodel != ""
 	if embeddingsSet && (base == "" || emodel == "") {
-		return nil, errors.New("serve: --embedding-base-url and --embedding-model must be set together")
+		return nil, nil, errors.New("serve: --embedding-base-url and --embedding-model must be set together")
 	}
 
 	// Resolve the mode: an unset mode defaults to hybrid when embeddings are on (the
@@ -482,10 +493,10 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 		}
 	}
 	if mode != retrieval.ModeKeyword && mode != retrieval.ModeSemantic && mode != retrieval.ModeHybrid {
-		return nil, fmt.Errorf("serve: unknown --retrieval-mode %q (want keyword, semantic, or hybrid)", mode)
+		return nil, nil, fmt.Errorf("serve: unknown --retrieval-mode %q (want keyword, semantic, or hybrid)", mode)
 	}
 	if mode != retrieval.ModeKeyword && !embeddingsSet {
-		return nil, fmt.Errorf("serve: --retrieval-mode %q requires --embedding-base-url and --embedding-model", mode)
+		return nil, nil, fmt.Errorf("serve: --retrieval-mode %q requires --embedding-base-url and --embedding-model", mode)
 	}
 
 	// An embedder only when embeddings are configured; keyword mode leaves it nil.
@@ -498,15 +509,16 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 		embedder = embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel})
 	}
 
-	// Read the vault and index it into the memory backend. Index embeds every chunk
-	// (when an embedder is set), so this is where the boot embedding cost lands.
-	docs, err := retrieval.VaultDocs(context.Background(), c.VaultDir)
+	// Read the vault (with the declared structured dimensions, ADR 0019) and index
+	// it into the memory backend. Index embeds every chunk (when an embedder is set),
+	// so this is where the boot embedding cost lands.
+	docs, err := retrieval.VaultDocs(context.Background(), c.VaultDir, c.StoreDimensions)
 	if err != nil {
-		return nil, fmt.Errorf("serve: read vault: %w", err)
+		return nil, nil, fmt.Errorf("serve: read vault: %w", err)
 	}
 	mem := store.NewMemory(embedder, c.SimilarityThreshold)
 	if err := mem.Index(context.Background(), docs); err != nil {
-		return nil, fmt.Errorf("serve: build retrieval index: %w", err)
+		return nil, nil, fmt.Errorf("serve: build retrieval index: %w", err)
 	}
 
 	// Prominent so the index size — and thus the boot embedding cost — is visible
@@ -515,9 +527,12 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 	if embeddingsSet {
 		attrs = append(attrs, "embedding_model", emodel, "similarity_threshold", c.SimilarityThreshold)
 	}
+	if len(c.StoreDimensions) > 0 {
+		attrs = append(attrs, "dimensions", strings.Join(c.StoreDimensions, ","))
+	}
 	log.Info("retrieval index built", attrs...)
 
-	return retrieval.NewPlanner(mem, embedder, mode, retrievalMaxChunks), nil
+	return retrieval.NewPlanner(mem, embedder, mode, retrievalMaxChunks), mem, nil
 }
 
 // parseTopicAllowList parses "chatid=topicid1,topicid2" specs into a group→topics

@@ -17,24 +17,29 @@ import (
 	"path/filepath"
 	"strings"
 
+	"gopkg.in/yaml.v3"
+
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/store"
 )
 
 // VaultDocs walks vaultDir and returns one store.Doc per curated markdown file,
-// in scan order, each carrying that file's chunks — the indexing input a Store's
-// Index consumes. Each *.md file (dot-dirs like .git/.obsidian skipped) has its
-// frontmatter stripped and is split on markdown headings; a chunk's Source is the
-// vault-relative slash path, plus "#heading" when it has one, and its Text is
-// trimmed. A file with no headings is one chunk; a whitespace-only chunk is
-// dropped. A missing or unreadable vault is an error; an empty vault returns no
-// docs.
+// in scan order, each carrying that file's chunks plus its structured metadata —
+// the indexing input a Store's Index consumes. Each *.md file (dot-dirs like
+// .git/.obsidian skipped) has its frontmatter split off and is chunked on markdown
+// headings; a chunk's Source is the vault-relative slash path, plus "#heading" when
+// it has one, and its Text is trimmed. A file with no headings is one chunk; a
+// whitespace-only chunk is dropped. A missing or unreadable vault is an error; an
+// empty vault returns no docs.
 //
-// Dimensions (the structured-lookup input) are left unset this increment; they are
-// populated with the structured-lookup work (ADR 0019). Flattening every doc's
-// Chunks in order reproduces the flat chunk stream the pre-store retrievers built
-// on, so semantic and keyword indexing are over the identical units.
-func VaultDocs(ctx context.Context, vaultDir string) ([]store.Doc, error) {
+// The frontmatter is parsed (not just stripped): the note's `title` becomes its
+// canonical name, each field named in dimensions becomes a queryable dimension
+// (ADR 0019), and `aliases` + any `name_<lang>` field become alias surface forms.
+// dimensions empty means no structured lookup — only chunks are populated.
+// Flattening every doc's Chunks in order reproduces the flat chunk stream the
+// pre-store retrievers built on, so semantic and keyword indexing are over the
+// identical units.
+func VaultDocs(ctx context.Context, vaultDir string, dimensions []string) ([]store.Doc, error) {
 	var docs []store.Doc
 	err := filepath.WalkDir(vaultDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
@@ -62,17 +67,28 @@ func VaultDocs(ctx context.Context, vaultDir string) ([]store.Doc, error) {
 		}
 		rel = filepath.ToSlash(rel)
 
+		front, body, ferr := parseFrontmatter(string(content))
+		if ferr != nil {
+			return fmt.Errorf("frontmatter in %s: %w", rel, ferr)
+		}
+
 		var chunks []core.Chunk
-		for _, c := range chunkMarkdown(stripFrontmatter(string(content))) {
+		for _, c := range chunkMarkdown(body) {
 			source := rel
 			if c.heading != "" {
 				source = rel + "#" + c.heading
 			}
 			chunks = append(chunks, core.Chunk{Source: source, Text: strings.TrimSpace(c.text)})
 		}
-		if len(chunks) > 0 {
-			docs = append(docs, store.Doc{Ref: store.DocRef{Path: rel}, Chunks: chunks})
+		if len(chunks) == 0 {
+			return nil
 		}
+		docs = append(docs, store.Doc{
+			Ref:        store.DocRef{Path: rel, Title: frontString(front, "title")},
+			Chunks:     chunks,
+			Dimensions: frontDimensions(front, dimensions),
+			Aliases:    frontAliases(front),
+		})
 		return nil
 	})
 	if err != nil {
@@ -134,19 +150,114 @@ func headingTitle(line string) (string, bool) {
 	return title, true
 }
 
-// stripFrontmatter removes a leading YAML frontmatter block ("---" line, content,
-// "---" line) so metadata does not pollute ranking. If there is no frontmatter or
-// it is unterminated, the whole content is returned as body (never an error).
-func stripFrontmatter(content string) string {
+// parseFrontmatter splits a leading YAML frontmatter block ("---" line, content,
+// "---" line) from the markdown body and parses it, so metadata does not pollute
+// ranking AND is available for structured lookup (ADR 0019). No frontmatter, or an
+// unterminated block, yields a nil map and the whole content as body (never an
+// error). A present-but-malformed block is an error so a KB typo fails loudly at
+// startup rather than silently dropping a note's dimensions.
+func parseFrontmatter(content string) (map[string]any, string, error) {
 	nl := strings.IndexByte(content, '\n')
 	if nl < 0 || strings.TrimRight(content[:nl], "\r") != "---" {
-		return content
+		return nil, content, nil
 	}
 	lines := strings.Split(content[nl+1:], "\n")
 	for i, ln := range lines {
 		if strings.TrimRight(ln, "\r") == "---" {
-			return strings.Join(lines[i+1:], "\n")
+			block := strings.Join(lines[:i], "\n")
+			body := strings.Join(lines[i+1:], "\n")
+			var front map[string]any
+			if err := yaml.Unmarshal([]byte(block), &front); err != nil {
+				return nil, body, err
+			}
+			return front, body, nil
 		}
 	}
-	return content // unterminated → treat all as body
+	return nil, content, nil // unterminated → treat all as body
+}
+
+// frontString returns the string value of a frontmatter field, or "" if absent or
+// not a scalar.
+func frontString(front map[string]any, key string) string {
+	v, ok := front[key]
+	if !ok {
+		return ""
+	}
+	return scalarString(v)
+}
+
+// frontDimensions extracts the declared dimension fields into value slices; a
+// field absent from a note is simply omitted from that note's map.
+func frontDimensions(front map[string]any, dimensions []string) map[string][]string {
+	if len(dimensions) == 0 || front == nil {
+		return nil
+	}
+	out := map[string][]string{}
+	for _, dim := range dimensions {
+		if vals := toStrings(front[dim]); len(vals) > 0 {
+			out[dim] = vals
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+// frontAliases collects a note's alias surface forms: the `aliases` list plus any
+// `name_<lang>` field (e.g. name_fa), so an instance declares cross-script names
+// in frontmatter (ADR 0019).
+func frontAliases(front map[string]any) []string {
+	if front == nil {
+		return nil
+	}
+	aliases := toStrings(front["aliases"])
+	for key, v := range front {
+		if strings.HasPrefix(key, "name_") {
+			if s := scalarString(v); s != "" {
+				aliases = append(aliases, s)
+			}
+		}
+	}
+	if len(aliases) == 0 {
+		return nil
+	}
+	return aliases
+}
+
+// toStrings coerces a frontmatter value into a string slice: a scalar becomes a
+// one-element slice, a list becomes its scalar elements, anything empty becomes
+// nil. Non-string scalars are stringified so a numeric or boolean value still
+// indexes.
+func toStrings(v any) []string {
+	switch t := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, e := range t {
+			if s := scalarString(e); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		if s := scalarString(v); s != "" {
+			return []string{s}
+		}
+		return nil
+	}
+}
+
+// scalarString stringifies a YAML scalar, trimming surrounding whitespace; a
+// non-scalar (map/list) or nil yields "".
+func scalarString(v any) string {
+	switch t := v.(type) {
+	case nil, []any, map[string]any:
+		return ""
+	case string:
+		return strings.TrimSpace(t)
+	default:
+		return strings.TrimSpace(fmt.Sprintf("%v", t))
+	}
 }

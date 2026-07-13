@@ -203,14 +203,73 @@ func TestMemoryIndexNoEmbedder(t *testing.T) {
 	assert.Len(t, kw, 1, "keyword still works without embeddings")
 }
 
-// Enumerate is not implemented this increment and fails loudly.
-func TestMemoryEnumerateNotImplemented(t *testing.T) {
+// Enumerate returns the complete set of docs carrying a dimension value, deduped
+// and in doc order; an undeclared dimension or an unmatched value is empty.
+func TestMemoryEnumerateCompleteSet(t *testing.T) {
 	m := NewMemory(nil, 0)
-	_, err := m.Enumerate(context.Background(), "games", "acme-rail-game")
-	assert.ErrorIs(t, err, ErrEnumerateNotImplemented)
+	require.NoError(t, m.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "ep01.md", Title: "Ep 1"}, Dimensions: map[string][]string{"games": {"Acme Rail"}}},
+		{Ref: DocRef{Path: "ep02.md", Title: "Ep 2"}, Dimensions: map[string][]string{"games": {"Acme Rail", "Widget Wars"}}},
+		{Ref: DocRef{Path: "ep03.md", Title: "Ep 3"}, Dimensions: map[string][]string{"games": {"Widget Wars"}}},
+	}))
+
+	got, err := m.Enumerate(context.Background(), "games", "Acme Rail")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep01.md", "ep02.md"}, paths(got), "complete set, doc order")
+
+	empty, err := m.Enumerate(context.Background(), "games", "Nonexistent")
+	require.NoError(t, err)
+	assert.Empty(t, empty, "an unmatched value is an empty set, not an error")
+
+	undeclared, err := m.Enumerate(context.Background(), "designers", "anyone")
+	require.NoError(t, err)
+	assert.Empty(t, undeclared, "an undeclared dimension is empty, not an error")
+}
+
+// Enumerate matches spelling- and script-insensitively: the query value normalizes
+// the same as the indexed value, so casing/hyphen/format drift can't drop a doc.
+func TestMemoryEnumerateNormalizedMatch(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "a.md"}, Dimensions: map[string][]string{"games": {"Acme Rail"}}},
+	}))
+	got, err := m.Enumerate(context.Background(), "games", "  acme-rail  ")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a.md"}, paths(got), "normalized query matches the indexed value")
+}
+
+// Enumerate resolves an alias surface form to its entity: a note declares aliases
+// against its own title, and those forms resolve to docs referencing the title in
+// their dimension lists.
+func TestMemoryEnumerateAliasResolution(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), []Doc{
+		// The entity note: its title is the canonical name, with a cross-script alias.
+		{Ref: DocRef{Path: "acme-rail.md", Title: "Acme Rail"}, Aliases: []string{"اکمی ریل"}},
+		// Docs that reference the entity by its canonical name in a dimension.
+		{Ref: DocRef{Path: "ep01.md"}, Dimensions: map[string][]string{"games": {"Acme Rail"}}},
+		{Ref: DocRef{Path: "ep02.md"}, Dimensions: map[string][]string{"games": {"Acme Rail"}}},
+	}))
+
+	viaCanonical, err := m.Enumerate(context.Background(), "games", "Acme Rail")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep01.md", "ep02.md"}, paths(viaCanonical))
+
+	viaAlias, err := m.Enumerate(context.Background(), "games", "اکمی ریل")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep01.md", "ep02.md"}, paths(viaAlias), "the alias resolves to the same complete set")
 }
 
 // Close is a no-op for the memory backend.
 func TestMemoryClose(t *testing.T) {
 	assert.NoError(t, NewMemory(nil, 0).Close())
+}
+
+// paths projects the DocRef paths, for order-sensitive assertions.
+func paths(refs []DocRef) []string {
+	out := make([]string, len(refs))
+	for i, r := range refs {
+		out[i] = r.Path
+	}
+	return out
 }

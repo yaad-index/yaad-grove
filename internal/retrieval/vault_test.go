@@ -2,6 +2,7 @@ package retrieval_test
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -29,7 +30,7 @@ func flatten(docs []store.Doc) []core.Chunk {
 // VaultDocs scans recursively, skips dot-dirs, strips frontmatter, splits on
 // headings, and yields vault-relative slash sources with a #heading anchor.
 func TestVaultDocsScansAndChunks(t *testing.T) {
-	docs, err := retrieval.VaultDocs(context.Background(), vault())
+	docs, err := retrieval.VaultDocs(context.Background(), vault(), nil)
 	require.NoError(t, err)
 	require.NotEmpty(t, docs)
 	chunks := flatten(docs)
@@ -55,7 +56,7 @@ func TestVaultDocsScansAndChunks(t *testing.T) {
 // Chunks are grouped per source note: a headed file yields several chunks under
 // one Doc, a heading-less file yields a single anchor-free chunk.
 func TestVaultDocsGroupsPerNote(t *testing.T) {
-	docs, err := retrieval.VaultDocs(context.Background(), vault())
+	docs, err := retrieval.VaultDocs(context.Background(), vault(), nil)
 	require.NoError(t, err)
 
 	byPath := map[string]store.Doc{}
@@ -73,21 +74,60 @@ func TestVaultDocsGroupsPerNote(t *testing.T) {
 	assert.Equal(t, "notes/deep.md", deep.Chunks[0].Source, "no #anchor without a heading")
 }
 
+// Frontmatter is parsed (ADR 0019): the note's title becomes its canonical name,
+// the declared dimension fields become queryable values (scalar or list), and
+// `aliases` + any `name_<lang>` field become alias surface forms. A field not in
+// the declared set is ignored.
+func TestVaultDocsExtractsFrontmatter(t *testing.T) {
+	dir := t.TempDir()
+	note := "---\n" +
+		"title: Acme Rail\n" +
+		"games: [Acme Rail, Widget Wars]\n" +
+		"host: Dana\n" +
+		"aliases: [acme-rail]\n" +
+		"name_fa: اکمی ریل\n" +
+		"secret: ignored\n" +
+		"---\n# Body\ncontent here\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "n.md"), []byte(note), 0o600))
+
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games", "host"})
+	require.NoError(t, err)
+	require.Len(t, docs, 1)
+	d := docs[0]
+
+	assert.Equal(t, "Acme Rail", d.Ref.Title, "title is the canonical name")
+	assert.Equal(t, []string{"Acme Rail", "Widget Wars"}, d.Dimensions["games"], "a list dimension")
+	assert.Equal(t, []string{"Dana"}, d.Dimensions["host"], "a scalar dimension becomes a one-element slice")
+	assert.NotContains(t, d.Dimensions, "secret", "an undeclared field is not indexed")
+	assert.ElementsMatch(t, []string{"acme-rail", "اکمی ریل"}, d.Aliases, "aliases list + name_<lang> both collected")
+	assert.NotContains(t, d.Chunks[0].Text, "Acme Rail", "frontmatter is stripped from chunk text")
+}
+
+// Malformed frontmatter fails loudly (a KB typo shouldn't silently drop a note's
+// structured data).
+func TestVaultDocsMalformedFrontmatterErrors(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.md"),
+		[]byte("---\ngames: [unterminated\n---\n# Body\nx\n"), 0o600))
+	_, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"})
+	assert.Error(t, err, "malformed frontmatter is a startup error")
+}
+
 // A missing vault dir is an error; an empty (but existing) corpus is not.
 func TestVaultDocsDirCases(t *testing.T) {
-	_, err := retrieval.VaultDocs(context.Background(), filepath.Join(t.TempDir(), "nope"))
+	_, err := retrieval.VaultDocs(context.Background(), filepath.Join(t.TempDir(), "nope"), nil)
 	assert.Error(t, err, "missing vault dir is an error")
 
-	docs, err := retrieval.VaultDocs(context.Background(), t.TempDir()) // exists, no .md files
+	docs, err := retrieval.VaultDocs(context.Background(), t.TempDir(), nil) // exists, no .md files
 	require.NoError(t, err, "an empty corpus is not an error")
 	assert.Empty(t, docs)
 }
 
 // Output is deterministic for a given corpus (no walk-order leak).
 func TestVaultDocsDeterministic(t *testing.T) {
-	a, err := retrieval.VaultDocs(context.Background(), vault())
+	a, err := retrieval.VaultDocs(context.Background(), vault(), nil)
 	require.NoError(t, err)
-	b, err := retrieval.VaultDocs(context.Background(), vault())
+	b, err := retrieval.VaultDocs(context.Background(), vault(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, a, b)
 }
