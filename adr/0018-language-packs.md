@@ -119,12 +119,14 @@ These compose, they do not overlap:
 2. **PR2 — pack loading + prompt-additions** (§a, §c-prompt): `langpacks/en.yaml` + `fa.yaml`, `--language` / `--langpacks-dir`, the empty-safe prompt slot.
 3. **PR3 (later) — operational strings in packs** (§c-strings): move the runtime's user-facing constants into the pack catalog (issue #25).
 
-## Open questions for the gate
+## Gate decisions
 
-1. **Prompt-addition placement** — a distinct slot after scope (recommended), or fold into the scope/persona layer?
-2. **Fallback granularity** — per-key overlay onto `en` (recommended), or require a complete pack?
-3. **Answer-language** — carried inside the pack's `prompt` guidance (recommended), or a separate explicit `answer-language` directive (as #25 frames it)?
-4. **First-cut scope** — PR1 (recency) + PR2 (prompt-additions) now, strings (PR3) later (recommended)?
+The four design choices, resolved (each as recommended above, and reflected in the body):
+
+1. **Prompt-addition placement** — a distinct `{{.Language}}` slot after scope + grounding, before the per-query content. (Folding it into scope would make scope files language-specific, defeating the architecture.)
+2. **Fallback granularity** — per-key overlay onto `en`, as a property of the merge; a pack states only what differs.
+3. **Answer-language** — carried inside the pack's `prompt` guidance, authored as the pack author wants (no separate auto-generated field).
+4. **First-cut scope** — PR1 (recency) + PR2 (prompt-additions) first; strings (PR3 / #25) later.
 
 ## Deferred
 
