@@ -56,8 +56,32 @@ func TestBuildRetriever(t *testing.T) {
 	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
 	assert.Error(t, err, "base-url without model is a startup error")
 
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "bge-m3"}, log)
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "embed-model"}, log)
 	assert.Error(t, err, "model without base-url is a startup error")
+}
+
+// --retrieval-mode (#65) validation. keyword needs no embeddings; semantic/hybrid
+// require them; an unknown mode is a startup error. (The embeddings-on hybrid path
+// builds a live index, so it's exercised by the retrieval package's own tests, not
+// here.)
+func TestBuildRetrieverMode(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+
+	// keyword mode returns the lexical retriever even with no embeddings.
+	r, err := buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "keyword"}, log)
+	require.NoError(t, err)
+	_, isKeyword := r.(*retrieval.FullText)
+	assert.True(t, isKeyword, "keyword mode → lexical retriever")
+
+	// semantic / hybrid without embeddings configured is a startup error.
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log)
+	assert.ErrorContains(t, err, "requires", "hybrid needs embeddings")
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "semantic"}, log)
+	assert.ErrorContains(t, err, "requires", "semantic needs embeddings")
+
+	// An unknown mode is rejected.
+	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log)
+	assert.ErrorContains(t, err, "unknown --retrieval-mode")
 }
 
 // The default persona path (PERSONA.md, working dir) is graceful when absent and
