@@ -24,6 +24,23 @@ serve:
   model-base-url: https://api.openai.com/v1
   model-name: gpt-4o-mini
 
+  # Retrieval mode (issue #65): how lexical + semantic retrieval combine.
+  #   keyword  — lexical only (the zero-config default when no embeddings are set)
+  #   semantic — embeddings, with keyword as an error-fallback (prior default)
+  #   hybrid   — RRF fusion of both, run every query (best quality)
+  # Left unset it defaults to hybrid when embeddings are configured, else keyword.
+  # 'semantic' and 'hybrid' require the embedding endpoint below. Hybrid runs the
+  # lexical leg every query, so exact-name / "which episode" queries (semantic's
+  # blind spot) are matched lexically even when the semantic leg clears nothing.
+  # retrieval-mode: hybrid
+  #
+  # Embedding endpoint for semantic/hybrid retrieval (OpenAI-compatible /embeddings).
+  # Both must be set together; the key comes from YAADGROVE_EMBEDDING_API_KEY
+  # (falling back to YAADGROVE_MODEL_API_KEY).
+  # embedding-base-url: http://localhost:11434/v1
+  # embedding-model: bge-m3
+  # similarity-threshold: 0.30   # semantic cosine floor (gates only the semantic leg)
+
   # Global spend ceiling — the hard cost backstop (ADR 0006). A token budget the
   # model-call path consults before every call; when it is reached, calls are
   # refused (not queued) until the window resets. This is the outer bound the

@@ -81,6 +81,12 @@ type ServeCmd struct {
 	EmbeddingModel      string  `name:"embedding-model" help:"Embedding model id (e.g. text-embedding-3-large, or bge-m3 via Ollama). Set together with --embedding-base-url."`
 	SimilarityThreshold float32 `name:"similarity-threshold" default:"0.30" help:"Semantic-retrieval cosine floor: a chunk must clear it to be retrieved (below the floor for everything → refusal). 0 disables the floor (every query reaches the model)."`
 
+	// RetrievalMode (#65) picks how lexical + semantic combine: keyword (lexical
+	// only), semantic (embeddings with a keyword error-fallback — the prior default),
+	// or hybrid (RRF fusion of both, run every query). Empty defaults to hybrid when
+	// embeddings are configured, else keyword. semantic/hybrid require embeddings.
+	RetrievalMode string `name:"retrieval-mode" help:"How lexical + semantic retrieval combine: 'keyword', 'semantic', or 'hybrid' (RRF fusion). Default: hybrid when embeddings are set, else keyword. semantic/hybrid require --embedding-*."`
+
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
 
 	// The ACL store persists consent, tier, and rate state (ADR 0002/0003); it
@@ -402,23 +408,53 @@ func loadPromptTemplate(path string) (*template.Template, error) {
 // retrievalMaxChunks caps how many chunks either retriever returns per query.
 const retrievalMaxChunks = 8
 
-// buildRetriever selects the retriever (ADR 0001/0017). With no embedding endpoint
-// it returns the keyword retriever (the zero-config default). With the embedding
-// base-url + model pair set it builds the semantic retriever — which embeds the
-// whole vault now, so a failure here is a startup error — wrapped with keyword as
-// the query-time fallback. An incomplete pair (one without the other) is a
-// startup error, like the chat-model pair. The embedding key is
+// Retrieval modes (#65): how the lexical and semantic retrievers combine.
+const (
+	retrievalModeKeyword  = "keyword"  // lexical only
+	retrievalModeSemantic = "semantic" // embeddings, with keyword as an error-fallback (prior default)
+	retrievalModeHybrid   = "hybrid"   // RRF fusion of both, always
+)
+
+// buildRetriever selects the retriever (ADR 0001/0017, issue #65). The keyword
+// (lexical) retriever is always available. When the embedding base-url + model
+// pair is set it also builds the semantic retriever — which embeds the whole vault
+// now, so a failure here is a startup error. An incomplete pair (one without the
+// other) is a startup error, like the chat-model pair. The embedding key is
 // YAADGROVE_EMBEDDING_API_KEY, falling back to the model key.
+//
+// --retrieval-mode picks how they combine: keyword (lexical only), semantic
+// (embeddings with a keyword error-fallback — the prior default behavior), or
+// hybrid (RRF fusion of both, always). The default is hybrid when embeddings are
+// configured, else keyword. semantic and hybrid both require embeddings.
 func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 	keyword := retrieval.New(c.VaultDir, retrievalMaxChunks)
 	base := strings.TrimSpace(c.EmbeddingBaseURL)
 	emodel := strings.TrimSpace(c.EmbeddingModel)
-	if base == "" && emodel == "" {
-		return keyword, nil
-	}
-	if base == "" || emodel == "" {
+	embeddingsSet := base != "" || emodel != ""
+	if embeddingsSet && (base == "" || emodel == "") {
 		return nil, errors.New("serve: --embedding-base-url and --embedding-model must be set together")
 	}
+
+	// Resolve the mode: an unset mode defaults to hybrid when embeddings are on (the
+	// new best default), else keyword (the zero-config default).
+	mode := strings.TrimSpace(c.RetrievalMode)
+	if mode == "" {
+		if embeddingsSet {
+			mode = retrievalModeHybrid
+		} else {
+			mode = retrievalModeKeyword
+		}
+	}
+	if mode == retrievalModeKeyword {
+		return keyword, nil
+	}
+	if mode != retrievalModeSemantic && mode != retrievalModeHybrid {
+		return nil, fmt.Errorf("serve: unknown --retrieval-mode %q (want keyword, semantic, or hybrid)", mode)
+	}
+	if !embeddingsSet {
+		return nil, fmt.Errorf("serve: --retrieval-mode %q requires --embedding-base-url and --embedding-model", mode)
+	}
+
 	key := os.Getenv("YAADGROVE_EMBEDDING_API_KEY")
 	if key == "" {
 		key = os.Getenv("YAADGROVE_MODEL_API_KEY")
@@ -431,10 +467,17 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 	// Prominent so the index size — and thus the boot embedding cost — is visible
 	// (ADR 0017 crash-loop caveat).
 	log.Info("semantic retrieval enabled",
+		"retrieval_mode", mode,
 		"embedding_model", emodel,
 		"chunks_indexed", semantic.Len(),
 		"similarity_threshold", c.SimilarityThreshold,
 	)
+	if mode == retrievalModeHybrid {
+		// Fuse lexical + semantic every query, so proper-noun / "which episode" queries
+		// come in via the lexical leg even when the semantic leg is empty (#65).
+		return retrieval.NewHybrid(retrievalMaxChunks, keyword, semantic), nil
+	}
+	// semantic: the prior behavior — semantic with keyword as the error-fallback.
 	return retrieval.Fallback{Primary: semantic, Secondary: keyword}, nil
 }
 
