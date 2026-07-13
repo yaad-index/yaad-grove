@@ -47,6 +47,8 @@ type Store interface {
     // declared dimension — the complete authoritative set, not top-k. This is
     // the primitive that fixes "which episodes cover game X".
     //   Enumerate(ctx, "games", "Irish Gauge") -> [ep47, ep73]
+    // Matching is over a NORMALIZED key (see normalization contract below), so
+    // casing/formatting drift in frontmatter can't silently drop docs.
     Enumerate(ctx context.Context, dimension, value string) ([]DocRef, error)
 
     Close() error
@@ -114,6 +116,7 @@ serve:
    - If any logic in `Retriever` today is *not* expressible via these primitives, it gets a named home in the engine layer before this increment closes.
 2. **`sqlite` backend** — persistence; proves the cgo/build-tag boundary.
 3. **`Enumerate` + the `kb_enumerate` tool** — fixes the under-recall query class (the whole point). Demonstrated on "which episodes cover game X".
+   **Normalization contract (invariant):** frontmatter values drift across a KB (`Irish Gauge` vs `irish-gauge` vs `IRISH GAUGE`), so `Enumerate` must not match raw strings. `Store.Index` computes a **normalized key** for each dimension value on the way in (Unicode-fold → lowercase → trim → collapse internal whitespace/hyphens), stores it alongside the raw display value, and `Enumerate` normalizes its query `value` with the **same** function before lookup. Both sides share one normalizer, so casing/format drift can't drop docs; the raw value is retained for display. (This is the concrete home for the earlier "fuzzy-matched" hand-wave — it is deterministic key normalization, not fuzzy scoring; approximate matching, if ever wanted, layers on top and stays out of the exact-lookup path.)
 4. **`ladybug` graph backend** — relationships as edges; traversal queries.
 5. **`postgres`/pgvector backend** — the pure-Go scale path.
 
