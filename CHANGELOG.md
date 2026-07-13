@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.0](https://github.com/yaad-index/yaad-grove/compare/v0.12.0...v0.13.0) (2026-07-13)
+
+
+### Features
+
+* **langpacks:** embedded language packs + prompt-addition slot (ADR 0018, PR2) ([#110](https://github.com/yaad-index/yaad-grove/issues/110)) ([edc2e04](https://github.com/yaad-index/yaad-grove/commit/edc2e04c9e24b577ca5aed1795d49d83a43e2ec4))
+* **langpacks:** route user-facing strings through the pack catalog (ADR 0018, [#25](https://github.com/yaad-index/yaad-grove/issues/25)) ([b808dc9](https://github.com/yaad-index/yaad-grove/commit/b808dc9d3899aa17b1f80fbb07b18c7b91070feb))
+
 ## [0.12.0](https://github.com/yaad-index/yaad-grove/compare/v0.11.0...v0.12.0) (2026-07-13)
 
 
