@@ -16,6 +16,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"text/template"
@@ -121,6 +122,13 @@ type ServeCmd struct {
 	BudgetDB     string        `name:"budget-db" default:"./budget.db" help:"Path to the persisted spend-meter database (survives restarts)." type:"path"`
 
 	TelegramGroups []string `name:"telegram-allowed-groups" help:"Group chat ids that count as 'the community' the bot serves (Telegram)."`
+
+	// TelegramAllowedTopics optionally scopes a forum group to specific topics
+	// (#98), each spec "chatid=topicid1,topicid2". A group with a spec is answered
+	// only in those topics; a group without one is answered in all topics (today's
+	// behavior). sep:"none" keeps the comma-separated topic list as one value (a
+	// spec's own commas must survive kong parsing — see the MCP flags, #92).
+	TelegramAllowedTopics []string `name:"telegram-allowed-topics" sep:"none" help:"Restrict a forum group to specific topics, as 'chatid=topicid1,topicid2' (repeatable). Empty means all topics."`
 
 	// The callback token store backs interactive buttons (ADR 0009). It owns its
 	// own garbage collection: the sweeper runs every CallbackSweepInterval, so
@@ -288,9 +296,14 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	}
 	defer func() { _ = registry.Close() }()
 
+	allowedTopics, err := parseTopicAllowList(c.TelegramAllowedTopics)
+	if err != nil {
+		return err
+	}
 	var tp transport.Transport = telegram.New(telegram.Config{
 		Token:         os.Getenv("YAADGROVE_TELEGRAM_TOKEN"),
 		AllowedGroups: c.TelegramGroups,
+		AllowedTopics: allowedTopics,
 	}, callbacks)
 
 	// The surface-split answering policy (ADR 0012): the admin allowlist (DM
@@ -479,6 +492,45 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, error) {
 	}
 	// semantic: the prior behavior — semantic with keyword as the error-fallback.
 	return retrieval.Fallback{Primary: semantic, Secondary: keyword}, nil
+}
+
+// parseTopicAllowList parses "chatid=topicid1,topicid2" specs into a group→topics
+// map for forum topic-scoping (#98). Both the chat id and each topic id must be
+// integers; a malformed spec is a startup error rather than a silently-ignored
+// scope. Repeating a chat id merges its topics.
+func parseTopicAllowList(specs []string) (map[int64][]int, error) {
+	if len(specs) == 0 {
+		return nil, nil
+	}
+	out := make(map[int64][]int, len(specs))
+	for _, spec := range specs {
+		idStr, topicsStr, ok := strings.Cut(spec, "=")
+		idStr = strings.TrimSpace(idStr)
+		if !ok || idStr == "" {
+			return nil, fmt.Errorf("serve: invalid --telegram-allowed-topics %q (want 'chatid=topicid1,topicid2')", spec)
+		}
+		chatID, err := strconv.ParseInt(idStr, 10, 64)
+		if err != nil {
+			return nil, fmt.Errorf("serve: --telegram-allowed-topics %q has a non-numeric chat id %q", spec, idStr)
+		}
+		var topics []int
+		for _, t := range strings.Split(topicsStr, ",") {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
+			}
+			tid, err := strconv.Atoi(t)
+			if err != nil {
+				return nil, fmt.Errorf("serve: --telegram-allowed-topics %q has a non-numeric topic id %q", spec, t)
+			}
+			topics = append(topics, tid)
+		}
+		if len(topics) == 0 {
+			return nil, fmt.Errorf("serve: --telegram-allowed-topics %q lists no topics", spec)
+		}
+		out[chatID] = append(out[chatID], topics...)
+	}
+	return out, nil
 }
 
 // parseMCPServers parses "name=command arg1 arg2" specs into server configs.

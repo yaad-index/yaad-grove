@@ -39,6 +39,11 @@ type Config struct {
 	// AllowedGroups scopes which group chats the bot serves (membership is the
 	// group's own boundary; this pins which groups count as "the community").
 	AllowedGroups []string
+	// AllowedTopics optionally scopes a forum group to specific topics (#98): a
+	// group chat id maps to the set of topic (message-thread) ids the bot answers
+	// in. A group absent from this map is unrestricted — the bot answers in all its
+	// topics (today's behavior). Pre-parsed by the caller from config.
+	AllowedTopics map[int64][]int
 }
 
 // Adapter implements transport.Transport for Telegram.
@@ -117,7 +122,10 @@ func (a *Adapter) Run(ctx context.Context, handler transport.Handler) error {
 					slog.Error("telegram react failed", "err", a.redact(err))
 				}
 			}
-			if err := a.Send(ctx, in.ReplyTo, reply); err != nil {
+			// Reply into the topic the question came from (#98): the incoming
+			// message's thread id rides onto the send, so a forum answer stays in its
+			// topic instead of falling back to General. 0 for a non-forum group.
+			if err := a.sendTo(ctx, u.Message.Chat.ID, u.Message.MessageThreadID, reply); err != nil {
 				slog.Error("telegram send failed", "err", err)
 			}
 		}
@@ -176,6 +184,19 @@ func (a *Adapter) Run(ctx context.Context, handler transport.Handler) error {
 // contract, ADR 0007). Actions render as an inline keyboard; without a callback
 // store they degrade to a text list appended to the message.
 func (a *Adapter) Send(ctx context.Context, replyTo string, reply core.Reply) error {
+	chatID, err := strconv.ParseInt(replyTo, 10, 64)
+	if err != nil {
+		return errors.New("telegram: invalid chat id " + strconv.Quote(replyTo))
+	}
+	// The interface Send has only the chat, so it targets the group's General topic
+	// (thread 0). Run uses sendTo directly to keep a forum reply in its topic (#98).
+	return a.sendTo(ctx, chatID, 0, reply)
+}
+
+// sendTo delivers reply to a chat, optionally within a forum topic (threadID; 0 is
+// the General topic / a non-forum group). It carries the incoming message's topic
+// onto the reply so a forum answer stays where it was asked (#98).
+func (a *Adapter) sendTo(ctx context.Context, chatID int64, threadID int, reply core.Reply) error {
 	if reply.Silent {
 		return nil
 	}
@@ -184,10 +205,6 @@ func (a *Adapter) Send(ctx context.Context, replyTo string, reply core.Reply) er
 	}
 	if a.bot == nil {
 		return errors.New("telegram: transport not running")
-	}
-	chatID, err := strconv.ParseInt(replyTo, 10, 64)
-	if err != nil {
-		return errors.New("telegram: invalid chat id " + strconv.Quote(replyTo))
 	}
 
 	plain := reply.Text
@@ -207,14 +224,14 @@ func (a *Adapter) Send(ctx context.Context, replyTo string, reply core.Reply) er
 	// likely a malformed-entity 400 from an edge the renderer got wrong — fall back
 	// to the plain text, so a formatting glitch never blocks the message.
 	if htmlText := toTelegramHTML(plain); htmlText != "" {
-		p := &bot.SendMessageParams{ChatID: chatID, Text: htmlText, ParseMode: models.ParseModeHTML, ReplyMarkup: markup}
+		p := &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: htmlText, ParseMode: models.ParseModeHTML, ReplyMarkup: markup}
 		if _, err := a.bot.SendMessage(ctx, p); err == nil {
 			return nil
 		} else {
 			slog.Warn("telegram: HTML send failed; retrying as plain text", "err", a.redact(err))
 		}
 	}
-	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, Text: plain, ReplyMarkup: markup}); err != nil {
+	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: plain, ReplyMarkup: markup}); err != nil {
 		return a.redact(err)
 	}
 	return nil
@@ -325,6 +342,12 @@ func (a *Adapter) toInbound(m *models.Message) (transport.Inbound, bool) {
 	}
 	surface, ok := a.surfaceFor(m.Chat)
 	if !ok {
+		return transport.Inbound{}, false
+	}
+	// Topic scoping (#98): in a forum group with a configured topic allow-list, a
+	// message outside the allowed topics is dropped (no reply), just like a
+	// non-allowed group. DMs have no topics, so they are never gated here.
+	if surface == core.SurfaceGroup && !a.topicAllowed(m.Chat.ID, m.MessageThreadID) {
 		return transport.Inbound{}, false
 	}
 	in := transport.Inbound{
@@ -495,6 +518,25 @@ func (a *Adapter) groupAllowed(chatID int64) bool {
 	id := strconv.FormatInt(chatID, 10)
 	for _, g := range a.cfg.AllowedGroups {
 		if g == id {
+			return true
+		}
+	}
+	return false
+}
+
+// topicAllowed reports whether a group message's topic (message-thread id) is
+// answerable (#98). A group with NO configured topic list is unrestricted (all
+// topics — today's behavior); a group WITH a list answers only in the listed
+// topics. threadID is 0 for the General topic and for non-forum groups. This is
+// opposite in spirit to groupAllowed (which is closed by default) because topic
+// scoping is an opt-in refinement of an already-allowed group.
+func (a *Adapter) topicAllowed(chatID int64, threadID int) bool {
+	topics, restricted := a.cfg.AllowedTopics[chatID]
+	if !restricted {
+		return true
+	}
+	for _, t := range topics {
+		if t == threadID {
 			return true
 		}
 	}

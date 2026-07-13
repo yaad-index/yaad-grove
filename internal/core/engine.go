@@ -363,7 +363,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 
 	messages := []Message{
-		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, e.persona, e.scope, q.History, chunks, len(tools) > 0)},
+		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, q.History, chunks, len(tools) > 0)},
 		{Role: RoleUser, Content: q.Text},
 	}
 

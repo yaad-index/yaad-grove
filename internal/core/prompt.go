@@ -21,7 +21,9 @@ const defaultPromptText = `{{if .Persona}}{{.Persona}}
 
 {{end}}{{.Scope}}
 
-Answer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the CONTEXT below{{if .HasTools}} and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.{{end}}{{.History}}{{.Context}}`
+Answer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the CONTEXT below{{if .HasTools}} and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Use the [source] tags to ground your answer, but do NOT mention, cite, or link the source names or paths in your reply — they are internal references the user cannot open. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.{{end}}{{if .Asker}}
+
+The person asking is {{.Asker}}. You may address them by name when it feels natural — it is not required.{{end}}{{.History}}{{.Context}}`
 
 // defaultPromptTemplate is the parsed default; a nil engine template falls back to
 // it, so a bot with no --prompt-template behaves exactly as before.
@@ -46,13 +48,19 @@ type promptData struct {
 	History  string
 	Context  string
 	Query    string
+	// Asker is the sender's display name, surfaced so the model MAY address them by
+	// name (#99). Empty (no name) renders nothing. Unlike Query it is placed in the
+	// default template — a short display name is far lower-risk than the full query —
+	// but it is still user-controlled, so renderPrompt collapses its whitespace to
+	// deny the multi-line injection vector (a name can't add a fake instruction line).
+	Asker string
 }
 
 // renderPrompt executes tmpl (or the default when nil) into the system prompt: it
 // assembles the persona/scope/grounding scaffolding around the pre-rendered
 // conversation and context blocks. A template execution error falls back to the
 // default render, so a runtime glitch can never drop the grounding contract.
-func renderPrompt(tmpl *template.Template, query, persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
+func renderPrompt(tmpl *template.Template, query, asker, persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
 	if tmpl == nil {
 		tmpl = defaultPromptTemplate
 	}
@@ -63,6 +71,10 @@ func renderPrompt(tmpl *template.Template, query, persona, scope string, history
 		History:  conversationBlock(history),
 		Context:  contextBlock(chunks),
 		Query:    query,
+		// Collapse all whitespace runs (incl. newlines) to single spaces: a display
+		// name can't inject a new instruction line into the system prompt (#99). Empty
+		// or whitespace-only names collapse to "" and render nothing.
+		Asker: strings.Join(strings.Fields(asker), " "),
 	}
 	var b strings.Builder
 	if err := tmpl.Execute(&b, data); err != nil {
@@ -93,5 +105,5 @@ func contextBlock(chunks []Chunk) string {
 // groundedSystemPrompt renders the DEFAULT prompt — the byte-for-byte reference
 // the golden test pins and the behavior a bot without --prompt-template gets.
 func groundedSystemPrompt(persona, scope string, history []HistoryTurn, chunks []Chunk, hasTools bool) string {
-	return renderPrompt(defaultPromptTemplate, "", persona, scope, history, chunks, hasTools)
+	return renderPrompt(defaultPromptTemplate, "", "", persona, scope, history, chunks, hasTools)
 }

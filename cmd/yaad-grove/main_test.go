@@ -138,6 +138,39 @@ func TestLoadPromptTemplate(t *testing.T) {
 	assert.Error(t, err, "an unparseable template is fatal")
 }
 
+// parseTopicAllowList parses 'chatid=topic1,topic2' specs into a group→topics map
+// (#98); a repeated chat id merges, and non-numeric ids / empty topic lists are
+// startup errors.
+func TestParseTopicAllowList(t *testing.T) {
+	got, err := parseTopicAllowList([]string{"999=12,34", "888=7"})
+	require.NoError(t, err)
+	assert.Equal(t, map[int64][]int{999: {12, 34}, 888: {7}}, got)
+
+	// A repeated chat id merges its topics.
+	got, err = parseTopicAllowList([]string{"999=12", "999=34"})
+	require.NoError(t, err)
+	assert.Equal(t, map[int64][]int{999: {12, 34}}, got)
+
+	// Empty input → no restriction (nil map).
+	got, err = parseTopicAllowList(nil)
+	require.NoError(t, err)
+	assert.Nil(t, got)
+}
+
+func TestParseTopicAllowListErrors(t *testing.T) {
+	for _, spec := range []string{
+		"noequals",   // no '='
+		"=12",        // empty chat id
+		"abc=12",     // non-numeric chat id
+		"999=",       // no topics
+		"999=x",      // non-numeric topic id
+		"999=12,foo", // one bad topic id
+	} {
+		_, err := parseTopicAllowList([]string{spec})
+		assert.Error(t, err, "spec %q is rejected", spec)
+	}
+}
+
 func TestParseMCPServers(t *testing.T) {
 	got, err := parseMCPServers([]string{
 		"search=/usr/bin/mcp-search --vault /data",

@@ -24,11 +24,16 @@ import (
 // back-compatible: older lines written before this field simply unmarshal to an
 // empty ChatID.
 type Entry struct {
-	Time    time.Time `json:"time"`
-	ChatID  string    `json:"chat_id"`
-	UserID  string    `json:"user_id"`
-	Surface string    `json:"surface"`
-	Text    string    `json:"text"`
+	Time   time.Time `json:"time"`
+	ChatID string    `json:"chat_id"`
+	UserID string    `json:"user_id"`
+	// Handle is the sender's human-readable display name (username / first name),
+	// so a curation pass can attribute a message to a person, not just a numeric id
+	// (#99 fold-in). Omitempty + back-compatible: a user with no name, or an entry
+	// written before this field, has an empty Handle.
+	Handle  string `json:"handle,omitempty"`
+	Surface string `json:"surface"`
+	Text    string `json:"text"`
 }
 
 // Log appends consented community messages to the quarantined store.
