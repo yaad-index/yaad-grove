@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.10.0](https://github.com/yaad-index/yaad-grove/compare/v0.9.0...v0.10.0) (2026-07-13)
+
+
+### Features
+
+* **telegram,core:** topic-scoped answering + surface the asker's name (closes [#98](https://github.com/yaad-index/yaad-grove/issues/98), closes [#99](https://github.com/yaad-index/yaad-grove/issues/99)) ([#103](https://github.com/yaad-index/yaad-grove/issues/103)) ([4582535](https://github.com/yaad-index/yaad-grove/commit/458253526267767dc55f5c822eecbaa89204c556))
+
 ## [0.9.0](https://github.com/yaad-index/yaad-grove/compare/v0.8.0...v0.9.0) (2026-07-13)
 
 
