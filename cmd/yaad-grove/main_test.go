@@ -70,16 +70,16 @@ func tempVault(t *testing.T) string {
 func TestBuildRetriever(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	r, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
+	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
 	require.NoError(t, err)
 	p, ok := r.(*retrieval.Planner)
 	require.True(t, ok, "buildRetriever returns a Planner")
 	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "no embedding endpoint → keyword mode (zero-config default)")
 
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
 	assert.Error(t, err, "base-url without model is a startup error")
 
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "embed-model"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "embed-model"}, log)
 	assert.Error(t, err, "model without base-url is a startup error")
 }
 
@@ -91,20 +91,20 @@ func TestBuildRetrieverMode(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// keyword mode returns a keyword-mode planner even with no embeddings.
-	r, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t), RetrievalMode: "keyword"}, log)
+	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t), RetrievalMode: "keyword"}, log)
 	require.NoError(t, err)
 	p, ok := r.(*retrieval.Planner)
 	require.True(t, ok, "buildRetriever returns a Planner")
 	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "keyword mode → keyword-mode planner")
 
 	// semantic / hybrid without embeddings configured is a startup error.
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log)
 	assert.ErrorContains(t, err, "requires", "hybrid needs embeddings")
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "semantic"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "semantic"}, log)
 	assert.ErrorContains(t, err, "requires", "semantic needs embeddings")
 
 	// An unknown mode is rejected.
-	_, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log)
 	assert.ErrorContains(t, err, "unknown --retrieval-mode")
 }
 

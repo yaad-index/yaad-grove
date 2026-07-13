@@ -57,17 +57,30 @@ type Store interface {
 }
 
 // DocRef identifies a source note in the vault — the unit Enumerate returns and
-// that a chunk traces back to. Path is the vault-relative markdown path.
+// that a chunk traces back to. Path is the vault-relative markdown path; Title is
+// the note's display title (its frontmatter title, empty if none), so an Enumerate
+// result can name each document compactly without its body.
 type DocRef struct {
-	Path string
+	Path  string
+	Title string
 }
 
-// Doc is a source note handed to Index: its retrievable chunks plus the
-// frontmatter dimensions the instance declared queryable (e.g. games, hosts). The
-// Dimensions map is the structured-lookup input; it is unpopulated until the
-// structured-lookup increment (ADR 0019) and ignored by semantic/keyword indexing.
+// Doc is a source note handed to Index: its retrievable chunks, the frontmatter
+// dimensions the instance declared queryable (e.g. games, hosts → their values),
+// and any alias surface forms this note's entity is also known by.
+//
+// The note's canonical name is Ref.Title — the string OTHER notes use to reference
+// this entity in their dimension lists. KB contract (ADR 0019): Ref.Title must
+// normalize to exactly that referenced string, or the alias won't register against
+// it (the engine can't reconcile a title of "Acme Rail (game)" with a
+// games: [Acme Rail] entry — the KB author owns that consistency). Aliases are
+// alternate surface forms
+// (transliterations, cross-script spellings) that also resolve to this entity; they
+// are additive — a note with none still resolves under its canonical name. Semantic
+// and keyword indexing ignore Dimensions/Aliases.
 type Doc struct {
 	Ref        DocRef
 	Chunks     []core.Chunk
 	Dimensions map[string][]string
+	Aliases    []string
 }

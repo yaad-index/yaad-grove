@@ -26,6 +26,12 @@ type Memory struct {
 	threshold float32
 	chunks    []core.Chunk
 	vectors   [][]float32
+	// dimIndex is the structured-lookup index (ADR 0019): dimension → normalized
+	// value key → the complete set of documents carrying that value, in doc order.
+	dimIndex map[string]map[string][]DocRef
+	// aliasMap resolves a normalized surface form (a transliteration / cross-script
+	// spelling) to the normalized canonical key of the entity it names.
+	aliasMap map[string]string
 }
 
 // NewMemory builds an empty memory backend. embedder may be nil (keyword-only
@@ -37,9 +43,10 @@ func NewMemory(embedder embed.Embedder, threshold float32) *Memory {
 }
 
 // Index (re)builds the in-memory index from docs: it flattens their chunks in
-// order and, when an embedder is configured, embeds every chunk. An embedding
-// failure is returned so the caller can fail startup rather than serve an
-// unindexed bot (ADR 0017). Re-indexing replaces the prior contents.
+// order and, when an embedder is configured, embeds every chunk; it also builds
+// the structured-lookup index (normalized dimension values → docs) and the alias
+// map. An embedding failure is returned so the caller can fail startup rather than
+// serve an unindexed bot (ADR 0017). Re-indexing replaces the prior contents.
 func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 	var chunks []core.Chunk
 	for _, d := range docs {
@@ -50,7 +57,47 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 		return err
 	}
 	m.chunks, m.vectors = chunks, vectors
+	m.buildStructured(docs)
 	return nil
+}
+
+// buildStructured builds the dimension index and alias map (ADR 0019). Every
+// dimension value and every alias surface form is stored under its normalized key,
+// so lookup is spelling- and script-insensitive. A document is recorded once per
+// distinct normalized value (so a note repeating a value doesn't duplicate), and
+// documents accumulate in doc order for a deterministic complete set.
+func (m *Memory) buildStructured(docs []Doc) {
+	dimIndex := map[string]map[string][]DocRef{}
+	aliasMap := map[string]string{}
+	for _, d := range docs {
+		// Alias registration: each surface form → this note's canonical key. The
+		// canonical is the note's title normalized (the KB contract, see Doc).
+		if canon := normalizeKey(d.Ref.Title); canon != "" {
+			for _, a := range d.Aliases {
+				if ak := normalizeKey(a); ak != "" {
+					aliasMap[ak] = canon
+				}
+			}
+		}
+		// Dimension index: each declared value → this doc, deduped within the doc.
+		for dim, values := range d.Dimensions {
+			byKey := dimIndex[dim]
+			if byKey == nil {
+				byKey = map[string][]DocRef{}
+				dimIndex[dim] = byKey
+			}
+			seen := map[string]bool{}
+			for _, v := range values {
+				vk := normalizeKey(v)
+				if vk == "" || seen[vk] {
+					continue
+				}
+				seen[vk] = true
+				byKey[vk] = append(byKey[vk], d.Ref)
+			}
+		}
+	}
+	m.dimIndex, m.aliasMap = dimIndex, aliasMap
 }
 
 // embedChunks embeds every chunk's text, or returns nil vectors when no embedder
@@ -138,10 +185,25 @@ func (m *Memory) Keyword(_ context.Context, query string, k int) ([]core.Chunk, 
 	return out, nil
 }
 
-// Enumerate is not implemented in this increment (ADR 0019); it returns
-// ErrEnumerateNotImplemented so an accidental call fails loudly.
-func (m *Memory) Enumerate(_ context.Context, _, _ string) ([]DocRef, error) {
-	return nil, ErrEnumerateNotImplemented
+// Enumerate returns EVERY document whose dimension carries value — the complete
+// authoritative set, not top-k (ADR 0019). value is normalized and resolved
+// through the alias map (so a cross-script or aliased spelling reaches the same
+// entity), then looked up in the dimension index. An undeclared dimension or an
+// unmatched value returns an empty set, not an error. The result is a copy in
+// stable doc order, so callers can't mutate the index.
+func (m *Memory) Enumerate(_ context.Context, dimension, value string) ([]DocRef, error) {
+	byKey := m.dimIndex[dimension]
+	if byKey == nil {
+		return nil, nil
+	}
+	key := normalizeKey(value)
+	if canon, ok := m.aliasMap[key]; ok {
+		key = canon
+	}
+	refs := byKey[key]
+	out := make([]DocRef, len(refs))
+	copy(out, refs)
+	return out, nil
 }
 
 // Close releases resources; the memory backend holds none.
