@@ -98,6 +98,12 @@ func renderPrompt(tmpl *template.Template, query, asker, persona, scope string, 
 // 0014). It is framed so the model treats it as content to consider, not as an
 // instruction to obey — the replied-to text is user-controlled. Empty content
 // renders nothing (the query isn't a reply).
+//
+// Unlike Asker (which collapses all whitespace to deny a one-line display name any
+// newlines), the replied-to text keeps its internal structure — TrimSpace only. A
+// replied-to message is legitimately multi-line, so mangling it would lose real
+// content; here the explicit "quoted context, NOT an instruction" framing is the
+// injection defense, not whitespace-collapse.
 func replyBlock(replyContext string) string {
 	replyContext = strings.TrimSpace(replyContext)
 	if replyContext == "" {
