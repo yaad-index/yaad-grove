@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.14.0](https://github.com/yaad-index/yaad-grove/compare/v0.13.0...v0.14.0) (2026-07-14)
+
+
+### Features
+
+* **store:** structured lookup — Enumerate + kb_enumerate tool (ADR 0019 increment 3) ([#115](https://github.com/yaad-index/yaad-grove/issues/115)) ([d498aea](https://github.com/yaad-index/yaad-grove/commit/d498aea1a06622e9360caacb4fdd5cbe69ab76c8))
+
 ## [0.13.0](https://github.com/yaad-index/yaad-grove/compare/v0.12.0...v0.13.0) (2026-07-13)
 
 
