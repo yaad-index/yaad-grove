@@ -16,6 +16,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"strings"
+	"sync"
 
 	ladybug "github.com/LadybugDB/go-ladybug"
 
@@ -26,9 +27,14 @@ import (
 
 // Ladybug is the persistent graph backend. It holds an open embedded database; the
 // embedder + similarity floor mirror the memory backend so query behavior matches.
-// Access is serialized by the single connection (LadybugDB connections are not
-// concurrent-safe), which also gives live reindex a consistent view.
+//
+// LadybugDB connections are NOT safe for concurrent use, so every Store method that
+// touches the connection holds mu — this serializes a live reindex (Index, driven
+// by SIGHUP) against the Telegram query goroutines (Semantic/Keyword/Enumerate).
+// It is the mutex counterpart to the memory backend's atomic-pointer swap. Internal
+// helpers assume the caller already holds mu and never re-lock.
 type Ladybug struct {
+	mu        sync.Mutex
 	db        *ladybug.Database
 	conn      *ladybug.Connection
 	embedder  embed.Embedder
@@ -119,6 +125,8 @@ func chunkHash(source, text string) string {
 // not already stored (the #86 delta). It then rebuilds the structured (Value/Alias)
 // graph and the vector + FTS indexes over the current chunk set.
 func (l *Ladybug) Index(ctx context.Context, docs []Doc) error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	// Collect the current chunk set and which hashes are new.
 	type pending struct{ source, text, hash string }
 	var all []pending
@@ -217,6 +225,8 @@ func (l *Ladybug) embedTexts(ctx context.Context, texts []string) ([][]float32, 
 
 // Close releases the connection and database.
 func (l *Ladybug) Close() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.conn != nil {
 		l.conn.Close()
 	}

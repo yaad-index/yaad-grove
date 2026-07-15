@@ -146,6 +146,8 @@ func (l *Ladybug) rebuildIndexes() error {
 // floor. The vector index returns cosine *distance* (1 - similarity), so the floor
 // is applied as similarity = 1 - distance.
 func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) ([]core.Chunk, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if len(queryEmbedding) == 0 || l.dim == 0 {
 		return nil, nil
 	}
@@ -178,6 +180,8 @@ func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) (
 
 // Keyword returns up to k chunks by BM25 full-text score.
 func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -208,11 +212,13 @@ func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk,
 // Doc-[:HAS_VALUE]->Value traversal, after normalizing value and resolving it
 // through the Alias subgraph.
 func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRef, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	nk := normalizeKey(value)
 	if nk == "" {
 		return nil, nil
 	}
-	if canon, err := l.resolveAlias(nk); err == nil && canon != "" {
+	if canon, err := l.resolveAlias(nk); err == nil && canon != "" { // resolveAlias runs under mu
 		nk = canon
 	}
 	q := fmt.Sprintf(
