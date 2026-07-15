@@ -47,3 +47,32 @@ jobs:
         # -race is the house default; harmless now (no tests yet) and ready for
         # the concurrent transport/gate code Phase 1 brings.
         run: go test -race ./...
+
+  ladybug:
+    # The persistent ladybug backend (ADR 0019, #86) is cgo, built under
+    # `-tags ladybug` against the downloaded LadybugDB C library. It runs in its own
+    # job so the default build above stays pure-Go / CGO_ENABLED=0 / static.
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Download LadybugDB library
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/LadybugDB/ladybug/refs/heads/main/scripts/download-liblbug.sh \
+            | LBUG_TARGET_DIR="$PWD/lib-ladybug" bash
+
+      - name: Build + test (ladybug tag)
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          LIB="$PWD/lib-ladybug"
+          export CGO_CFLAGS="-I$LIB"
+          export CGO_LDFLAGS="-L$LIB -lstdc++ -lm -Wl,-rpath,$LIB"
+          go build -tags "ladybug system_ladybug" ./...
+          go test -tags "ladybug system_ladybug" ./internal/store/...

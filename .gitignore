@@ -20,3 +20,4 @@ coverage.*
 # Box-local deployment config / secrets — never commit
 config.yaml
 secrets/
+/lib-ladybug/

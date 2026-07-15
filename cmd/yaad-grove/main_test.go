@@ -155,6 +155,26 @@ func TestBuildRetrieverMode(t *testing.T) {
 	assert.ErrorContains(t, err, "unknown --retrieval-mode")
 }
 
+// Store backend selection (ADR 0019 / #86): memory is the default, ladybug needs a
+// --store-path, an unknown backend is rejected. (Whether ladybug actually opens
+// depends on the build tag — the store package's stub covers the no-tag path.)
+func TestBuildStoreSelection(t *testing.T) {
+	s, err := buildStore(&ServeCmd{}, nil)
+	require.NoError(t, err)
+	_, ok := s.(*store.Memory)
+	assert.True(t, ok, "default backend is memory")
+
+	s, err = buildStore(&ServeCmd{RetrievalStore: "memory"}, nil)
+	require.NoError(t, err)
+	require.NotNil(t, s)
+
+	_, err = buildStore(&ServeCmd{RetrievalStore: "ladybug"}, nil)
+	assert.ErrorContains(t, err, "store-path", "ladybug requires a persistent path")
+
+	_, err = buildStore(&ServeCmd{RetrievalStore: "bogus"}, nil)
+	assert.ErrorContains(t, err, "unknown --retrieval-store")
+}
+
 // The default persona path (PERSONA.md, working dir) is graceful when absent and
 // used when present; an explicitly-configured path is loaded, and a missing
 // explicit path is fatal (ADR 0013).
