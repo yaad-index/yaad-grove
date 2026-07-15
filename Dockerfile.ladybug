@@ -45,15 +45,25 @@ RUN apt-get update \
     && apt-get install -y --no-install-recommends libssl3 libstdc++6 \
     && rm -rf /var/lib/apt/lists/*
 
-# The binary, the shared library (as its SONAME, normalized in the builder), and
-# the baked extensions.
+# The binary and the shared library (as its SONAME, normalized in the builder).
 COPY --from=build /out/yaad-grove /usr/local/bin/yaad-grove
 COPY --from=build /out/liblbug.so.0 /usr/local/lib/
-COPY --from=build /root/.lbdb /root/.lbdb
 RUN ldconfig
 
-# LadybugDB looks for baked extensions under $HOME/.lbdb; keep HOME=/root so the
-# runtime LOADs them without a network INSTALL.
-ENV HOME=/root
+# Run as a non-root user, uid 65532 to match the default distroless `nonroot`
+# image — so /data ownership is consistent across the memory and ladybug images.
+RUN groupadd -g 65532 nonroot \
+    && useradd -u 65532 -g 65532 -m -d /home/nonroot nonroot
+
+# LadybugDB looks for baked extensions under $HOME/.lbdb; place them in the
+# non-root user's home (owned by it) so the runtime LOADs them offline.
+COPY --from=build --chown=65532:65532 /root/.lbdb /home/nonroot/.lbdb
+
+# Smoke test: fail the build here (not at deploy) if the runtime can't load
+# liblbug.so.
+RUN /usr/local/bin/yaad-grove version
+
+ENV HOME=/home/nonroot
+USER 65532
 ENTRYPOINT ["/usr/local/bin/yaad-grove"]
 CMD ["serve"]
