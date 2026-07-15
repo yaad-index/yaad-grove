@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.15.0](https://github.com/yaad-index/yaad-grove/compare/v0.14.0...v0.15.0) (2026-07-15)
+
+
+### Features
+
+* **store:** live reindex without restart (ADR-0019 inc-2a, [#86](https://github.com/yaad-index/yaad-grove/issues/86)) ([#118](https://github.com/yaad-index/yaad-grove/issues/118)) ([bdf4fbf](https://github.com/yaad-index/yaad-grove/commit/bdf4fbfaf8f4bb392434e45a3c41dd5e7d7d911e))
+* **store:** persistent ladybug graph backend (ADR-0019 inc-2b, [#86](https://github.com/yaad-index/yaad-grove/issues/86)) ([#120](https://github.com/yaad-index/yaad-grove/issues/120)) ([a95afc4](https://github.com/yaad-index/yaad-grove/commit/a95afc48606042f60950881417ddf086c3211677))
+
 ## [0.14.0](https://github.com/yaad-index/yaad-grove/compare/v0.13.0...v0.14.0) (2026-07-14)
 
 
