@@ -1,0 +1,285 @@
+//go:build ladybug
+
+package store
+
+import (
+	"context"
+	"fmt"
+	"strconv"
+	"strings"
+
+	"github.com/yaad-index/yaad-grove/internal/core"
+)
+
+// The graph is two decoupled subgraphs: Chunk nodes carry the vector + FTS indexes
+// (Semantic/Keyword query them directly, no edges); Doc/Value/Alias nodes with
+// HAS_VALUE edges answer Enumerate as a one-hop traversal. Only Chunk embeddings
+// are content-hash cached (the expensive part, #86); the structured subgraph is
+// cheap to rebuild in full each index.
+
+// chunkTableExists reports whether the Chunk node table has been created.
+func (l *Ladybug) chunkTableExists() bool {
+	r, err := l.conn.Query("CALL SHOW_TABLES() RETURN name;")
+	if err != nil {
+		return false
+	}
+	defer r.Close()
+	for r.HasNext() {
+		t, err := r.Next()
+		if err != nil {
+			return false
+		}
+		if v, err := t.GetValue(0); err == nil {
+			if s, ok := v.(string); ok && s == "Chunk" {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// ensureChunkTable creates the Chunk table (carrying the fixed-size embedding
+// array) on the first index, once the embedding dimension is known. On restart the
+// table already exists and this is a no-op.
+func (l *Ladybug) ensureChunkTable() error {
+	if l.chunkTableExists() {
+		return nil
+	}
+	if l.dim == 0 {
+		// Keyword-only (no embedder) or nothing to embed and no prior table: create a
+		// zero-embedding table so Keyword still works.
+		return l.exec("CREATE NODE TABLE IF NOT EXISTS Chunk(hash STRING, source STRING, text STRING, PRIMARY KEY(hash));")
+	}
+	return l.exec(fmt.Sprintf(
+		"CREATE NODE TABLE IF NOT EXISTS Chunk(hash STRING, source STRING, text STRING, embedding FLOAT[%d], PRIMARY KEY(hash));",
+		l.dim))
+}
+
+// upsertChunk stores one chunk (a new content hash) with its embedding.
+func (l *Ladybug) upsertChunk(source, text, hash string, vec []float32) error {
+	q := fmt.Sprintf("MERGE (c:Chunk {hash: %s}) SET c.source = %s, c.text = %s",
+		cypherString(hash), cypherString(source), cypherString(text))
+	if len(vec) > 0 {
+		q += fmt.Sprintf(", c.embedding = %s", floatArrayLiteral(vec))
+	}
+	return l.exec(q + ";")
+}
+
+// pruneChunks deletes stored chunks whose hash is no longer present in the vault.
+func (l *Ladybug) pruneChunks(keep map[string]bool) error {
+	hashes := make([]string, 0, len(keep))
+	for h := range keep {
+		hashes = append(hashes, cypherString(h))
+	}
+	if len(hashes) == 0 {
+		return l.exec("MATCH (c:Chunk) DELETE c;")
+	}
+	return l.exec("MATCH (c:Chunk) WHERE NOT c.hash IN [" + strings.Join(hashes, ",") + "] DELETE c;")
+}
+
+// rebuildStructured drops and rebuilds the Doc/Value/Alias subgraph from docs — it
+// is cheap (no embedding) so a full rebuild keeps it simple and correct.
+func (l *Ladybug) rebuildStructured(docs []Doc) error {
+	for _, del := range []string{"MATCH (d:Doc) DETACH DELETE d;", "MATCH (v:Value) DETACH DELETE v;", "MATCH (a:Alias) DELETE a;"} {
+		if err := l.exec(del); err != nil {
+			return err
+		}
+	}
+	for _, d := range docs {
+		if err := l.exec(fmt.Sprintf("MERGE (d:Doc {path: %s}) SET d.title = %s;",
+			cypherString(d.Ref.Path), cypherString(d.Ref.Title))); err != nil {
+			return err
+		}
+		if canon := normalizeKey(d.Ref.Title); canon != "" {
+			for _, a := range d.Aliases {
+				if ak := normalizeKey(a); ak != "" {
+					if err := l.exec(fmt.Sprintf("MERGE (a:Alias {nk: %s}) SET a.canon = %s;",
+						cypherString(ak), cypherString(canon))); err != nil {
+						return err
+					}
+				}
+			}
+		}
+		for dim, values := range d.Dimensions {
+			seen := map[string]bool{}
+			for _, v := range values {
+				nk := normalizeKey(v)
+				if nk == "" || seen[nk] {
+					continue
+				}
+				seen[nk] = true
+				id := dim + "|" + nk
+				if err := l.exec(fmt.Sprintf(
+					"MERGE (v:Value {id: %s}) SET v.dim = %s, v.nk = %s;",
+					cypherString(id), cypherString(dim), cypherString(nk))); err != nil {
+					return err
+				}
+				if err := l.exec(fmt.Sprintf(
+					"MATCH (d:Doc {path: %s}), (v:Value {id: %s}) MERGE (d)-[:HAS_VALUE]->(v);",
+					cypherString(d.Ref.Path), cypherString(id))); err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return nil
+}
+
+// rebuildIndexes drops and recreates the vector (HNSW, cosine) and FTS (BM25)
+// indexes over the current chunk set. Rebuilding is cheap — it re-uses the stored
+// embeddings, no embedding-API calls — and Kuzu-family vector indexes don't update
+// incrementally, so a rebuild is the correct way to reflect the delta.
+func (l *Ladybug) rebuildIndexes() error {
+	// No chunks or no embeddings → nothing to index (Keyword can still run on text).
+	_, _ = l.conn.Query("CALL DROP_FTS_INDEX('Chunk', 'chunk_fts');")
+	_ = l.exec("CALL CREATE_FTS_INDEX('Chunk', 'chunk_fts', ['text']);")
+	if l.dim > 0 {
+		_, _ = l.conn.Query("CALL DROP_VECTOR_INDEX('Chunk', 'chunk_vec');")
+		if err := l.exec("CALL CREATE_VECTOR_INDEX('Chunk', 'chunk_vec', 'embedding', metric := 'cosine');"); err != nil {
+			return fmt.Errorf("store: ladybug vector index: %w", err)
+		}
+	}
+	return nil
+}
+
+// Semantic returns up to k chunks by HNSW cosine KNN, filtered by the similarity
+// floor. The vector index returns cosine *distance* (1 - similarity), so the floor
+// is applied as similarity = 1 - distance.
+func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) ([]core.Chunk, error) {
+	if len(queryEmbedding) == 0 || l.dim == 0 {
+		return nil, nil
+	}
+	q := fmt.Sprintf(
+		"CALL QUERY_VECTOR_INDEX('Chunk', 'chunk_vec', %s, %d) RETURN node.source, node.text, distance ORDER BY distance;",
+		floatArrayLiteral(queryEmbedding), k)
+	r, err := l.conn.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var out []core.Chunk
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return nil, err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 3 {
+			continue
+		}
+		sim := 1 - toFloat(vals[2])
+		if l.threshold > 0 && sim < l.threshold {
+			continue
+		}
+		out = append(out, core.Chunk{Source: asString(vals[0]), Text: asString(vals[1])})
+	}
+	return out, nil
+}
+
+// Keyword returns up to k chunks by BM25 full-text score.
+func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk, error) {
+	if strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	q := fmt.Sprintf(
+		"CALL QUERY_FTS_INDEX('Chunk', 'chunk_fts', %s) RETURN node.source, node.text, score ORDER BY score DESC LIMIT %d;",
+		cypherString(query), k)
+	r, err := l.conn.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var out []core.Chunk
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return nil, err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 2 {
+			continue
+		}
+		out = append(out, core.Chunk{Source: asString(vals[0]), Text: asString(vals[1])})
+	}
+	return out, nil
+}
+
+// Enumerate returns every Doc whose dimension carries value — a one-hop
+// Doc-[:HAS_VALUE]->Value traversal, after normalizing value and resolving it
+// through the Alias subgraph.
+func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRef, error) {
+	nk := normalizeKey(value)
+	if nk == "" {
+		return nil, nil
+	}
+	if canon, err := l.resolveAlias(nk); err == nil && canon != "" {
+		nk = canon
+	}
+	q := fmt.Sprintf(
+		"MATCH (d:Doc)-[:HAS_VALUE]->(v:Value {dim: %s, nk: %s}) RETURN d.path, d.title;",
+		cypherString(dimension), cypherString(nk))
+	r, err := l.conn.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var out []DocRef
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return nil, err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 2 {
+			continue
+		}
+		out = append(out, DocRef{Path: asString(vals[0]), Title: asString(vals[1])})
+	}
+	return out, nil
+}
+
+// resolveAlias returns the canonical normalized key for a surface form, or "" if
+// the form is not an alias (it resolves to itself).
+func (l *Ladybug) resolveAlias(nk string) (string, error) {
+	r, err := l.conn.Query(fmt.Sprintf("MATCH (a:Alias {nk: %s}) RETURN a.canon;", cypherString(nk)))
+	if err != nil {
+		return "", err
+	}
+	defer r.Close()
+	if r.HasNext() {
+		t, err := r.Next()
+		if err != nil {
+			return "", err
+		}
+		if v, err := t.GetValue(0); err == nil {
+			return asString(v), nil
+		}
+	}
+	return "", nil
+}
+
+// floatArrayLiteral renders an embedding as a CAST'd fixed-size FLOAT array literal.
+func floatArrayLiteral(vec []float32) string {
+	parts := make([]string, len(vec))
+	for i, f := range vec {
+		parts[i] = strconv.FormatFloat(float64(f), 'g', -1, 32)
+	}
+	return fmt.Sprintf("CAST([%s] AS FLOAT[%d])", strings.Join(parts, ","), len(vec))
+}
+
+func asString(v any) string {
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+func toFloat(v any) float32 {
+	switch f := v.(type) {
+	case float64:
+		return float32(f)
+	case float32:
+		return f
+	}
+	return 0
+}

@@ -104,6 +104,15 @@ type ServeCmd struct {
 	// structured lookup. Set in config.yaml under serve, like other options.
 	StoreDimensions []string `name:"store-dimensions" help:"Frontmatter fields to index for structured lookup (e.g. 'games,hosts'); enables the kb_enumerate tool. Empty disables it."`
 
+	// RetrievalStore (ADR 0019, #86) selects the store backend: 'memory' (pure-Go
+	// default, volatile, re-embeds the vault each boot) or 'ladybug' (persistent
+	// embedded graph — restart embeds only changed chunks). ladybug is compiled in
+	// only under -tags ladybug; a default build errors if it is selected.
+	RetrievalStore string `name:"retrieval-store" help:"Store backend: 'memory' (default, in-memory) or 'ladybug' (persistent embedded graph; requires the ladybug-tagged build + --store-path)."`
+	// StorePath is the on-disk path for a persistent store (e.g. /data/index.ldb).
+	// Required by ladybug; ignored by memory.
+	StorePath string `name:"store-path" help:"On-disk path for a persistent store (e.g. /data/index.ldb). Required by --retrieval-store ladybug." type:"path"`
+
 	DefaultTier string `name:"default-tier" default:"default" help:"Tier applied to users without an override."`
 
 	// The ACL store persists consent, tier, and rate state (ADR 0002/0003); it
@@ -516,14 +525,24 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	if err != nil {
 		return nil, nil, fmt.Errorf("serve: read vault: %w", err)
 	}
-	mem := store.NewMemory(embedder, c.SimilarityThreshold)
-	if err := mem.Index(context.Background(), docs); err != nil {
+	// Select the store backend (ADR 0019): memory is the pure-Go default; ladybug is
+	// the persistent embedded graph, compiled in only under -tags ladybug (a default
+	// build errors here, guiding the operator to the tagged image).
+	kb, err := buildStore(c, embedder)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := kb.Index(context.Background(), docs); err != nil {
 		return nil, nil, fmt.Errorf("serve: build retrieval index: %w", err)
 	}
 
+	chunks := 0
+	for _, d := range docs {
+		chunks += len(d.Chunks)
+	}
 	// Prominent so the index size — and thus the boot embedding cost — is visible
 	// (ADR 0017 crash-loop caveat).
-	attrs := []any{"retrieval_mode", mode, "chunks_indexed", mem.Len()}
+	attrs := []any{"retrieval_mode", mode, "retrieval_store", storeName(c.RetrievalStore), "chunks_indexed", chunks}
 	if embeddingsSet {
 		attrs = append(attrs, "embedding_model", emodel, "similarity_threshold", c.SimilarityThreshold)
 	}
@@ -532,7 +551,42 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	}
 	log.Info("retrieval index built", attrs...)
 
-	return retrieval.NewPlanner(mem, embedder, mode, retrievalMaxChunks), mem, nil
+	return retrieval.NewPlanner(kb, embedder, mode, retrievalMaxChunks), kb, nil
+}
+
+// Store backends (ADR 0019, #86): memory is the volatile pure-Go default; ladybug
+// is the persistent embedded graph (cgo, -tags ladybug).
+const (
+	storeBackendMemory  = "memory"
+	storeBackendLadybug = "ladybug"
+)
+
+func storeName(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return storeBackendMemory
+	}
+	return s
+}
+
+// buildStore constructs the configured store backend. ladybug needs a --store-path
+// (under /data) for its persistent index; a build without the ladybug tag returns
+// a clear "compiled without ladybug support" error.
+func buildStore(c *ServeCmd, embedder embed.Embedder) (store.Store, error) {
+	switch storeName(c.RetrievalStore) {
+	case storeBackendMemory:
+		return store.NewMemory(embedder, c.SimilarityThreshold), nil
+	case storeBackendLadybug:
+		if strings.TrimSpace(c.StorePath) == "" {
+			return nil, errors.New("serve: --retrieval-store ladybug requires --store-path (under /data)")
+		}
+		s, err := store.NewLadybug(c.StorePath, embedder, c.SimilarityThreshold)
+		if err != nil {
+			return nil, fmt.Errorf("serve: open ladybug store: %w", err)
+		}
+		return s, nil
+	default:
+		return nil, fmt.Errorf("serve: unknown --retrieval-store %q (want memory or ladybug)", c.RetrievalStore)
+	}
 }
 
 // parseTopicAllowList parses "chatid=topicid1,topicid2" specs into a group→topics
