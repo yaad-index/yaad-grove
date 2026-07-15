@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -31,14 +32,21 @@ func (f *fakeEmb) Embed(_ context.Context, texts []string) ([][]float32, error) 
 	return out, nil
 }
 
+// memWith builds a Memory with a pre-populated index snapshot (the index state
+// now lives behind an atomic pointer, so tests set it via the snapshot rather than
+// struct fields).
+func memWith(threshold float32, chunks []core.Chunk, vectors [][]float32) *Memory {
+	m := &Memory{threshold: threshold}
+	m.idx.Store(&memIndex{chunks: chunks, vectors: vectors})
+	return m
+}
+
 // A pre-built index: chunks c0/c1/c2 with the given vectors. Cosines to q=[1,0]:
 // c0=1.0, c1≈0.707, c2=0.
 func fixtureMemory(threshold float32) *Memory {
-	return &Memory{
-		threshold: threshold,
-		chunks:    []core.Chunk{{Source: "a", Text: "c0"}, {Source: "b", Text: "c1"}, {Source: "c", Text: "c2"}},
-		vectors:   [][]float32{{1, 0}, {0.7, 0.7}, {0, 1}},
-	}
+	return memWith(threshold,
+		[]core.Chunk{{Source: "a", Text: "c0"}, {Source: "b", Text: "c1"}, {Source: "c", Text: "c2"}},
+		[][]float32{{1, 0}, {0.7, 0.7}, {0, 1}})
 }
 
 // Above-floor chunks come back ranked by similarity; below-floor are dropped.
@@ -53,9 +61,10 @@ func TestMemorySemanticRanksAndFilters(t *testing.T) {
 
 // Nothing above the floor → empty, so the pre-model grounding block fires.
 func TestMemorySemanticEmptyBelowThreshold(t *testing.T) {
-	m := fixtureMemory(0.9) // only c0 (1.0) would clear 0.9
-	m.chunks = m.chunks[1:] // drop c0; c1(0.707), c2(0) both below 0.9
-	m.vectors = m.vectors[1:]
+	// c1(0.707), c2(0) both below the 0.9 floor (c0 dropped).
+	m := memWith(0.9,
+		[]core.Chunk{{Source: "b", Text: "c1"}, {Source: "c", Text: "c2"}},
+		[][]float32{{0.7, 0.7}, {0, 1}})
 	got, err := m.Semantic(context.Background(), []float32{1, 0}, 8)
 	require.NoError(t, err)
 	assert.Empty(t, got, "nothing clears the floor → empty (grounding block fires)")
@@ -73,11 +82,9 @@ func TestMemorySemanticThresholdZeroReturnsTopK(t *testing.T) {
 // threshold=0 is "no floor": even a chunk with negative cosine is returned, so a
 // non-empty index is never empty in brain-judges mode (ADR 0017 contract).
 func TestMemorySemanticThresholdZeroIncludesNegativeSim(t *testing.T) {
-	m := &Memory{
-		threshold: 0,
-		chunks:    []core.Chunk{{Source: "p", Text: "pos"}, {Source: "n", Text: "neg"}},
-		vectors:   [][]float32{{1, 0}, {-1, 0}}, // cosines to q=[1,0]: +1 and -1
-	}
+	m := memWith(0,
+		[]core.Chunk{{Source: "p", Text: "pos"}, {Source: "n", Text: "neg"}},
+		[][]float32{{1, 0}, {-1, 0}}) // cosines to q=[1,0]: +1 and -1
 	got, err := m.Semantic(context.Background(), []float32{1, 0}, 8)
 	require.NoError(t, err)
 	require.Len(t, got, 2, "no floor returns even the negative-cosine chunk")
@@ -110,11 +117,11 @@ func TestMemorySemanticNoOp(t *testing.T) {
 // Keyword ranks by term frequency: a chunk with more mentions outranks one with
 // fewer; a non-matching chunk is dropped.
 func TestMemoryKeywordRanks(t *testing.T) {
-	m := &Memory{chunks: []core.Chunk{
+	m := memWith(0, []core.Chunk{
 		{Source: "a", Text: "install install install"},
 		{Source: "b", Text: "install once"},
 		{Source: "c", Text: "unrelated"},
-	}}
+	}, nil)
 	got, err := m.Keyword(context.Background(), "install", 8)
 	require.NoError(t, err)
 	require.Len(t, got, 2, "only matching chunks")
@@ -124,10 +131,10 @@ func TestMemoryKeywordRanks(t *testing.T) {
 
 // k caps the keyword result.
 func TestMemoryKeywordCap(t *testing.T) {
-	m := &Memory{chunks: []core.Chunk{
+	m := memWith(0, []core.Chunk{
 		{Source: "a", Text: "install install"},
 		{Source: "b", Text: "install"},
-	}}
+	}, nil)
 	got, err := m.Keyword(context.Background(), "install", 1)
 	require.NoError(t, err)
 	assert.Len(t, got, 1)
@@ -136,11 +143,11 @@ func TestMemoryKeywordCap(t *testing.T) {
 // Ties break by source path then index order, so output is deterministic (no
 // map-order leak) for a given corpus+query.
 func TestMemoryKeywordDeterministicTieBreak(t *testing.T) {
-	m := &Memory{chunks: []core.Chunk{
+	m := memWith(0, []core.Chunk{
 		{Source: "z", Text: "widget"},
 		{Source: "a", Text: "widget"},
 		{Source: "m", Text: "widget"},
-	}}
+	}, nil)
 	got, err := m.Keyword(context.Background(), "widget", 8)
 	require.NoError(t, err)
 	require.Len(t, got, 3)
@@ -153,7 +160,7 @@ func TestMemoryKeywordDeterministicTieBreak(t *testing.T) {
 
 // An empty query and a no-match query both return nothing without error.
 func TestMemoryKeywordEmptyAndNoMatch(t *testing.T) {
-	m := &Memory{chunks: []core.Chunk{{Source: "a", Text: "install"}}}
+	m := memWith(0, []core.Chunk{{Source: "a", Text: "install"}}, nil)
 	for _, q := range []string{"", "   ", "nonexistentterm12345"} {
 		got, err := m.Keyword(context.Background(), q, 8)
 		require.NoError(t, err, "query %q", q)
@@ -172,10 +179,11 @@ func TestMemoryIndexBuildsAndEmbeds(t *testing.T) {
 	m := NewMemory(fe, 0.3)
 	require.NoError(t, m.Index(context.Background(), docs))
 
+	mi := m.load()
 	assert.Equal(t, 3, m.Len(), "chunks flattened in doc order")
-	assert.Len(t, m.vectors, 3, "every chunk embedded")
-	assert.Equal(t, "hello", m.chunks[0].Text)
-	assert.Equal(t, "again", m.chunks[2].Text)
+	assert.Len(t, mi.vectors, 3, "every chunk embedded")
+	assert.Equal(t, "hello", mi.chunks[0].Text)
+	assert.Equal(t, "again", mi.chunks[2].Text)
 	assert.Equal(t, 1, fe.calls, "one batch embed call")
 }
 
@@ -192,7 +200,7 @@ func TestMemoryIndexNoEmbedder(t *testing.T) {
 	m := NewMemory(nil, 0.3)
 	require.NoError(t, m.Index(context.Background(), []Doc{{Chunks: []core.Chunk{{Source: "a", Text: "hello"}}}}))
 	assert.Equal(t, 1, m.Len())
-	assert.Nil(t, m.vectors, "no embedder → no vectors")
+	assert.Nil(t, m.load().vectors, "no embedder → no vectors")
 
 	sem, err := m.Semantic(context.Background(), []float32{1, 0}, 8)
 	require.NoError(t, err)
@@ -258,6 +266,53 @@ func TestMemoryEnumerateAliasResolution(t *testing.T) {
 	viaAlias, err := m.Enumerate(context.Background(), "games", "اکمی ریل")
 	require.NoError(t, err)
 	assert.Equal(t, []string{"ep01.md", "ep02.md"}, paths(viaAlias), "the alias resolves to the same complete set")
+}
+
+// A live reindex is safe against concurrent queries (#86): Index rebuilds a fresh
+// snapshot and swaps it atomically, so a reader always sees one consistent index
+// (the old one or the new one), never a torn mix. The value of this test is under
+// -race — a query reading a field mid-rebuild would trip the detector.
+func TestMemoryConcurrentReindexAndQuery(t *testing.T) {
+	m := NewMemory(nil, 0)
+	doc := func(text string) []Doc {
+		return []Doc{{
+			Ref:        DocRef{Path: "a.md", Title: "Acme"},
+			Chunks:     []core.Chunk{{Source: "a.md", Text: text}},
+			Dimensions: map[string][]string{"games": {"Acme"}},
+		}}
+	}
+	require.NoError(t, m.Index(context.Background(), doc("install widget")))
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+	for i := 0; i < 4; i++ { // concurrent readers across all three query paths
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				_, _ = m.Keyword(context.Background(), "install", 8)
+				_, _ = m.Semantic(context.Background(), []float32{1, 0}, 8)
+				_, _ = m.Enumerate(context.Background(), "games", "Acme")
+			}
+		}()
+	}
+
+	done := make(chan struct{})
+	go func() { // reindexer: 100 live rebuilds while the readers run
+		defer close(done)
+		for i := 0; i < 100; i++ {
+			_ = m.Index(context.Background(), doc("install widget reset"))
+		}
+	}()
+	<-done
+	close(stop)
+	wg.Wait()
+	assert.Equal(t, 1, m.Len(), "the last reindex is the live snapshot")
 }
 
 // Close is a no-op for the memory backend.

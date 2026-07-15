@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"io"
 	"log/slog"
 	"os"
@@ -11,10 +12,55 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/store"
 	"github.com/yaad-index/yaad-grove/internal/tools"
 )
+
+// reindex re-reads a vault and rebuilds a live store; adding/changing notes is
+// picked up without a restart (#86).
+func TestReindexPicksUpVaultChanges(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	dir := t.TempDir()
+	write := func(name, content string) {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600))
+	}
+	write("a.md", "---\ntitle: A\ngames: [Acme]\n---\n# A\nfirst note\n")
+
+	st := store.NewMemory(nil, 0)
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"})
+	require.NoError(t, err)
+	require.NoError(t, st.Index(context.Background(), docs))
+
+	before, _ := st.Keyword(context.Background(), "second", 8)
+	require.Empty(t, before, "the second note doesn't exist yet")
+
+	// Edit the vault live, then reindex.
+	write("b.md", "---\ntitle: B\ngames: [Beta]\n---\n# B\nsecond note\n")
+	reindex(context.Background(), st, dir, []string{"games"}, log)
+
+	after, _ := st.Keyword(context.Background(), "second", 8)
+	require.Len(t, after, 1, "reindex picked up the new note")
+	assert.Contains(t, after[0].Source, "b.md", "the new note's chunk is now indexed")
+	beta, _ := st.Enumerate(context.Background(), "games", "Beta")
+	assert.Len(t, beta, 1, "the new dimension value enumerates after reindex")
+}
+
+// A failed reindex (unreadable vault) leaves the current index serving — Index
+// only swaps on success.
+func TestReindexFailureKeepsIndex(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	st := store.NewMemory(nil, 0)
+	require.NoError(t, st.Index(context.Background(), []store.Doc{
+		{Ref: store.DocRef{Path: "a"}, Chunks: []core.Chunk{{Source: "a", Text: "keep me"}}},
+	}))
+
+	reindex(context.Background(), st, filepath.Join(t.TempDir(), "nope"), nil, log)
+
+	kw, _ := st.Keyword(context.Background(), "keep", 8)
+	assert.Len(t, kw, 1, "a failed reindex leaves the current index serving")
+}
 
 // The gated default matters: without --similarity-threshold, retrieval must
 // resolve to the block-early 0.30 floor. A dropped default tag would silently

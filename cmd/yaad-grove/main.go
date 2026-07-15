@@ -421,11 +421,47 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"spend_remaining_tokens", meter.Remaining(),
 	)
 
+	// Live reindex (#86): SIGHUP re-reads the vault and rebuilds the store's index
+	// on the running bot, so an operator can pick up vault edits (add/update notes)
+	// without a restart. SIGHUP never cancels ctx — only the shutdown signals do —
+	// so the serve loop keeps running across a reindex.
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-hup:
+				reindex(ctx, kbStore, c.VaultDir, c.StoreDimensions, log)
+			}
+		}
+	}()
+
 	if err := tp.Run(ctx, handler); err != nil && !errors.Is(err, context.Canceled) {
 		return err
 	}
 	log.Info("yaad-grove stopped")
 	return nil
+}
+
+// reindex re-reads the vault and rebuilds the store's index in place (#86), so an
+// operator picks up vault edits without a restart. On any failure it logs and
+// leaves the current index serving — Index only swaps the live snapshot on success,
+// so a failed reindex never takes the bot's retrieval down.
+func reindex(ctx context.Context, st store.Store, vaultDir string, dimensions []string, log *slog.Logger) {
+	log.Info("reindex: re-reading vault", "vault_dir", vaultDir)
+	docs, err := retrieval.VaultDocs(ctx, vaultDir, dimensions)
+	if err != nil {
+		log.Error("reindex: read vault failed; keeping current index", "err", err)
+		return
+	}
+	if err := st.Index(ctx, docs); err != nil {
+		log.Error("reindex: rebuild failed; keeping current index", "err", err)
+		return
+	}
+	log.Info("reindex complete", "docs", len(docs))
 }
 
 // loadPersona reads the persona file for the engine (ADR 0013). An empty
