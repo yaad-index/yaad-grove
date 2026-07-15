@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"unicode"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
@@ -21,11 +22,22 @@ import (
 // The similarity floor lives here, not in the query step: RRF fuses on rank, not
 // score, so the floor was never fusion's concern, and keeping it in the backend
 // lets a server-side backend apply it natively without leaking scores upward.
+//
+// The index state lives behind an atomic pointer so a live reindex (#86) can
+// rebuild it and swap it in a single atomic store: a concurrent query always reads
+// one consistent snapshot (the old index or the new one, never a torn mix) with no
+// lock on the read path.
 type Memory struct {
 	embedder  embed.Embedder
 	threshold float32
-	chunks    []core.Chunk
-	vectors   [][]float32
+	idx       atomic.Pointer[memIndex]
+}
+
+// memIndex is one immutable snapshot of the built index — replaced wholesale by
+// Index, never mutated in place, so readers need no lock.
+type memIndex struct {
+	chunks  []core.Chunk
+	vectors [][]float32
 	// dimIndex is the structured-lookup index (ADR 0019): dimension → normalized
 	// value key → the complete set of documents carrying that value, in doc order.
 	dimIndex map[string]map[string][]DocRef
@@ -42,6 +54,14 @@ func NewMemory(embedder embed.Embedder, threshold float32) *Memory {
 	return &Memory{embedder: embedder, threshold: threshold}
 }
 
+// load returns the current index snapshot, or an empty one before the first Index.
+func (m *Memory) load() *memIndex {
+	if mi := m.idx.Load(); mi != nil {
+		return mi
+	}
+	return &memIndex{}
+}
+
 // Index (re)builds the in-memory index from docs: it flattens their chunks in
 // order and, when an embedder is configured, embeds every chunk; it also builds
 // the structured-lookup index (normalized dimension values → docs) and the alias
@@ -54,10 +74,12 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 	}
 	vectors, err := m.embedChunks(ctx, chunks)
 	if err != nil {
+		// A reindex that fails to embed leaves the current index in place (the swap
+		// never happens), so the bot keeps serving the last good snapshot.
 		return err
 	}
-	m.chunks, m.vectors = chunks, vectors
-	m.buildStructured(docs)
+	dimIndex, aliasMap := buildStructured(docs)
+	m.idx.Store(&memIndex{chunks: chunks, vectors: vectors, dimIndex: dimIndex, aliasMap: aliasMap})
 	return nil
 }
 
@@ -66,7 +88,7 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 // so lookup is spelling- and script-insensitive. A document is recorded once per
 // distinct normalized value (so a note repeating a value doesn't duplicate), and
 // documents accumulate in doc order for a deterministic complete set.
-func (m *Memory) buildStructured(docs []Doc) {
+func buildStructured(docs []Doc) (map[string]map[string][]DocRef, map[string]string) {
 	dimIndex := map[string]map[string][]DocRef{}
 	aliasMap := map[string]string{}
 	for _, d := range docs {
@@ -97,7 +119,7 @@ func (m *Memory) buildStructured(docs []Doc) {
 			}
 		}
 	}
-	m.dimIndex, m.aliasMap = dimIndex, aliasMap
+	return dimIndex, aliasMap
 }
 
 // embedChunks embeds every chunk's text, or returns nil vectors when no embedder
@@ -129,7 +151,8 @@ func (m *Memory) embedChunks(ctx context.Context, chunks []core.Chunk) ([][]floa
 // index is never empty (ADR 0017). An empty embedding or an unembedded index
 // returns nothing.
 func (m *Memory) Semantic(_ context.Context, queryEmbedding []float32, k int) ([]core.Chunk, error) {
-	if len(queryEmbedding) == 0 || len(m.vectors) == 0 {
+	mi := m.load()
+	if len(queryEmbedding) == 0 || len(mi.vectors) == 0 {
 		return nil, nil
 	}
 	type ranked struct {
@@ -137,7 +160,7 @@ func (m *Memory) Semantic(_ context.Context, queryEmbedding []float32, k int) ([
 		sim float32
 	}
 	var hits []ranked
-	for i, v := range m.vectors {
+	for i, v := range mi.vectors {
 		sim := cosine(queryEmbedding, v)
 		if m.threshold <= 0 || sim >= m.threshold {
 			hits = append(hits, ranked{i, sim})
@@ -149,7 +172,7 @@ func (m *Memory) Semantic(_ context.Context, queryEmbedding []float32, k int) ([
 	}
 	out := make([]core.Chunk, len(hits))
 	for i, h := range hits {
-		out[i] = m.chunks[h.idx]
+		out[i] = mi.chunks[h.idx]
 	}
 	return out, nil
 }
@@ -161,7 +184,7 @@ func (m *Memory) Semantic(_ context.Context, queryEmbedding []float32, k int) ([
 func (m *Memory) Keyword(_ context.Context, query string, k int) ([]core.Chunk, error) {
 	queryTerms := tokenize(query)
 	var scored []scoredChunk
-	for order, c := range m.chunks {
+	for order, c := range m.load().chunks {
 		if s := score(queryTerms, c.Text); s > 0 {
 			scored = append(scored, scoredChunk{chunk: c, score: s, order: order})
 		}
@@ -192,12 +215,13 @@ func (m *Memory) Keyword(_ context.Context, query string, k int) ([]core.Chunk, 
 // unmatched value returns an empty set, not an error. The result is a copy in
 // stable doc order, so callers can't mutate the index.
 func (m *Memory) Enumerate(_ context.Context, dimension, value string) ([]DocRef, error) {
-	byKey := m.dimIndex[dimension]
+	mi := m.load()
+	byKey := mi.dimIndex[dimension]
 	if byKey == nil {
 		return nil, nil
 	}
 	key := normalizeKey(value)
-	if canon, ok := m.aliasMap[key]; ok {
+	if canon, ok := mi.aliasMap[key]; ok {
 		key = canon
 	}
 	refs := byKey[key]
@@ -211,7 +235,7 @@ func (m *Memory) Close() error { return nil }
 
 // Len is the number of indexed chunks — surfaced in the startup log so the index
 // size (and thus the boot embedding cost) is visible (ADR 0017).
-func (m *Memory) Len() int { return len(m.chunks) }
+func (m *Memory) Len() int { return len(m.load().chunks) }
 
 // scoredChunk pairs a chunk with its keyword match score and index order, for a
 // stable, deterministic tie-break.
