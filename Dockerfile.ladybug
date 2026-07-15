@@ -1,0 +1,59 @@
+# Ladybug-backend image (ADR 0019 / #86): the persistent embedded-graph store.
+# Unlike the default Dockerfile (memory backend, pure-Go, CGO_ENABLED=0, distroless
+# static), this backend is cgo — it links LadybugDB's liblbug.so and needs its
+# vector + FTS extensions — so the runtime is a glibc base (debian-slim) with the
+# extensions BAKED at build time (LOAD-only at runtime; no INSTALL / network). The
+# default image is unchanged; this is opt-in, for `--retrieval-store ladybug`.
+
+# ---- stage 1: builder ----
+FROM golang:1.26-bookworm AS build
+WORKDIR /src
+
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+
+# Fetch the LadybugDB C library (headers + liblbug.so) into lib-ladybug/.
+RUN curl -fsSL https://raw.githubusercontent.com/LadybugDB/ladybug/refs/heads/main/scripts/download-liblbug.sh \
+      | LBUG_TARGET_DIR=/src/lib-ladybug bash
+
+# Build the ladybug-tagged binary (cgo, dynamically linked to liblbug.so). No
+# rpath: the runtime finds the library via ldconfig (see below).
+ENV CGO_ENABLED=1
+RUN CGO_CFLAGS="-I/src/lib-ladybug" \
+    CGO_LDFLAGS="-L/src/lib-ladybug -lstdc++ -lm" \
+    go build -tags "ladybug system_ladybug" -o /out/yaad-grove ./cmd/yaad-grove
+
+# Bake the vector + FTS extensions into ~/.lbdb by running the tagged store test:
+# its NewLadybug LOADs-else-INSTALLs the extensions (network available here), which
+# both validates the tagged build and populates /root/.lbdb/extension for the
+# offline runtime to LOAD.
+RUN CGO_CFLAGS="-I/src/lib-ladybug" \
+    CGO_LDFLAGS="-L/src/lib-ladybug -lstdc++ -lm -Wl,-rpath,/src/lib-ladybug" \
+    go test -tags "ladybug system_ladybug" -run TestLadybugEndToEnd ./internal/store/
+
+# Normalize the library to its SONAME (liblbug.so.0, the name the binary loads),
+# dereferencing the versioned dev symlinks — so the runtime copy is a single file
+# and version-independent (no hardcoded patch version).
+RUN cp -L /src/lib-ladybug/liblbug.so.0 /out/liblbug.so.0
+
+# ---- stage 2: runtime ----
+FROM debian:bookworm-slim
+# glibc runtime deps of liblbug.so (from ldd): OpenSSL + the C++ runtime. No
+# ca-certificates or network are needed at runtime — extensions are baked.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libssl3 libstdc++6 \
+    && rm -rf /var/lib/apt/lists/*
+
+# The binary, the shared library (as its SONAME, normalized in the builder), and
+# the baked extensions.
+COPY --from=build /out/yaad-grove /usr/local/bin/yaad-grove
+COPY --from=build /out/liblbug.so.0 /usr/local/lib/
+COPY --from=build /root/.lbdb /root/.lbdb
+RUN ldconfig
+
+# LadybugDB looks for baked extensions under $HOME/.lbdb; keep HOME=/root so the
+# runtime LOADs them without a network INSTALL.
+ENV HOME=/root
+ENTRYPOINT ["/usr/local/bin/yaad-grove"]
+CMD ["serve"]
