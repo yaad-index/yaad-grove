@@ -1,7 +1,13 @@
 name: docker-publish
 
-# Builds and publishes the image to GHCR on a release tag only (release-please
+# Builds and publishes the image(s) to GHCR on a release tag only (release-please
 # cuts the tag; see release-please.yml). It must NOT run on every main push.
+#
+# Per-backend variants (like golang's bookworm/alpine tags): each matrix row
+# builds one Dockerfile and appends a tag suffix via the metadata `flavor`.
+#   - default (memory, distroless, pure-Go)  -> :X.Y.Z          (no suffix)
+#   - ladybug (persistent, debian-slim, cgo) -> :X.Y.Z-ladybug
+# Add a new backend by adding a matrix row (e.g. sqlite-vec, #119).
 on:
   push:
     tags: ['v*']
@@ -13,6 +19,14 @@ permissions:
 jobs:
   publish:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - dockerfile: Dockerfile
+            suffix: ""
+          - dockerfile: Dockerfile.ladybug
+            suffix: "-ladybug"
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -32,6 +46,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/yaad-index/yaad-grove
+          # suffix appends to every generated tag, so the default variant emits
+          # 0.15.0 / 0.15 / 0 / latest and the ladybug variant emits the same set
+          # with a -ladybug suffix (0.15.0-ladybug ... latest-ladybug), mirroring
+          # golang's bookworm/alpine variant tags.
+          flavor: |
+            suffix=${{ matrix.suffix }}
           tags: |
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
@@ -42,6 +62,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
+          file: ${{ matrix.dockerfile }}
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
