@@ -568,6 +568,14 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	if err != nil {
 		return nil, nil, err
 	}
+	// Operational visibility: the active store backend, plus the on-disk path for a
+	// persistent one, so the running backend is confirmable from the boot log.
+	storeAttrs := []any{"backend", storeName(c.RetrievalStore)}
+	if storeName(c.RetrievalStore) == storeBackendLadybug {
+		storeAttrs = append(storeAttrs, "path", c.StorePath)
+	}
+	log.Info("retrieval store", storeAttrs...)
+
 	if err := kb.Index(context.Background(), docs); err != nil {
 		return nil, nil, fmt.Errorf("serve: build retrieval index: %w", err)
 	}
