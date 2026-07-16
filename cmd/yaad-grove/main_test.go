@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"log/slog"
@@ -153,6 +154,19 @@ func TestBuildRetrieverMode(t *testing.T) {
 	// An unknown mode is rejected.
 	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log)
 	assert.ErrorContains(t, err, "unknown --retrieval-mode")
+}
+
+// The active store backend is logged at startup for operational visibility (#86):
+// the "retrieval store" line names the backend (and, for a persistent one, its
+// path).
+func TestRetrievalStoreLogged(t *testing.T) {
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	_, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
+	require.NoError(t, err)
+	out := buf.String()
+	assert.Contains(t, out, "retrieval store", "the backend is logged at startup")
+	assert.Contains(t, out, "backend=memory", "the default backend is memory")
 }
 
 // Store backend selection (ADR 0019 / #86): memory is the default, ladybug needs a
