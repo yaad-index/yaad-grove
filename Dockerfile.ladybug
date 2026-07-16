@@ -39,10 +39,12 @@ RUN cp -L /src/lib-ladybug/liblbug.so.0 /out/liblbug.so.0
 
 # ---- stage 2: runtime ----
 FROM debian:bookworm-slim
-# glibc runtime deps of liblbug.so (from ldd): OpenSSL + the C++ runtime. No
-# ca-certificates or network are needed at runtime — extensions are baked.
+# glibc runtime deps of liblbug.so (from ldd): OpenSSL + the C++ runtime. Plus
+# ca-certificates for the CA bundle the model/embedding HTTPS calls need — the
+# distroless default image ships it, so this keeps parity. (LadybugDB extensions
+# are baked, so no network is needed for the store itself.)
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends libssl3 libstdc++6 \
+    && apt-get install -y --no-install-recommends libssl3 libstdc++6 ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # The binary and the shared library (as its SONAME, normalized in the builder).

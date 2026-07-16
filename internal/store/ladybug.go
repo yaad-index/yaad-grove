@@ -45,6 +45,10 @@ type Ladybug struct {
 // NewLadybug opens (or creates) the database at path and loads the vector + FTS
 // extensions (baked into the image at build time; ADR 0019). embedder may be nil
 // for a keyword-only instance. threshold is the semantic similarity floor.
+// queryTimeoutMS bounds any single Cypher query (milliseconds) so a stall fails
+// loud instead of hanging forever (#132). Well above a normal index/query.
+const queryTimeoutMS = 300000
+
 func NewLadybug(path string, embedder embed.Embedder, threshold float32) (Store, error) {
 	db, err := ladybug.OpenDatabase(path, ladybug.DefaultSystemConfig())
 	if err != nil {
@@ -55,6 +59,10 @@ func NewLadybug(path string, embedder embed.Embedder, threshold float32) (Store,
 		db.Close()
 		return nil, fmt.Errorf("store: ladybug connection: %w", err)
 	}
+	// A per-query timeout so a pathological query fails loud rather than hanging the
+	// process forever (#132). Generous — a normal index/query is well under it, so it
+	// only ever fires on a genuine stall.
+	conn.SetTimeout(queryTimeoutMS)
 	l := &Ladybug{db: db, conn: conn, embedder: embedder, threshold: threshold}
 	if err := l.loadExtensions(); err != nil {
 		l.Close()
@@ -128,7 +136,6 @@ func (l *Ladybug) Index(ctx context.Context, docs []Doc) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	// Collect the current chunk set and which hashes are new.
-	type pending struct{ source, text, hash string }
 	var all []pending
 	haveHash := map[string]bool{}
 	for _, d := range docs {
@@ -158,24 +165,48 @@ func (l *Ladybug) Index(ctx context.Context, docs []Doc) error {
 		return err
 	}
 
-	// Upsert new chunks, drop chunks no longer present, then rebuild the structured
-	// graph + indexes. The Chunk table is created on the first index (when the
-	// embedding dimension is known); on restart it already exists and is reused.
+	// The Chunk table is created on the first index (when the embedding dimension is
+	// known); on restart it already exists and is reused. DDL stays outside the
+	// transaction below.
 	if err := l.ensureChunkTable(); err != nil {
 		return err
 	}
+
+	// Upsert new chunks, drop chunks no longer present, and rebuild the structured
+	// graph in ONE explicit transaction. In auto-commit mode LadybugDB runs each of
+	// the thousands of small writes as its own transaction + checkpoint, which is
+	// pathologically slow and hangs at real vault scale (#132); a single transaction
+	// collapses them into one commit. The index DDL (rebuildIndexes) stays outside —
+	// it is not transactional.
+	if err := l.exec("BEGIN TRANSACTION;"); err != nil {
+		return err
+	}
+	if err := l.writeGraph(toEmbed, vectors, docs, haveHash); err != nil {
+		_, _ = l.conn.Query("ROLLBACK;")
+		return err
+	}
+	if err := l.exec("COMMIT;"); err != nil {
+		return err
+	}
+	return l.rebuildIndexes()
+}
+
+// pending is a chunk staged for indexing: its source, text, and content hash.
+type pending struct{ source, text, hash string }
+
+// writeGraph performs the transactional DML of an index: upsert the new chunks,
+// prune the removed ones, and rebuild the Doc/Value/Alias subgraph. The caller
+// wraps it in a transaction.
+func (l *Ladybug) writeGraph(toEmbed []pending, vectors [][]float32, docs []Doc, keep map[string]bool) error {
 	for i, p := range toEmbed {
 		if err := l.upsertChunk(p.source, p.text, p.hash, vectors[i]); err != nil {
 			return err
 		}
 	}
-	if err := l.pruneChunks(haveHash); err != nil {
+	if err := l.pruneChunks(keep); err != nil {
 		return err
 	}
-	if err := l.rebuildStructured(docs); err != nil {
-		return err
-	}
-	return l.rebuildIndexes()
+	return l.rebuildStructured(docs)
 }
 
 // storedHashes returns the set of chunk hashes already in the database.
