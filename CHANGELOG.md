@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.0](https://github.com/yaad-index/yaad-grove/compare/v0.15.0...v0.16.0) (2026-07-16)
+
+
+### Features
+
+* **store:** log active retrieval backend + path at startup ([#124](https://github.com/yaad-index/yaad-grove/issues/124)) ([1d93ff2](https://github.com/yaad-index/yaad-grove/commit/1d93ff253fd3835d8e9968eb39299723c1a9e442))
+
 ## [0.15.0](https://github.com/yaad-index/yaad-grove/compare/v0.14.0...v0.15.0) (2026-07-15)
 
 
