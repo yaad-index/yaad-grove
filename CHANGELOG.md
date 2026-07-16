@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.16.1](https://github.com/yaad-index/yaad-grove/compare/v0.16.0...v0.16.1) (2026-07-16)
+
+
+### Bug Fixes
+
+* **store:** batch ladybug structured index to fix the scale hang ([#132](https://github.com/yaad-index/yaad-grove/issues/132)) ([#133](https://github.com/yaad-index/yaad-grove/issues/133)) ([cd174f5](https://github.com/yaad-index/yaad-grove/commit/cd174f5fce68d1271b5db9ed9f2afbdd3e470c86))
+
 ## [0.16.0](https://github.com/yaad-index/yaad-grove/compare/v0.15.0...v0.16.0) (2026-07-16)
 
 
