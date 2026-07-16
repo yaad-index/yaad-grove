@@ -77,26 +77,27 @@ func (l *Ladybug) pruneChunks(keep map[string]bool) error {
 	return l.exec("MATCH (c:Chunk) WHERE NOT c.hash IN [" + strings.Join(hashes, ",") + "] DELETE c;")
 }
 
-// rebuildStructured drops and rebuilds the Doc/Value/Alias subgraph from docs — it
-// is cheap (no embedding) so a full rebuild keeps it simple and correct.
+// rebuildStructured drops and rebuilds the Doc/Value/Alias subgraph from docs. It
+// is cheap (no embedding) so a full rebuild is simple and correct. The rows are
+// written with UNWIND over an inline list — a handful of queries total, not one per
+// doc/value: a per-row loop is thousands of Cypher round-trips that make a real
+// vault's index take tens of seconds / hang (#132).
 func (l *Ladybug) rebuildStructured(docs []Doc) error {
 	for _, del := range []string{"MATCH (d:Doc) DETACH DELETE d;", "MATCH (v:Value) DETACH DELETE v;", "MATCH (a:Alias) DELETE a;"} {
 		if err := l.exec(del); err != nil {
 			return err
 		}
 	}
+
+	// Collect distinct rows across all docs.
+	var docRows, aliasRows, valueRows, edgeRows []string
+	valueSeen := map[string]bool{}
 	for _, d := range docs {
-		if err := l.exec(fmt.Sprintf("MERGE (d:Doc {path: %s}) SET d.title = %s;",
-			cypherString(d.Ref.Path), cypherString(d.Ref.Title))); err != nil {
-			return err
-		}
+		docRows = append(docRows, mapLiteral("path", d.Ref.Path, "title", d.Ref.Title))
 		if canon := normalizeKey(d.Ref.Title); canon != "" {
 			for _, a := range d.Aliases {
 				if ak := normalizeKey(a); ak != "" {
-					if err := l.exec(fmt.Sprintf("MERGE (a:Alias {nk: %s}) SET a.canon = %s;",
-						cypherString(ak), cypherString(canon))); err != nil {
-						return err
-					}
+					aliasRows = append(aliasRows, mapLiteral("nk", ak, "canon", canon))
 				}
 			}
 		}
@@ -109,20 +110,52 @@ func (l *Ladybug) rebuildStructured(docs []Doc) error {
 				}
 				seen[nk] = true
 				id := dim + "|" + nk
-				if err := l.exec(fmt.Sprintf(
-					"MERGE (v:Value {id: %s}) SET v.dim = %s, v.nk = %s;",
-					cypherString(id), cypherString(dim), cypherString(nk))); err != nil {
-					return err
+				if !valueSeen[id] {
+					valueSeen[id] = true
+					valueRows = append(valueRows, mapLiteral("id", id, "dim", dim, "nk", nk))
 				}
-				if err := l.exec(fmt.Sprintf(
-					"MATCH (d:Doc {path: %s}), (v:Value {id: %s}) MERGE (d)-[:HAS_VALUE]->(v);",
-					cypherString(d.Ref.Path), cypherString(id))); err != nil {
-					return err
-				}
+				edgeRows = append(edgeRows, mapLiteral("path", d.Ref.Path, "id", id))
 			}
 		}
 	}
+
+	// One UNWIND query per category. Docs and Values before edges (the edge MATCH
+	// depends on both nodes existing).
+	batches := []struct {
+		rows  []string
+		query string
+	}{
+		{docRows, "UNWIND %s AS r MERGE (d:Doc {path: r.path}) SET d.title = r.title;"},
+		{aliasRows, "UNWIND %s AS r MERGE (a:Alias {nk: r.nk}) SET a.canon = r.canon;"},
+		{valueRows, "UNWIND %s AS r MERGE (v:Value {id: r.id}) SET v.dim = r.dim, v.nk = r.nk;"},
+		{edgeRows, "UNWIND %s AS r MATCH (d:Doc {path: r.path}), (v:Value {id: r.id}) MERGE (d)-[:HAS_VALUE]->(v);"},
+	}
+	for _, b := range batches {
+		if len(b.rows) == 0 {
+			continue
+		}
+		if err := l.exec(fmt.Sprintf(b.query, "["+strings.Join(b.rows, ",")+"]")); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+// mapLiteral builds a Cypher map literal {k: 'v', ...} from key/value string pairs,
+// escaping each value.
+func mapLiteral(kv ...string) string {
+	var b strings.Builder
+	b.WriteByte('{')
+	for i := 0; i+1 < len(kv); i += 2 {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(kv[i])
+		b.WriteByte(':')
+		b.WriteString(cypherString(kv[i+1]))
+	}
+	b.WriteByte('}')
+	return b.String()
 }
 
 // rebuildIndexes drops and recreates the vector (HNSW, cosine) and FTS (BM25)

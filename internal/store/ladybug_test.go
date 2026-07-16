@@ -4,6 +4,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -12,6 +13,60 @@ import (
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 )
+
+// scaleEmb returns a small fixed-dimension vector for any text — for the
+// large-index regression test, where the exact vectors don't matter.
+type scaleEmb struct{ calls int }
+
+func (s *scaleEmb) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	s.calls++
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		out[i] = []float32{float32(i%7) + 1, 1, 0, 0}
+	}
+	return out, nil
+}
+
+// Regression for #132: indexing a real-shaped vault (many docs, each with a chunk
+// and several dimension values) must complete promptly, not hang. Before the fix —
+// a per-row write for every doc/value — this took tens of seconds and hung at vault
+// scale; the batched UNWIND + single transaction make it fast. The count is large
+// enough to have tripped the old path but stays quick under the fix.
+func TestLadybugLargeIndex(t *testing.T) {
+	emb := &scaleEmb{}
+	l, err := NewLadybug(t.TempDir()+"/db", emb, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	const n = 600
+	var docs []Doc
+	for i := 0; i < n; i++ {
+		docs = append(docs, Doc{
+			Ref:    DocRef{Path: fmt.Sprintf("ep%04d.md", i), Title: fmt.Sprintf("Episode %d", i)},
+			Chunks: []core.Chunk{{Source: fmt.Sprintf("ep%04d.md", i), Text: fmt.Sprintf("episode %d transcript", i)}},
+			Dimensions: map[string][]string{
+				"games": {fmt.Sprintf("Game %d", i%150), fmt.Sprintf("Game %d", (i+1)%150)},
+				"hosts": {fmt.Sprintf("Host %d", i%12)},
+			},
+		})
+	}
+	require.NoError(t, l.Index(context.Background(), docs))
+
+	// Structured lookup is correct at scale: every episode sharing a game enumerates.
+	got, err := l.Enumerate(context.Background(), "games", "Game 5")
+	require.NoError(t, err)
+	assert.NotEmpty(t, got, "the complete set for a shared game")
+
+	// The vector + FTS indexes built over the full chunk set.
+	sem, err := l.Semantic(context.Background(), []float32{1, 1, 0, 0}, 3)
+	require.NoError(t, err)
+	assert.NotEmpty(t, sem, "semantic works over the large index")
+
+	// Re-index is the #86 delta: unchanged chunks aren't re-embedded.
+	callsAfterFirst := emb.calls
+	require.NoError(t, l.Index(context.Background(), docs))
+	assert.Equal(t, callsAfterFirst, emb.calls, "an unchanged vault re-index embeds nothing new")
+}
 
 // End to end against the real embedded engine: Index a small vault, then exercise
 // all three query paths + the content-hash delta. Runs only under -tags ladybug
