@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.17.0](https://github.com/yaad-index/yaad-grove/compare/v0.16.1...v0.17.0) (2026-07-17)
+
+
+### Features
+
+* **store:** compound facets via multi-predicate kb_enumerate ([#135](https://github.com/yaad-index/yaad-grove/issues/135)) ([#140](https://github.com/yaad-index/yaad-grove/issues/140)) ([5e0bc8a](https://github.com/yaad-index/yaad-grove/commit/5e0bc8ac9ee120715be90ab6c69eccedbb86ebb0))
+* **store:** fold punctuation in the value normalizer for faceted recall ([#135](https://github.com/yaad-index/yaad-grove/issues/135)) ([#137](https://github.com/yaad-index/yaad-grove/issues/137)) ([052bd60](https://github.com/yaad-index/yaad-grove/commit/052bd608ef5730d05f9f8baf401619dec87f280a))
+* **store:** kb_dimensions value-vocabulary discovery ([#135](https://github.com/yaad-index/yaad-grove/issues/135)) ([#139](https://github.com/yaad-index/yaad-grove/issues/139)) ([bf4ebba](https://github.com/yaad-index/yaad-grove/commit/bf4ebba00d4f4ce4fdd2b7d19ba5b8e01e3f841c))
+
+
+### Bug Fixes
+
+* **store:** batch ladybug chunk upserts to stop the full-vault deadlock ([#141](https://github.com/yaad-index/yaad-grove/issues/141)) ([#142](https://github.com/yaad-index/yaad-grove/issues/142)) ([fbd4bbf](https://github.com/yaad-index/yaad-grove/commit/fbd4bbfc7ace03472f143b47b3111f0c93242c42))
+
 ## [0.16.1](https://github.com/yaad-index/yaad-grove/compare/v0.16.0...v0.16.1) (2026-07-16)
 
 
