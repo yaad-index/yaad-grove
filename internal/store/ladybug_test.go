@@ -27,6 +27,80 @@ func (s *scaleEmb) Embed(_ context.Context, texts []string) ([][]float32, error)
 	return out, nil
 }
 
+// dimEmb returns a fixed-width vector of a chosen dimension, so a regression can
+// exercise the chunk-upsert path with realistically-sized embedding arrays (not the
+// 4-float toy) — the per-chunk query volume is what deadlocked liblbug (#141).
+type dimEmb struct{ dim int }
+
+func (e dimEmb) Embed(_ context.Context, texts []string) ([][]float32, error) {
+	out := make([][]float32, len(texts))
+	for i := range texts {
+		v := make([]float32, e.dim)
+		for j := range v {
+			v[j] = float32((i+j)%13) * 0.1
+		}
+		out[i] = v
+	}
+	return out, nil
+}
+
+// Regression for #141: the per-chunk upsert path deadlocked liblbug on a full
+// production-sized vault (~1890 chunks) even after #132 batched the structured
+// rebuild, because chunk writes were still one MERGE per chunk. Batched UNWIND
+// chunk upserts must index a full vault promptly under the write deadline, not
+// hang. Realistically-sized embeddings so the per-chunk query volume matches prod.
+func TestLadybugFullVaultChunkUpsert(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 64}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	const n = 1890
+	docs := make([]Doc, 0, n)
+	for i := 0; i < n; i++ {
+		p := fmt.Sprintf("doc%05d.md", i)
+		docs = append(docs, Doc{
+			Ref:    DocRef{Path: p, Title: fmt.Sprintf("Doc %d", i)},
+			Chunks: []core.Chunk{{Source: p, Text: fmt.Sprintf("chunk %d body text", i)}},
+		})
+	}
+	require.NoError(t, l.Index(context.Background(), docs), "a full-vault chunk upsert completes, it does not hang")
+
+	// The full chunk set is queryable — the vector + FTS indexes built over all of it.
+	q := make([]float32, 64)
+	for j := range q {
+		q[j] = 0.1
+	}
+	sem, err := l.Semantic(context.Background(), q, 5)
+	require.NoError(t, err)
+	assert.NotEmpty(t, sem, "semantic works over the full-vault index")
+	kw, err := l.Keyword(context.Background(), "body", 5)
+	require.NoError(t, err)
+	assert.NotEmpty(t, kw, "keyword works over the full-vault index")
+
+	// Re-index the unchanged vault embeds nothing new and still completes (#86 delta).
+	require.NoError(t, l.Index(context.Background(), docs))
+}
+
+// A poisoned store — a prior index write blew the wall-clock deadline, leaving a
+// wedged cgo call — fails every method fast rather than issuing a query on an
+// unusable connection (#141).
+func TestLadybugPoisonedFailsFast(t *testing.T) {
+	s, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer s.Close()
+	s.(*Ladybug).poisoned = true
+
+	assert.ErrorIs(t, s.Index(context.Background(), nil), errStorePoisoned)
+	_, err = s.Semantic(context.Background(), []float32{1, 0, 0, 0}, 1)
+	assert.ErrorIs(t, err, errStorePoisoned)
+	_, err = s.Keyword(context.Background(), "x", 1)
+	assert.ErrorIs(t, err, errStorePoisoned)
+	_, err = s.Enumerate(context.Background(), "games", "x")
+	assert.ErrorIs(t, err, errStorePoisoned)
+	_, err = s.Dimensions(context.Background())
+	assert.ErrorIs(t, err, errStorePoisoned)
+}
+
 // Regression for #132: indexing a real-shaped vault (many docs, each with a chunk
 // and several dimension values) must complete promptly, not hang. Before the fix —
 // a per-row write for every doc/value — this took tens of seconds and hung at vault
