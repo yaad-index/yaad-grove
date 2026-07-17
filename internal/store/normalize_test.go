@@ -63,6 +63,24 @@ func TestNormalizeKeyLatin(t *testing.T) {
 	assert.NotEqual(t, normalizeKey("sky bridge"), normalizeKey("skybridge"))
 }
 
+// Punctuation folds to a separator (ADR 0020), so a facet value like
+// "Route/Network Building" is reachable however its separators are spelled —
+// slash, spaced slash, comma, parens — and merges with the plain spaced form.
+// The fold is symmetric (Index + Enumerate) so it can only merge keys, never
+// split one.
+func TestNormalizeKeyFoldsPunctuation(t *testing.T) {
+	want := normalizeKey("route network building")
+	assert.Equal(t, want, normalizeKey("Route/Network Building"), "slash folds to a separator")
+	assert.Equal(t, want, normalizeKey("Route / Network / Building"), "spaced slashes collapse")
+	assert.Equal(t, want, normalizeKey("route, network, building"), "commas fold")
+	assert.Equal(t, normalizeKey("worker placement dice"), normalizeKey("Worker-Placement (Dice)"), "parens + hyphen fold to separators")
+	// A trailing/interior symbol run doesn't leave an empty token.
+	assert.Equal(t, "18", normalizeKey("18+"))
+	// Distinct tokens stay distinct: folding merges separators, it doesn't delete
+	// the boundary, so a joined word is still not the spaced pair.
+	assert.NotEqual(t, normalizeKey("coop"), normalizeKey("co-op"))
+}
+
 // The empty and whitespace-only inputs normalize to the empty key.
 func TestNormalizeKeyEmpty(t *testing.T) {
 	assert.Empty(t, normalizeKey(""))
