@@ -14,9 +14,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	ladybug "github.com/LadybugDB/go-ladybug"
 
@@ -39,8 +41,24 @@ type Ladybug struct {
 	conn      *ladybug.Connection
 	embedder  embed.Embedder
 	threshold float32
-	dim       int // embedding dimension, fixed at first index
+	dim       int  // embedding dimension, fixed at first index
+	poisoned  bool // set when an index write blocked past the deadline (#141); the
+	// wedged cgo call can't be reclaimed, so the connection is unusable — every
+	// method fails fast rather than issuing a query on a connection with a query
+	// still in flight.
 }
+
+// errStorePoisoned is returned by every method after an index write exceeded the
+// deadline: the liblbug connection has a query stuck in a cgo call that never
+// returned, so it can't safely be used again (#141).
+var errStorePoisoned = errors.New("store: ladybug connection wedged by a prior index-write timeout — restart required (#141)")
+
+// writeTimeout bounds the whole index write phase in wall-clock time. liblbug's own
+// SetTimeout does NOT interrupt a wedged cgo call (a full-vault deadlock ran ~17h
+// despite it, #141), so the write runs under this Go-side deadline: if it doesn't
+// return in time, the store fails loud and poisons itself instead of blocking the
+// process forever. Generous — a healthy full-vault index is seconds, not minutes.
+const writeTimeout = queryTimeoutMS * time.Millisecond
 
 // NewLadybug opens (or creates) the database at path and loads the vector + FTS
 // extensions (baked into the image at build time; ADR 0019). embedder may be nil
@@ -135,6 +153,9 @@ func chunkHash(source, text string) string {
 func (l *Ladybug) Index(ctx context.Context, docs []Doc) error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.poisoned {
+		return errStorePoisoned
+	}
 	// Collect the current chunk set and which hashes are new.
 	var all []pending
 	haveHash := map[string]bool{}
@@ -172,23 +193,47 @@ func (l *Ladybug) Index(ctx context.Context, docs []Doc) error {
 		return err
 	}
 
-	// Upsert new chunks, drop chunks no longer present, and rebuild the structured
-	// graph in ONE explicit transaction. In auto-commit mode LadybugDB runs each of
-	// the thousands of small writes as its own transaction + checkpoint, which is
-	// pathologically slow and hangs at real vault scale (#132); a single transaction
-	// collapses them into one commit. The index DDL (rebuildIndexes) stays outside —
-	// it is not transactional.
-	if err := l.exec("BEGIN TRANSACTION;"); err != nil {
+	// Upsert new chunks, drop chunks no longer present, rebuild the structured graph,
+	// and rebuild the indexes — all under a wall-clock deadline (#141). Every write
+	// is batched (UNWIND, not per-row) so a full vault is a handful of statements,
+	// not thousands: LadybugDB otherwise runs each small write as its own
+	// transaction + checkpoint, which deadlocks liblbug at real vault scale (#132 for
+	// the structured rebuild, #141 for the chunk upserts). The DML runs in ONE
+	// explicit transaction; the index DDL (rebuildIndexes) stays outside it (it is
+	// not transactional).
+	return l.runWriteWithDeadline(ctx, func() error {
+		if err := l.exec("BEGIN TRANSACTION;"); err != nil {
+			return err
+		}
+		if err := l.writeGraph(toEmbed, vectors, docs, haveHash); err != nil {
+			_, _ = l.conn.Query("ROLLBACK;")
+			return err
+		}
+		if err := l.exec("COMMIT;"); err != nil {
+			return err
+		}
+		return l.rebuildIndexes()
+	})
+}
+
+// runWriteWithDeadline runs the index write phase under writeTimeout. liblbug's
+// SetTimeout can't interrupt a wedged cgo call, so the write runs in a goroutine
+// and the deadline is enforced Go-side: if it doesn't return in time (or the
+// caller's context is cancelled), the store is poisoned and a loud error is
+// returned instead of the process blocking forever (#141). The blocked goroutine
+// can't be reclaimed — that is why the connection is marked unusable afterward.
+func (l *Ladybug) runWriteWithDeadline(ctx context.Context, fn func() error) error {
+	ctx, cancel := context.WithTimeout(ctx, writeTimeout)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- fn() }()
+	select {
+	case err := <-done:
 		return err
+	case <-ctx.Done():
+		l.poisoned = true
+		return fmt.Errorf("store: ladybug index write did not return within %s — liblbug is wedged, store poisoned (#141): %w", writeTimeout, ctx.Err())
 	}
-	if err := l.writeGraph(toEmbed, vectors, docs, haveHash); err != nil {
-		_, _ = l.conn.Query("ROLLBACK;")
-		return err
-	}
-	if err := l.exec("COMMIT;"); err != nil {
-		return err
-	}
-	return l.rebuildIndexes()
 }
 
 // pending is a chunk staged for indexing: its source, text, and content hash.
@@ -198,10 +243,8 @@ type pending struct{ source, text, hash string }
 // prune the removed ones, and rebuild the Doc/Value/Alias subgraph. The caller
 // wraps it in a transaction.
 func (l *Ladybug) writeGraph(toEmbed []pending, vectors [][]float32, docs []Doc, keep map[string]bool) error {
-	for i, p := range toEmbed {
-		if err := l.upsertChunk(p.source, p.text, p.hash, vectors[i]); err != nil {
-			return err
-		}
+	if err := l.upsertChunks(toEmbed, vectors); err != nil {
+		return err
 	}
 	if err := l.pruneChunks(keep); err != nil {
 		return err

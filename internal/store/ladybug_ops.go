@@ -56,14 +56,51 @@ func (l *Ladybug) ensureChunkTable() error {
 		l.dim))
 }
 
-// upsertChunk stores one chunk (a new content hash) with its embedding.
-func (l *Ladybug) upsertChunk(source, text, hash string, vec []float32) error {
-	q := fmt.Sprintf("MERGE (c:Chunk {hash: %s}) SET c.source = %s, c.text = %s",
-		cypherString(hash), cypherString(source), cypherString(text))
-	if len(vec) > 0 {
-		q += fmt.Sprintf(", c.embedding = %s", floatArrayLiteral(vec))
+// upsertChunkBatch is how many chunks are written per UNWIND statement. Batching
+// collapses thousands of per-chunk MERGEs — each a liblbug round-trip that
+// deadlocks the engine at full-vault scale (#141) — into a handful of statements,
+// mirroring the structured-rebuild batching (#132). It is bounded rather than one
+// all-in-one UNWIND because each chunk carries a full embedding array, so a single
+// statement over the whole vault would be a multi-megabyte query.
+const upsertChunkBatch = 100
+
+// upsertChunks writes every staged chunk with its embedding via batched UNWIND
+// statements — a handful of MERGEs total, not one per chunk. Whether the embedding
+// is written is all-or-none across the vault: dim>0 (an embedder is configured)
+// means every chunk was embedded, dim==0 (keyword-only) means none were.
+func (l *Ladybug) upsertChunks(toEmbed []pending, vectors [][]float32) error {
+	withEmbedding := l.dim > 0
+	for start := 0; start < len(toEmbed); start += upsertChunkBatch {
+		end := start + upsertChunkBatch
+		if end > len(toEmbed) {
+			end = len(toEmbed)
+		}
+		rows := make([]string, 0, end-start)
+		for i := start; i < end; i++ {
+			p := toEmbed[i]
+			var b strings.Builder
+			b.WriteString("{hash:")
+			b.WriteString(cypherString(p.hash))
+			b.WriteString(",source:")
+			b.WriteString(cypherString(p.source))
+			b.WriteString(",text:")
+			b.WriteString(cypherString(p.text))
+			if withEmbedding {
+				b.WriteString(",embedding:")
+				b.WriteString(floatArrayLiteral(vectors[i]))
+			}
+			b.WriteByte('}')
+			rows = append(rows, b.String())
+		}
+		q := "UNWIND [" + strings.Join(rows, ",") + "] AS r MERGE (c:Chunk {hash: r.hash}) SET c.source = r.source, c.text = r.text"
+		if withEmbedding {
+			q += ", c.embedding = r.embedding"
+		}
+		if err := l.exec(q + ";"); err != nil {
+			return err
+		}
 	}
-	return l.exec(q + ";")
+	return nil
 }
 
 // pruneChunks deletes stored chunks whose hash is no longer present in the vault.
@@ -182,6 +219,9 @@ func (l *Ladybug) rebuildIndexes() error {
 func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) ([]core.Chunk, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.poisoned {
+		return nil, errStorePoisoned
+	}
 	if len(queryEmbedding) == 0 || l.dim == 0 {
 		return nil, nil
 	}
@@ -216,6 +256,9 @@ func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) (
 func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.poisoned {
+		return nil, errStorePoisoned
+	}
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -248,6 +291,9 @@ func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk,
 func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRef, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.poisoned {
+		return nil, errStorePoisoned
+	}
 	nk := normalizeKey(value)
 	if nk == "" {
 		return nil, nil
@@ -285,6 +331,9 @@ func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRe
 func (l *Ladybug) Dimensions(_ context.Context) (map[string][]string, error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if l.poisoned {
+		return nil, errStorePoisoned
+	}
 	r, err := l.conn.Query("MATCH (v:Value) RETURN v.dim, v.disp;")
 	if err != nil {
 		return nil, err
