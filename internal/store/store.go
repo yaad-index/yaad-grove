@@ -52,6 +52,13 @@ type Store interface {
 	// yet implemented (see ErrEnumerateNotImplemented).
 	Enumerate(ctx context.Context, dimension, value string) ([]DocRef, error)
 
+	// Dimensions returns, for each declared dimension, its distinct values by
+	// DISPLAY form (the first-seen raw spelling behind the normalized match key),
+	// sorted. It is the value vocabulary a model needs to choose a valid Enumerate
+	// value (ADR 0020) — a discovery affordance only; Enumerate itself is never
+	// bounded by it. Empty before the first Index.
+	Dimensions(ctx context.Context) (map[string][]string, error)
+
 	// Close releases any resources the backend holds. The memory backend has none.
 	Close() error
 }

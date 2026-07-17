@@ -108,6 +108,12 @@ func TestLadybugEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.ElementsMatch(t, paths(byName), paths(byAlias), "alias resolves to the same set")
 
+	// Dimensions surfaces the value vocabulary by display form (ADR 0020): both
+	// episodes carry games:[Acme], so the graph holds one distinct display value.
+	dims, err := l.Dimensions(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Acme"}, dims["games"], "the value vocabulary by display form")
+
 	// Delta: re-index the same vault → no new embedding (content hashes unchanged).
 	require.NoError(t, l.Index(context.Background(), docs))
 	assert.Equal(t, 1, fe.calls, "unchanged chunks are not re-embedded (#86 delta)")

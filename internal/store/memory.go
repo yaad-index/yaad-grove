@@ -41,6 +41,9 @@ type memIndex struct {
 	// dimIndex is the structured-lookup index (ADR 0019): dimension → normalized
 	// value key → the complete set of documents carrying that value, in doc order.
 	dimIndex map[string]map[string][]DocRef
+	// dispIndex is the value vocabulary (ADR 0020): dimension → normalized value key
+	// → the first-seen raw DISPLAY spelling of that value, for kb_dimensions.
+	dispIndex map[string]map[string]string
 	// aliasMap resolves a normalized surface form (a transliteration / cross-script
 	// spelling) to the normalized canonical key of the entity it names.
 	aliasMap map[string]string
@@ -78,8 +81,8 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 		// never happens), so the bot keeps serving the last good snapshot.
 		return err
 	}
-	dimIndex, aliasMap := buildStructured(docs)
-	m.idx.Store(&memIndex{chunks: chunks, vectors: vectors, dimIndex: dimIndex, aliasMap: aliasMap})
+	dimIndex, dispIndex, aliasMap := buildStructured(docs)
+	m.idx.Store(&memIndex{chunks: chunks, vectors: vectors, dimIndex: dimIndex, dispIndex: dispIndex, aliasMap: aliasMap})
 	return nil
 }
 
@@ -88,9 +91,10 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 // so lookup is spelling- and script-insensitive. A document is recorded once per
 // distinct normalized value (so a note repeating a value doesn't duplicate), and
 // documents accumulate in doc order for a deterministic complete set.
-func buildStructured(docs []Doc) (map[string]map[string][]DocRef, map[string]string) {
-	dimIndex := map[string]map[string][]DocRef{}
-	aliasMap := map[string]string{}
+func buildStructured(docs []Doc) (dimIndex map[string]map[string][]DocRef, dispIndex map[string]map[string]string, aliasMap map[string]string) {
+	dimIndex = map[string]map[string][]DocRef{}
+	dispIndex = map[string]map[string]string{}
+	aliasMap = map[string]string{}
 	for _, d := range docs {
 		// Alias registration: each surface form → this note's canonical key. The
 		// canonical is the note's title normalized (the KB contract, see Doc).
@@ -102,11 +106,13 @@ func buildStructured(docs []Doc) (map[string]map[string][]DocRef, map[string]str
 			}
 		}
 		// Dimension index: each declared value → this doc, deduped within the doc.
+		// The first raw spelling seen for a normalized key becomes its display form.
 		for dim, values := range d.Dimensions {
 			byKey := dimIndex[dim]
 			if byKey == nil {
 				byKey = map[string][]DocRef{}
 				dimIndex[dim] = byKey
+				dispIndex[dim] = map[string]string{}
 			}
 			seen := map[string]bool{}
 			for _, v := range values {
@@ -116,10 +122,13 @@ func buildStructured(docs []Doc) (map[string]map[string][]DocRef, map[string]str
 				}
 				seen[vk] = true
 				byKey[vk] = append(byKey[vk], d.Ref)
+				if _, ok := dispIndex[dim][vk]; !ok {
+					dispIndex[dim][vk] = strings.TrimSpace(v)
+				}
 			}
 		}
 	}
-	return dimIndex, aliasMap
+	return dimIndex, dispIndex, aliasMap
 }
 
 // embedChunks embeds every chunk's text, or returns nil vectors when no embedder
@@ -227,6 +236,24 @@ func (m *Memory) Enumerate(_ context.Context, dimension, value string) ([]DocRef
 	refs := byKey[key]
 	out := make([]DocRef, len(refs))
 	copy(out, refs)
+	return out, nil
+}
+
+// Dimensions returns each declared dimension's distinct values by display form,
+// sorted (ADR 0020). It reads the current snapshot's display index — the
+// first-seen raw spelling behind each normalized key — so the model discovers real,
+// enumerable values rather than guessing. Empty before the first Index.
+func (m *Memory) Dimensions(_ context.Context) (map[string][]string, error) {
+	mi := m.load()
+	out := make(map[string][]string, len(mi.dispIndex))
+	for dim, byKey := range mi.dispIndex {
+		vals := make([]string, 0, len(byKey))
+		for _, disp := range byKey {
+			vals = append(vals, disp)
+		}
+		sort.Strings(vals)
+		out[dim] = vals
+	}
 	return out, nil
 }
 

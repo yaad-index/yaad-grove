@@ -5,6 +5,7 @@ package store
 import (
 	"context"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -112,7 +113,7 @@ func (l *Ladybug) rebuildStructured(docs []Doc) error {
 				id := dim + "|" + nk
 				if !valueSeen[id] {
 					valueSeen[id] = true
-					valueRows = append(valueRows, mapLiteral("id", id, "dim", dim, "nk", nk))
+					valueRows = append(valueRows, mapLiteral("id", id, "dim", dim, "nk", nk, "disp", strings.TrimSpace(v)))
 				}
 				edgeRows = append(edgeRows, mapLiteral("path", d.Ref.Path, "id", id))
 			}
@@ -127,7 +128,7 @@ func (l *Ladybug) rebuildStructured(docs []Doc) error {
 	}{
 		{docRows, "UNWIND %s AS r MERGE (d:Doc {path: r.path}) SET d.title = r.title;"},
 		{aliasRows, "UNWIND %s AS r MERGE (a:Alias {nk: r.nk}) SET a.canon = r.canon;"},
-		{valueRows, "UNWIND %s AS r MERGE (v:Value {id: r.id}) SET v.dim = r.dim, v.nk = r.nk;"},
+		{valueRows, "UNWIND %s AS r MERGE (v:Value {id: r.id}) SET v.dim = r.dim, v.nk = r.nk, v.disp = r.disp;"},
 		{edgeRows, "UNWIND %s AS r MATCH (d:Doc {path: r.path}), (v:Value {id: r.id}) MERGE (d)-[:HAS_VALUE]->(v);"},
 	}
 	for _, b := range batches {
@@ -273,6 +274,48 @@ func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRe
 			continue
 		}
 		out = append(out, DocRef{Path: asString(vals[0]), Title: asString(vals[1])})
+	}
+	return out, nil
+}
+
+// Dimensions returns each dimension's distinct values by display form, sorted
+// (ADR 0020) — the value vocabulary for kb_dimensions. It reads v.disp (the
+// first-seen raw spelling behind each value node), the graph counterpart of the
+// memory backend's display index.
+func (l *Ladybug) Dimensions(_ context.Context) (map[string][]string, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	r, err := l.conn.Query("MATCH (v:Value) RETURN v.dim, v.disp;")
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	seen := map[string]map[string]bool{}
+	out := map[string][]string{}
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return nil, err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 2 {
+			continue
+		}
+		dim, disp := asString(vals[0]), asString(vals[1])
+		if dim == "" || disp == "" {
+			continue
+		}
+		if seen[dim] == nil {
+			seen[dim] = map[string]bool{}
+		}
+		if seen[dim][disp] {
+			continue
+		}
+		seen[dim][disp] = true
+		out[dim] = append(out[dim], disp)
+	}
+	for dim := range out {
+		sort.Strings(out[dim])
 	}
 	return out, nil
 }

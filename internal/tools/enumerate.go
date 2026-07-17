@@ -20,38 +20,55 @@ type Enumerable interface {
 	Enumerate(ctx context.Context, dimension, value string) ([]store.DocRef, error)
 }
 
+// Structured is the full structured-lookup surface the built-in tools need from a
+// Store: the complete-set primitive (kb_enumerate) plus the value-vocabulary
+// primitive (kb_dimensions). A store.Store satisfies it.
+type Structured interface {
+	Enumerable
+	Dimensioner
+}
+
 // WithEnumerate augments a base tool set (the MCP registry) with the built-in
-// kb_enumerate tool backed by st over the instance's declared dimensions (ADR
-// 0019). With no dimensions declared it returns base unchanged — the tool is not
-// advertised, so a bot without structured data never exposes it. Enumerate results
-// are complete and uncapped but formatted as compact "Title (path)" refs, not
-// chunk bodies: a low-cardinality dimension can resolve to a large set, and refs
-// stay cheap while remaining complete (content retrieval within an enumerated doc
-// is a separate model step).
-func WithEnumerate(base core.Tools, st Enumerable, dimensions []string) core.Tools {
+// structured-lookup tools — kb_enumerate and kb_dimensions — backed by st over the
+// instance's declared dimensions (ADR 0019 / 0020). With no dimensions declared it
+// returns base unchanged, so a bot without structured data exposes neither tool.
+// Enumerate results are complete and uncapped but formatted as compact "Title
+// (path)" refs, not chunk bodies: a low-cardinality dimension can resolve to a
+// large set, and refs stay cheap while remaining complete (content retrieval within
+// an enumerated doc is a separate model step).
+func WithEnumerate(base core.Tools, st Structured, dimensions []string) core.Tools {
 	if len(dimensions) == 0 {
 		return base
 	}
-	return composite{base: base, enum: enumerateTool{store: st, dimensions: dimensions}}
+	return composite{
+		base: base,
+		enum: enumerateTool{store: st, dimensions: dimensions},
+		dims: dimensionsTool{store: st, dimensions: dimensions},
+	}
 }
 
-// composite advertises the base tools plus kb_enumerate and routes a call to
-// whichever owns the name.
+// composite advertises the base tools plus the structured-lookup tools and routes a
+// call to whichever owns the name.
 type composite struct {
 	base core.Tools
 	enum enumerateTool
+	dims dimensionsTool
 }
 
 func (c composite) Defs() []core.ToolDef {
+	structured := []core.ToolDef{c.enum.def(), c.dims.def()}
 	if c.base == nil {
-		return []core.ToolDef{c.enum.def()}
+		return structured
 	}
-	return append(c.base.Defs(), c.enum.def())
+	return append(c.base.Defs(), structured...)
 }
 
 func (c composite) Call(ctx context.Context, name string, args map[string]any) (string, error) {
-	if name == enumerateToolName {
+	switch name {
+	case enumerateToolName:
 		return c.enum.call(ctx, args)
+	case dimensionsToolName:
+		return c.dims.call(ctx, args)
 	}
 	if c.base == nil {
 		return "", fmt.Errorf("tools: unknown tool %q", name)

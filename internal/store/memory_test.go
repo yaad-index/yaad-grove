@@ -268,6 +268,34 @@ func TestMemoryEnumerateAliasResolution(t *testing.T) {
 	assert.Equal(t, []string{"ep01.md", "ep02.md"}, paths(viaAlias), "the alias resolves to the same complete set")
 }
 
+// Dimensions surfaces each declared dimension's distinct values by display form,
+// sorted, with the first-seen raw spelling as the display (ADR 0020) — the
+// vocabulary kb_dimensions serves so the model can pick a value that exists.
+func TestMemoryDimensions(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "a.md"}, Dimensions: map[string][]string{"games": {"Acme Rail"}, "category": {"Trains"}}},
+		// "acme-rail" folds to the same key as "Acme Rail"; the first-seen display wins.
+		{Ref: DocRef{Path: "b.md"}, Dimensions: map[string][]string{"games": {"acme-rail", "Widget Wars"}}},
+	}))
+
+	dims, err := m.Dimensions(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"Acme Rail", "Widget Wars"}, dims["games"], "distinct display values, sorted, first-seen spelling")
+	assert.Equal(t, []string{"Trains"}, dims["category"])
+	assert.NotContains(t, dims, "publishers", "only indexed dimensions appear")
+
+	// Empty before the first index.
+	assert.Empty(t, mustDims(t, NewMemory(nil, 0)), "no dimensions before indexing")
+}
+
+func mustDims(t *testing.T, m *Memory) map[string][]string {
+	t.Helper()
+	d, err := m.Dimensions(context.Background())
+	require.NoError(t, err)
+	return d
+}
+
 // A live reindex is safe against concurrent queries (#86): Index rebuilds a fresh
 // snapshot and swaps it atomically, so a reader always sees one consistent index
 // (the old one or the new one), never a torn mix. The value of this test is under
