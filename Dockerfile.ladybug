@@ -54,8 +54,11 @@ RUN ldconfig
 
 # Run as a non-root user, uid 65532 to match the default distroless `nonroot`
 # image — so /data ownership is consistent across the memory and ladybug images.
+# /data is created owned by that user so the default relative-path stores are
+# writable even without a mounted volume (see WORKDIR below).
 RUN groupadd -g 65532 nonroot \
-    && useradd -u 65532 -g 65532 -m -d /home/nonroot nonroot
+    && useradd -u 65532 -g 65532 -m -d /home/nonroot nonroot \
+    && mkdir -p /data && chown 65532:65532 /data
 
 # LadybugDB looks for baked extensions under $HOME/.lbdb; place them in the
 # non-root user's home (owned by it) so the runtime LOADs them offline.
@@ -67,5 +70,9 @@ RUN /usr/local/bin/yaad-grove version
 
 ENV HOME=/home/nonroot
 USER 65532
+# The default stores are relative paths (budget.db / acl.db / callbacks.db), so
+# default the working dir to the writable /data — they persist there without a -w
+# flag, and an absolute --store-path (e.g. /data/index.ldb) is unaffected.
+WORKDIR /data
 ENTRYPOINT ["/usr/local/bin/yaad-grove"]
 CMD ["serve"]
