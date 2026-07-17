@@ -26,16 +26,21 @@ func (f *fakeBase) Call(_ context.Context, name string, _ map[string]any) (strin
 	return "base:" + name, nil
 }
 
-// fakeEnum is a stand-in Store.Enumerate: it returns canned refs and records the
-// query it was asked.
+// fakeEnum is a stand-in for the structured Store surface: it returns canned refs
+// and a canned value vocabulary, and records the query it was asked.
 type fakeEnum struct {
 	refs     []store.DocRef
 	dim, val string
+	vocab    map[string][]string
 }
 
 func (f *fakeEnum) Enumerate(_ context.Context, dimension, value string) ([]store.DocRef, error) {
 	f.dim, f.val = dimension, value
 	return f.refs, nil
+}
+
+func (f *fakeEnum) Dimensions(context.Context) (map[string][]string, error) {
+	return f.vocab, nil
 }
 
 func defByName(defs []core.ToolDef, name string) (core.ToolDef, bool) {
@@ -52,24 +57,29 @@ func defByName(defs []core.ToolDef, name string) (core.ToolDef, bool) {
 func TestWithEnumerateNoDimensionsIsIdentity(t *testing.T) {
 	base := &fakeBase{defs: []core.ToolDef{{Name: "search"}}}
 	got := tools.WithEnumerate(base, &fakeEnum{}, nil)
-	_, has := defByName(got.Defs(), "kb_enumerate")
-	assert.False(t, has, "kb_enumerate is not advertised without declared dimensions")
+	_, hasEnum := defByName(got.Defs(), "kb_enumerate")
+	_, hasDims := defByName(got.Defs(), "kb_dimensions")
+	assert.False(t, hasEnum, "kb_enumerate is not advertised without declared dimensions")
+	assert.False(t, hasDims, "kb_dimensions is not advertised without declared dimensions")
 	assert.Len(t, got.Defs(), 1, "base tools unchanged")
 }
 
-// With dimensions declared, kb_enumerate is advertised alongside the base tools;
-// its description names the dimensions and its schema constrains them.
+// With dimensions declared, kb_enumerate and kb_dimensions are advertised alongside
+// the base tools; kb_enumerate's description names the dimensions and its schema
+// constrains them.
 func TestWithEnumerateAdvertises(t *testing.T) {
 	base := &fakeBase{defs: []core.ToolDef{{Name: "search"}}}
 	got := tools.WithEnumerate(base, &fakeEnum{}, []string{"games", "hosts"})
 
 	defs := got.Defs()
-	require.Len(t, defs, 2, "base tool + kb_enumerate")
+	require.Len(t, defs, 3, "base tool + kb_enumerate + kb_dimensions")
 	def, has := defByName(defs, "kb_enumerate")
 	require.True(t, has)
 	assert.Contains(t, def.Description, "games")
 	assert.Contains(t, def.Description, "hosts")
 	assert.Contains(t, string(def.Schema), "games", "declared dimensions constrain the schema")
+	_, hasDims := defByName(defs, "kb_dimensions")
+	assert.True(t, hasDims, "kb_dimensions advertised alongside kb_enumerate")
 }
 
 // A kb_enumerate call routes to the store and formats the complete result as

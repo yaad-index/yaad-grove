@@ -110,7 +110,7 @@ func (l *Ladybug) exec(q string) error {
 func (l *Ladybug) ensureBaseSchema() error {
 	stmts := []string{
 		"CREATE NODE TABLE IF NOT EXISTS Doc(path STRING, title STRING, PRIMARY KEY(path));",
-		"CREATE NODE TABLE IF NOT EXISTS Value(id STRING, dim STRING, nk STRING, PRIMARY KEY(id));",
+		"CREATE NODE TABLE IF NOT EXISTS Value(id STRING, dim STRING, nk STRING, disp STRING, PRIMARY KEY(id));",
 		"CREATE NODE TABLE IF NOT EXISTS Alias(nk STRING, canon STRING, PRIMARY KEY(nk));",
 		"CREATE REL TABLE IF NOT EXISTS HAS_VALUE(FROM Doc TO Value);",
 	}

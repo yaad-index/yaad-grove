@@ -38,6 +38,8 @@ func (f *fakeStore) Enumerate(context.Context, string, string) ([]store.DocRef, 
 	return nil, store.ErrEnumerateNotImplemented
 }
 
+func (f *fakeStore) Dimensions(context.Context) (map[string][]string, error) { return nil, nil }
+
 func (f *fakeStore) Close() error { return nil }
 
 // fakeEmb yields one fixed vector per Embed and counts calls, so "did we embed the
