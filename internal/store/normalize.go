@@ -62,7 +62,8 @@ func foldDigit(r rune) rune {
 //  2. Persian letter fold — Arabic vs Persian yeh/kaf, teh-marbuta and heh variants.
 //  3. Strip joiners + diacritics — ZWNJ/ZWJ, harakat/tashkil, superscript alef, tatweel.
 //  4. Fold Arabic-Indic / Persian digits to ASCII.
-//  5. Lowercase → trim → collapse internal whitespace/hyphen runs to a single space.
+//  5. Lowercase → trim → collapse internal separator runs (whitespace, hyphens,
+//     punctuation, symbols) to a single space.
 //
 // It is deterministic key normalization, NOT fuzzy scoring. Both Store.Index (on
 // the way in) and Enumerate (on the query value) call it, so a spelling that
@@ -85,16 +86,17 @@ func normalizeKey(s string) string {
 	return collapseSeparators(strings.TrimSpace(b.String()))
 }
 
-// collapseSeparators replaces every run of whitespace or hyphens with a single
-// space, so "acme-rail", "Acme  Rail", and "Acme Rail" share one key.
-// (Leading/trailing separators are already trimmed by the caller for whitespace;
-// a stray leading/trailing hyphen is dropped here.)
+// collapseSeparators replaces every run of separators with a single space, so
+// "acme-rail", "Acme  Rail", "Acme Rail", and "Route/Network Building" vs
+// "route network building" all share one key. (Leading/trailing separators are
+// already trimmed by the caller for whitespace; a stray leading/trailing
+// separator is dropped here.)
 func collapseSeparators(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	inSep := false
 	for _, r := range s {
-		if unicode.IsSpace(r) || r == '-' {
+		if separator(r) {
 			inSep = true
 			continue
 		}
@@ -105,4 +107,16 @@ func collapseSeparators(s string) string {
 		b.WriteRune(r)
 	}
 	return b.String()
+}
+
+// separator reports whether r delimits tokens in a normalized key: whitespace,
+// or any punctuation/symbol — so "/", "(", ")", ",", ".", "&", "|", "_" and the
+// like all fold to a single space (ADR 0020). Folding punctuation to a separator
+// is symmetric (Index and Enumerate share this normalizer) and can only MERGE
+// keys that were previously distinct, never split one — so a value like
+// "Route/Network Building" becomes reachable by "route network building" without
+// any spelling drift dropping a document. Hyphen-minus is itself punctuation and
+// thus covered; it stays listed for clarity alongside the pre-ADR-0020 behavior.
+func separator(r rune) bool {
+	return unicode.IsSpace(r) || r == '-' || unicode.IsPunct(r) || unicode.IsSymbol(r)
 }

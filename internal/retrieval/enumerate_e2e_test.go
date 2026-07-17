@@ -53,6 +53,48 @@ func TestEnumerateEndToEnd(t *testing.T) {
 	assert.ElementsMatch(t, refPaths(byName), refPaths(byAlias), "the alias reaches the same entity")
 }
 
+// Faceted recall on a dimension VALUE (#135), end to end. Two resolution gaps the
+// motivating "train games / قطاری" case needs closed: (1) a cross-script value —
+// a category note carries the transliteration alias, so querying the facet in
+// Persian reaches the canonical value; (2) a punctuated value — the normalizer
+// folds "/" so "Route/Network Building" is reachable spelled plainly. Both resolve
+// to the complete set over a real on-disk vault.
+func TestEnumerateFacetedValueResolution(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	}
+	// A category note is the facet entity: canonical value + cross-script alias.
+	write("facets/trains.md", "---\ntitle: Trains\nname_fa: قطاری\n---\n# Trains\n")
+	// Games tagged with the facet value (one via a punctuated category too).
+	write("games/g1.md", "---\ntitle: G1\ncategory: [Trains]\n---\n# G1\n")
+	write("games/g2.md", "---\ntitle: G2\ncategory: [Trains, \"Route/Network Building\"]\n---\n# G2\n")
+	write("games/g3.md", "---\ntitle: G3\ncategory: [\"Route/Network Building\"]\n---\n# G3\n")
+
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"category"})
+	require.NoError(t, err)
+	mem := store.NewMemory(nil, 0)
+	require.NoError(t, mem.Index(context.Background(), docs))
+
+	// Canonical facet value → the complete set carrying it.
+	byCanon, err := mem.Enumerate(context.Background(), "category", "Trains")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"games/g1.md", "games/g2.md"}, refPaths(byCanon), "complete set for the canonical value")
+
+	// The cross-script spelling of the facet value resolves to the same set.
+	byCrossScript, err := mem.Enumerate(context.Background(), "category", "قطاری")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, refPaths(byCanon), refPaths(byCrossScript), "the Persian facet spelling reaches the canonical value")
+
+	// A punctuated value is reachable spelled without its punctuation (the fold is
+	// symmetric, so the slash form and the plain form share one key).
+	byPlain, err := mem.Enumerate(context.Background(), "category", "route network building")
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"games/g2.md", "games/g3.md"}, refPaths(byPlain), "punctuation-folded value resolves the complete set")
+}
+
 func refPaths(refs []store.DocRef) []string {
 	out := make([]string, len(refs))
 	for i, r := range refs {
