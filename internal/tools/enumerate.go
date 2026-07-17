@@ -87,6 +87,14 @@ type enumerateTool struct {
 // and the schema constrains `dimension` to them, so the model can only ask for
 // dimensions that exist.
 func (e enumerateTool) def() core.ToolDef {
+	filter := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"dimension": map[string]any{"type": "string", "enum": e.dimensions},
+			"value":     map[string]any{"type": "string"},
+		},
+		"required": []string{"dimension", "value"},
+	}
 	schema, err := json.Marshal(map[string]any{
 		"type": "object",
 		"properties": map[string]any{
@@ -99,43 +107,117 @@ func (e enumerateTool) def() core.ToolDef {
 				"type":        "string",
 				"description": "the value to match; any known spelling or alias resolves",
 			},
+			"and": map[string]any{
+				"type":        "array",
+				"items":       filter,
+				"description": "optional additional {dimension, value} filters; a document must match ALL of them plus the primary dimension/value (AND). Use for compound facets like \"train games for 2 players\".",
+			},
 		},
 		"required": []string{"dimension", "value"},
 	})
 	if err != nil {
 		schema = json.RawMessage(`{"type":"object"}`)
 	}
-	desc := "List EVERY document whose given dimension equals the given value — the complete set, not a sample or the top matches. " +
+	desc := "List EVERY document matching the given dimension/value — the complete set, not a sample or the top matches. " +
+		"Pass 'and' to require several facets at once (the intersection). " +
 		"Declared dimensions: " + strings.Join(e.dimensions, ", ") + ". " +
 		"Use this for which/what-covers/list questions; free-text questions use normal grounding instead."
 	return core.ToolDef{Name: enumerateToolName, Description: desc, Schema: schema}
 }
 
-// call runs the lookup and formats the complete result as compact refs.
+// predicate is one {dimension, value} facet filter.
+type predicate struct{ dimension, value string }
+
+// call resolves the predicate set (the primary dimension/value plus any 'and'
+// filters), intersects their complete sets, and formats the result as compact refs.
 func (e enumerateTool) call(ctx context.Context, args map[string]any) (string, error) {
-	dimension := scalarArg(args, "dimension")
-	value := scalarArg(args, "value")
-	if dimension == "" || value == "" {
-		return "", fmt.Errorf("kb_enumerate: both dimension and value are required")
-	}
-	if !contains(e.dimensions, dimension) {
-		return "", fmt.Errorf("kb_enumerate: unknown dimension %q (declared: %s)", dimension, strings.Join(e.dimensions, ", "))
-	}
-	refs, err := e.store.Enumerate(ctx, dimension, value)
+	preds, err := parsePredicates(args)
 	if err != nil {
 		return "", err
 	}
-	return formatRefs(dimension, value, refs), nil
+	for _, p := range preds {
+		if !contains(e.dimensions, p.dimension) {
+			return "", fmt.Errorf("kb_enumerate: unknown dimension %q (declared: %s)", p.dimension, strings.Join(e.dimensions, ", "))
+		}
+	}
+	refs, err := e.intersect(ctx, preds)
+	if err != nil {
+		return "", err
+	}
+	return formatRefs(preds, refs), nil
+}
+
+// parsePredicates reads the required primary {dimension, value} and any optional
+// 'and' filters, in order. The primary is first so it drives result ordering.
+func parsePredicates(args map[string]any) ([]predicate, error) {
+	dim, val := scalarArg(args, "dimension"), scalarArg(args, "value")
+	if dim == "" || val == "" {
+		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required")
+	}
+	preds := []predicate{{dim, val}}
+	raw, ok := args["and"]
+	if !ok || raw == nil {
+		return preds, nil
+	}
+	list, ok := raw.([]any)
+	if !ok {
+		return nil, fmt.Errorf("kb_enumerate: 'and' must be a list of {dimension, value} filters")
+	}
+	for _, item := range list {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("kb_enumerate: each 'and' filter must be an object with dimension and value")
+		}
+		d, v := scalarArg(m, "dimension"), scalarArg(m, "value")
+		if d == "" || v == "" {
+			return nil, fmt.Errorf("kb_enumerate: each 'and' filter needs both dimension and value")
+		}
+		preds = append(preds, predicate{d, v})
+	}
+	return preds, nil
+}
+
+// intersect enumerates each predicate's complete set and AND-joins them by document
+// path, preserving the primary predicate's order. Each leg is itself complete, so
+// the intersection is exact and deterministic (ADR 0020).
+func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]store.DocRef, error) {
+	result, err := e.store.Enumerate(ctx, preds[0].dimension, preds[0].value)
+	if err != nil {
+		return nil, err
+	}
+	for _, p := range preds[1:] {
+		if len(result) == 0 {
+			break
+		}
+		refs, err := e.store.Enumerate(ctx, p.dimension, p.value)
+		if err != nil {
+			return nil, err
+		}
+		keep := make(map[string]bool, len(refs))
+		for _, r := range refs {
+			keep[r.Path] = true
+		}
+		filtered := result[:0]
+		for _, r := range result {
+			if keep[r.Path] {
+				filtered = append(filtered, r)
+			}
+		}
+		result = filtered
+	}
+	return result, nil
 }
 
 // formatRefs renders the complete ref set as one compact line per document, so a
-// large complete set stays prompt-cheap.
-func formatRefs(dimension, value string, refs []store.DocRef) string {
+// large complete set stays prompt-cheap. The header names the predicate(s), joined
+// with AND for a compound query.
+func formatRefs(preds []predicate, refs []store.DocRef) string {
+	desc := describePredicates(preds)
 	if len(refs) == 0 {
-		return fmt.Sprintf("No documents found with %s = %q.", dimension, value)
+		return fmt.Sprintf("No documents found with %s.", desc)
 	}
 	lines := make([]string, 0, len(refs)+1)
-	lines = append(lines, fmt.Sprintf("%d document(s) with %s = %q:", len(refs), dimension, value))
+	lines = append(lines, fmt.Sprintf("%d document(s) with %s:", len(refs), desc))
 	for _, r := range refs {
 		if r.Title != "" {
 			lines = append(lines, fmt.Sprintf("- %s (%s)", r.Title, r.Path))
@@ -144,6 +226,16 @@ func formatRefs(dimension, value string, refs []store.DocRef) string {
 		}
 	}
 	return strings.Join(lines, "\n")
+}
+
+// describePredicates renders the predicate set as "dim = "val"" clauses joined by
+// AND, for the result header and the empty-set message.
+func describePredicates(preds []predicate) string {
+	parts := make([]string, len(preds))
+	for i, p := range preds {
+		parts[i] = fmt.Sprintf("%s = %q", p.dimension, p.value)
+	}
+	return strings.Join(parts, " AND ")
 }
 
 // scalarArg reads a string tool argument, trimmed; a missing or non-string arg is "".

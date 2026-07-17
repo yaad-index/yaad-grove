@@ -130,3 +130,63 @@ func TestEnumerateDelegatesToBase(t *testing.T) {
 	assert.Equal(t, "base:search", out)
 	assert.Equal(t, "search", base.called, "the base handled its own tool")
 }
+
+// kb_enumerate composes facets: the 'and' filters intersect with the primary
+// predicate, so only documents matching ALL are returned, in the primary's order
+// (ADR 0020). Uses a real memory store so the intersection is genuinely exercised.
+func TestEnumerateMultiPredicateIntersects(t *testing.T) {
+	m := store.NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), []store.Doc{
+		{Ref: store.DocRef{Path: "g1.md", Title: "G1"}, Dimensions: map[string][]string{"category": {"Trains"}, "players": {"2"}}},
+		{Ref: store.DocRef{Path: "g2.md", Title: "G2"}, Dimensions: map[string][]string{"category": {"Trains"}, "players": {"4"}}},
+		{Ref: store.DocRef{Path: "g3.md", Title: "G3"}, Dimensions: map[string][]string{"category": {"Trains"}, "players": {"2"}}},
+	}))
+	ts := tools.WithEnumerate(&fakeBase{}, m, []string{"category", "players"})
+
+	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains",
+		"and": []any{map[string]any{"dimension": "players", "value": "2"}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "2 document(s)")
+	assert.Contains(t, out, `category = "Trains" AND players = "2"`, "the compound predicate is described")
+	assert.Contains(t, out, "g1.md")
+	assert.Contains(t, out, "g3.md")
+	assert.NotContains(t, out, "g2.md", "the 4-player Trains game is excluded by the AND")
+}
+
+// An 'and' filter naming an undeclared dimension is a loud error (validated before
+// any lookup).
+func TestEnumerateMultiPredicateRejectsUnknownDim(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"category"})
+	_, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains",
+		"and": []any{map[string]any{"dimension": "players", "value": "2"}},
+	})
+	assert.ErrorContains(t, err, "unknown dimension")
+}
+
+// A malformed 'and' — not a list, or a filter missing a field — is a loud error.
+func TestEnumerateMultiPredicateRejectsMalformed(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"category", "players"})
+
+	_, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains", "and": "players:2",
+	})
+	assert.ErrorContains(t, err, "'and' must be a list")
+
+	_, err = ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains",
+		"and": []any{map[string]any{"dimension": "players"}},
+	})
+	assert.ErrorContains(t, err, "both dimension and value")
+}
+
+// The schema and description advertise the compound 'and' filter.
+func TestEnumerateAdvertisesAndFilter(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"category", "players"})
+	def, has := defByName(ts.Defs(), "kb_enumerate")
+	require.True(t, has)
+	assert.Contains(t, string(def.Schema), "and", "compound 'and' filter in schema")
+	assert.Contains(t, def.Description, "and", "description mentions compound facets")
+}
