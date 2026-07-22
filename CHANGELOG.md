@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.17.1](https://github.com/yaad-index/yaad-grove/compare/v0.17.0...v0.17.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **docker:** default WORKDIR to /data so relative-path stores are writable ([#143](https://github.com/yaad-index/yaad-grove/issues/143)) ([4fb2f6b](https://github.com/yaad-index/yaad-grove/commit/4fb2f6bd3cc6dea208bdeadb7cd488e6149429a2))
+* **model:** execute deepseek native tool calls with fenced args + doubled close ([#88](https://github.com/yaad-index/yaad-grove/issues/88)) ([#145](https://github.com/yaad-index/yaad-grove/issues/145)) ([a2739c6](https://github.com/yaad-index/yaad-grove/commit/a2739c669e0c4c7cdd9b9121a82b50e84938c8d6))
+
 ## [0.17.0](https://github.com/yaad-index/yaad-grove/compare/v0.16.1...v0.17.0) (2026-07-17)
 
 
