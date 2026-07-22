@@ -1,7 +1,6 @@
 package model
 
 import (
-	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -91,9 +90,64 @@ func TestParseNativeToolCallLoneEndSentinel(t *testing.T) {
 	assertNoSentinels(t, text)
 }
 
+// The exact deployed deepseek variant #90 missed (#88 resurfacing): a garbage
+// token glued in front of `function`, the args wrapped in a ```json fence, and
+// the block closed by BOTH the singular and plural end sentinels. #90 dropped the
+// call (fence broke the JSON parse) and leaked the plural sentinel (it wasn't in
+// the strip set); here the call must execute and nothing may leak.
+func TestParseNativeToolCallDeepseekVariant(t *testing.T) {
+	content := "غنfunction" + nativeToolSep + "get_hotness\n" +
+		"```json\n" + `{"count":50}` + "\n```" +
+		nativeToolEnd + nativeToolsEnd
+
+	text, calls := parseNativeToolCalls(content)
+
+	require.Len(t, calls, 1, "the tool call executes instead of leaking")
+	assert.Equal(t, "get_hotness", calls[0].Name)
+	assert.Equal(t, float64(50), calls[0].Arguments["count"])
+	assertNoSentinels(t, text)
+}
+
+// The same variant WITHOUT an opening fence — args and a bare closing ``` sit
+// between the name and a plural-only terminator. The streaming decoder must still
+// recover the object and ignore the trailing fence.
+func TestParseNativeToolCallBareFenceAndPluralClose(t *testing.T) {
+	content := "function" + nativeToolSep + "get_hotness\n" +
+		`{"count":50}` + "\n```" + nativeToolsEnd
+
+	_, calls := parseNativeToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "get_hotness", calls[0].Name)
+	assert.Equal(t, float64(50), calls[0].Arguments["count"])
+}
+
+// deepseek's fully-decorated form: the begin sentinels lead the fragment. They
+// must be dropped from the text and not confuse name extraction.
+func TestParseNativeToolCallBeginSentinels(t *testing.T) {
+	content := "here you go\n" + nativeCallsBegin + nativeCallBegin +
+		"function" + nativeToolSep + "search\n" + `{"q":"a"}` + nativeToolEnd + nativeToolsEnd
+
+	text, calls := parseNativeToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "search", calls[0].Name)
+	assert.Equal(t, "a", calls[0].Arguments["q"])
+	assert.Equal(t, "here you go", text, "begin sentinels dropped, preamble kept")
+	assertNoSentinels(t, text)
+}
+
+// Args on the SAME line as the name (no newline between them) still parse.
+func TestParseNativeToolCallSameLineArgs(t *testing.T) {
+	content := "function" + nativeToolSep + "search " + `{"q":"a"}` + nativeToolEnd
+	_, calls := parseNativeToolCalls(content)
+	require.Len(t, calls, 1)
+	assert.Equal(t, "search", calls[0].Name)
+	assert.Equal(t, "a", calls[0].Arguments["q"])
+}
+
 func assertNoSentinels(t *testing.T, text string) {
 	t.Helper()
-	assert.False(t, strings.Contains(text, nativeToolSep), "no <|tool_sep|> leaks")
-	assert.False(t, strings.Contains(text, nativeToolEnd), "no <|tool_call_end|> leaks")
-	assert.False(t, strings.Contains(text, nativeCallPrefix+nativeToolSep), "no function<|… leaks")
+	for _, s := range nativeSentinels {
+		assert.NotContains(t, text, s, "no native sentinel leaks")
+	}
+	assert.NotContains(t, text, nativeCallPrefix+nativeToolSep, "no function<|… leaks")
 }

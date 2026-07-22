@@ -214,6 +214,38 @@ func TestCompleteParsesNativeToolCall(t *testing.T) {
 	assert.NotContains(t, res.Text, "<|tool_call_end|>")
 }
 
+// The exact deployed 2026-07-22 leak (#88 resurfacing): garbage prefix, a ```json
+// arg fence, and a doubled <|tool_call_end|><|tool_calls_end|> close. #90 dropped
+// the call and leaked the plural sentinel; end-to-end the call must execute and
+// the reply must be sentinel-free.
+func TestCompleteParsesDeepseekNativeVariant(t *testing.T) {
+	nativeContent := "غنfunction<|tool_sep|>get_hotness\n" +
+		"```json\n" + `{"count":50}` + "\n```" +
+		"<|tool_call_end|><|tool_calls_end|>"
+	body, err := json.Marshal(map[string]any{
+		"choices": []map[string]any{
+			{"message": map[string]any{"role": "assistant", "content": nativeContent}},
+		},
+		"usage": map[string]any{"total_tokens": 9},
+	})
+	require.NoError(t, err)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write(body)
+	}))
+	defer srv.Close()
+
+	c := model.New(model.Config{BaseURL: srv.URL, APIKey: "k", Model: "deepseek"})
+	res, err := c.Complete(context.Background(), msgs("s", "u"), nil)
+	require.NoError(t, err)
+
+	require.Len(t, res.ToolCalls, 1, "get_hotness executes instead of leaking as text")
+	assert.Equal(t, "get_hotness", res.ToolCalls[0].Name)
+	assert.Equal(t, float64(50), res.ToolCalls[0].Arguments["count"])
+	assert.NotContains(t, res.Text, "<|tool_call_end|>")
+	assert.NotContains(t, res.Text, "<|tool_calls_end|>", "the plural close sentinel is scrubbed too")
+}
+
 // An assistant tool-call turn and the tool-result turn round-trip their
 // correlation ids on the wire (OpenAI rejects unmatched tool results).
 func TestCompleteRoundTripsToolMessages(t *testing.T) {
