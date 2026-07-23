@@ -2,11 +2,14 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/yaad-index/yaad-grove/internal/core"
 )
 
 // referenceServer builds an MCP server using the official SDK — the conformance
@@ -178,4 +181,35 @@ func defNames(r *Registry) []string {
 		names = append(names, d.Name)
 	}
 	return names
+}
+
+type strictArgs struct {
+	IDs []int `json:"ids"`
+}
+
+// strictServer advertises a tool whose schema requires integer ids, so the SDK
+// rejects a null/wrong-type id with a JSON-RPC invalid-params response — the
+// exact shape of the deployed get_things failure (#147).
+func strictServer() *mcp.Server {
+	s := mcp.NewServer(&mcp.Implementation{Name: "strict", Version: "v1"}, nil)
+	mcp.AddTool(s, &mcp.Tool{Name: "get_things", Description: "fetch by integer ids"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ strictArgs) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "ok"}}}, nil, nil
+		})
+	return s
+}
+
+// A call the server REJECTS via schema validation (JSON-RPC invalid params) is
+// something the model can retry with valid args — it must surface as an ordinary
+// error that feeds back, NOT ErrToolUnavailable (which aborts the whole turn).
+// Regression for #147: a null id where an integer is required dead-ended the turn.
+func TestCallInvalidArgsFeedsBackNotUnavailable(t *testing.T) {
+	r := New(nil)
+	connectTo(t, r, strictServer())
+
+	_, err := r.Call(context.Background(), "get_things", map[string]any{"ids": []any{nil}})
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, core.ErrToolUnavailable),
+		"a rejected call (invalid params) feeds back to the model, it does not abort the turn")
+	assert.Contains(t, err.Error(), "get_things")
 }
