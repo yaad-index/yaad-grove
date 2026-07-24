@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.17.2](https://github.com/yaad-index/yaad-grove/compare/v0.17.1...v0.17.2) (2026-07-23)
+
+
+### Bug Fixes
+
+* **tools:** feed a rejected tool call back to the model instead of aborting the turn ([#147](https://github.com/yaad-index/yaad-grove/issues/147)) ([#148](https://github.com/yaad-index/yaad-grove/issues/148)) ([1965e7e](https://github.com/yaad-index/yaad-grove/commit/1965e7e7181913fe7ed606673ddfad34b3659e60))
+
 ## [0.17.1](https://github.com/yaad-index/yaad-grove/compare/v0.17.0...v0.17.1) (2026-07-22)
 
 

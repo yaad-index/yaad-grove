@@ -14,6 +14,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os/exec"
@@ -21,6 +22,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/modelcontextprotocol/go-sdk/jsonrpc"
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
@@ -220,6 +222,15 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 	}
 	res, err := ref.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
+		// A JSON-RPC error *response* (invalid params, method-not-found, a
+		// tool-internal error) means the session is alive and rejected the call —
+		// something the model can reason around, so feed it back as an ordinary
+		// error, don't abort. Only a genuine transport failure (no response: dead
+		// session, broken pipe, ctx error) is ErrToolUnavailable.
+		var rpcErr *jsonrpc.Error
+		if errors.As(err, &rpcErr) {
+			return "", fmt.Errorf("tools: call %q rejected: %w", name, err)
+		}
 		return "", fmt.Errorf("tools: call %q: %w: %w", name, core.ErrToolUnavailable, err)
 	}
 	text := flattenContent(res.Content)
