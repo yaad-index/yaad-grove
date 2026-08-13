@@ -4,7 +4,7 @@ go 1.26
 
 require (
 	github.com/LadybugDB/go-ladybug v0.17.0
-	github.com/alecthomas/kong v1.16.0
+	github.com/alecthomas/kong v1.16.1
 	github.com/alecthomas/kong-yaml v0.2.0
 	github.com/go-telegram/bot v1.23.0
 	github.com/modelcontextprotocol/go-sdk v1.7.0
