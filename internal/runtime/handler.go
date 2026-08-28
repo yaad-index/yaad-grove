@@ -314,7 +314,7 @@ func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Reg
 	case pending.Resolved:
 		return executeAction(ctx, registry, authz, in.User, action, strs)
 	case pending.Consumed:
-		return core.Reply{Notice: strs.Get(StrCallbackConsumed)}
+		return core.Reply{Notice: strs.Get(StrCallbackConsumed), Text: strs.Get(StrCallbackConsumedEdit)}
 	case pending.Expired:
 		return core.Reply{Notice: strs.Get(StrCallbackExpired), Text: strs.Get(StrCallbackExpiredEdit)}
 	default:
