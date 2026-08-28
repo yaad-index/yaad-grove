@@ -28,6 +28,10 @@ strings:
   at_capacity: "I'm at capacity right now — please try again a little later."
   callback_done: "Done ✓"
   callback_expired: "This action has expired."
+  # Edited into the message body when a dead button is tapped, so the stale
+  # button/keyboard is replaced rather than left on screen; names how to get a
+  # fresh one (any command that offered the button re-issues it).
+  callback_expired_edit: "This button has expired. Send the command again to get a fresh one."
   callback_consumed: "Already completed."
   callback_error: "Something went wrong — please try again."
   callback_denied: "You don't have permission to do that."

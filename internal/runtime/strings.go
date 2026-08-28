@@ -24,6 +24,7 @@ const (
 	StrAtCapacity             = "at_capacity"
 	StrCallbackDone           = "callback_done"
 	StrCallbackExpired        = "callback_expired"
+	StrCallbackExpiredEdit    = "callback_expired_edit"
 	StrCallbackConsumed       = "callback_consumed"
 	StrCallbackError          = "callback_error"
 	StrCallbackDenied         = "callback_denied"
@@ -37,7 +38,7 @@ var stringKeys = []string{
 	StrConsentDisclosureIntro, StrConsentTranscriptLine, StrConsentDisclosureTap,
 	StrConsentGranted, StrConsentAlready, StrConsentRemoved, StrConsentError, StrConsentOptInLabel,
 	StrNudge, StrRefuse, StrRateLimited, StrAtCapacity,
-	StrCallbackDone, StrCallbackExpired, StrCallbackConsumed, StrCallbackError,
+	StrCallbackDone, StrCallbackExpired, StrCallbackExpiredEdit, StrCallbackConsumed, StrCallbackError,
 	StrCallbackDenied, StrCallbackUnknownVerb, StrCallbackInvalid, StrCallbackFailed,
 }
 
