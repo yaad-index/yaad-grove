@@ -33,6 +33,11 @@ strings:
   # fresh one (any command that offered the button re-issues it).
   callback_expired_edit: "This button has expired. Send the command again to get a fresh one."
   callback_consumed: "Already completed."
+  # Deliberately NOT the same as callback_expired_edit: a consumed button's action
+  # already succeeded, so the body says it is done — telling the user to get a
+  # fresh button (the expired copy) would be wrong here. Different fact, different
+  # implied action; keep them distinct even though both retire a dead button.
+  callback_consumed_edit: "This button was already used — that action is already done."
   callback_error: "Something went wrong — please try again."
   callback_denied: "You don't have permission to do that."
   callback_unknown_verb: "That action is no longer available."

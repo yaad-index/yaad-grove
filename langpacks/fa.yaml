@@ -31,6 +31,7 @@ strings:
   callback_expired: "این کنش منقضی شده است."
   callback_expired_edit: "این دکمه منقضی شده است. برای گرفتن دکمه‌ی تازه، دوباره همان دستور را بفرستید."
   callback_consumed: "این کنش پیش‌تر انجام شده است."
+  callback_consumed_edit: "این دکمه پیش‌تر استفاده شده — آن کار همان زمان انجام شد."
   callback_error: "مشکلی پیش آمد — لطفاً دوباره تلاش کنید."
   callback_denied: "شما اجازه‌ی این کار را ندارید."
   callback_unknown_verb: "این کنش دیگر در دسترس نیست."
