@@ -659,6 +659,7 @@ func TestHandlerCallbackExecutorError(t *testing.T) {
 	reply, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 	assert.Equal(t, "That didn't go through — please try again.", reply.Notice)
+	assert.Empty(t, reply.Text, "the failed/executor-error branch stays toast-only, never editing the message")
 	assert.Equal(t, 1, spy.execCalls)
 
 	// The token was consumed on this resolve; a second click reports so.
