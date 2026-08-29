@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.17.3](https://github.com/yaad-index/yaad-grove/compare/v0.17.2...v0.17.3) (2026-08-28)
+
+
+### Bug Fixes
+
+* edit the message when a dead callback button is tapped ([#163](https://github.com/yaad-index/yaad-grove/issues/163)) ([d0e2e44](https://github.com/yaad-index/yaad-grove/commit/d0e2e445a31066324b9b0aef9c4cf459e4bcf0e8)), closes [#162](https://github.com/yaad-index/yaad-grove/issues/162)
+* edit the message when an already-used callback button is tapped ([#165](https://github.com/yaad-index/yaad-grove/issues/165)) ([6be1225](https://github.com/yaad-index/yaad-grove/commit/6be1225db4bd619fa4cfed8bc2ce60904597c22d)), closes [#164](https://github.com/yaad-index/yaad-grove/issues/164)
+* make command tokens non-clickable in consent copy ([#159](https://github.com/yaad-index/yaad-grove/issues/159)) ([8cbcb5a](https://github.com/yaad-index/yaad-grove/commit/8cbcb5a1c40e3c682a2ef5e2467fe952277b7ba0)), closes [#158](https://github.com/yaad-index/yaad-grove/issues/158)
+
 ## [0.17.2](https://github.com/yaad-index/yaad-grove/compare/v0.17.1...v0.17.2) (2026-07-23)
 
 
