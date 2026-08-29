@@ -302,7 +302,7 @@ func surfaceLabel(s core.Surface) string {
 // expired vs already-completed distinctly; every path toasts, none is silent.
 func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Registry, authz authorizer, in transport.Inbound, strs Strings) core.Reply {
 	if callbacks == nil {
-		return core.Reply{Notice: strs.Get(StrCallbackExpired)}
+		return core.Reply{Notice: strs.Get(StrCallbackExpired), Text: strs.Get(StrCallbackExpiredEdit)}
 	}
 	action, status, err := callbacks.Resolve(ctx, in.Callback.Token)
 	if err != nil {
@@ -314,9 +314,9 @@ func resolveCallback(ctx context.Context, callbacks pending.Store, registry *Reg
 	case pending.Resolved:
 		return executeAction(ctx, registry, authz, in.User, action, strs)
 	case pending.Consumed:
-		return core.Reply{Notice: strs.Get(StrCallbackConsumed)}
+		return core.Reply{Notice: strs.Get(StrCallbackConsumed), Text: strs.Get(StrCallbackConsumedEdit)}
 	case pending.Expired:
-		return core.Reply{Notice: strs.Get(StrCallbackExpired)}
+		return core.Reply{Notice: strs.Get(StrCallbackExpired), Text: strs.Get(StrCallbackExpiredEdit)}
 	default:
 		return core.Reply{Notice: strs.Get(StrCallbackError)}
 	}

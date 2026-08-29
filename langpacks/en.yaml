@@ -16,19 +16,28 @@ strings:
     • In the group, I'll answer you when you reply to me or @mention me.
     • Your group messages are added to the community knowledge base I answer from.
   consent_transcript_line: "\n• Your messages are also kept in a lasting conversation record. Withdrawing stops new entries, but earlier ones stay."
-  consent_disclosure_tap: "\nTap the button below (or send /consent) to opt in. You can withdraw anytime with /consent remove."
-  consent_granted: "You're opted in — thanks. You can withdraw anytime with /consent remove."
-  consent_already: "You're already opted in. Send /consent remove to withdraw."
-  consent_removed: "You're opted out — I no longer log your messages or answer you. Send /consent to opt back in anytime."
+  consent_disclosure_tap: "\nTap the button below (or send `/consent`) to opt in. You can withdraw anytime with `/consent remove`."
+  consent_granted: "You're opted in — thanks. You can withdraw anytime with `/consent remove`."
+  consent_already: "You're already opted in. Send `/consent remove` to withdraw."
+  consent_removed: "You're opted out — I no longer log your messages or answer you. Send `/consent` to opt back in anytime."
   consent_error: "Something went wrong — please try again."
   consent_opt_in_label: "Opt in"
-  nudge: "To chat with me here, opt in first: DM me and tap the opt-in button (or send /consent)."
+  nudge: "To chat with me here, opt in first: DM me and tap the opt-in button (or send `/consent`)."
   refuse: "Sorry, I can't help with that here."
   rate_limited: "You've hit the rate limit — please try again shortly."
   at_capacity: "I'm at capacity right now — please try again a little later."
   callback_done: "Done ✓"
   callback_expired: "This action has expired."
+  # Edited into the message body when a dead button is tapped, so the stale
+  # button/keyboard is replaced rather than left on screen; names how to get a
+  # fresh one (any command that offered the button re-issues it).
+  callback_expired_edit: "This button has expired. Send the command again to get a fresh one."
   callback_consumed: "Already completed."
+  # Deliberately NOT the same as callback_expired_edit: a consumed button's action
+  # already succeeded, so the body says it is done — telling the user to get a
+  # fresh button (the expired copy) would be wrong here. Different fact, different
+  # implied action; keep them distinct even though both retire a dead button.
+  callback_consumed_edit: "This button was already used — that action is already done."
   callback_error: "Something went wrong — please try again."
   callback_denied: "You don't have permission to do that."
   callback_unknown_verb: "That action is no longer available."

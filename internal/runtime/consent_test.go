@@ -86,7 +86,7 @@ func TestDMConsentDisclosureTranscriptLine(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, reply.Text, "lasting conversation record", "discloses the durable record")
 	assert.Contains(t, reply.Text, "earlier ones stay", "discloses prospective withdrawal")
-	assert.True(t, strings.HasSuffix(strings.TrimSpace(reply.Text), "/consent remove."), "tap instruction stays last")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(reply.Text), "`/consent remove`."), "tap instruction stays last")
 	require.Len(t, reply.Actions, 1)
 }
 
@@ -128,7 +128,7 @@ func TestDMConsentSelfRemove(t *testing.T) {
 	reply, err := consentHandler(consent)(context.Background(), dmInbound("/consent remove"))
 	require.NoError(t, err)
 	assert.Contains(t, reply.Text, "opted out")
-	assert.Contains(t, reply.Text, "/consent to opt back in")
+	assert.Contains(t, reply.Text, "`/consent` to opt back in")
 	assert.Equal(t, acl.ConsentUnknown, consent.consent, "consent is withdrawn to unknown")
 }
 
