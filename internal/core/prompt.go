@@ -4,6 +4,7 @@ import (
 	"log/slog"
 	"strings"
 	"text/template"
+	"unicode/utf8"
 )
 
 // defaultPromptText is the grounding prompt as an operator-editable template (ADR
@@ -148,6 +149,39 @@ func contextBlock(chunks []Chunk) string {
 		b.WriteString("\n</doc>\n")
 	}
 	return b.String()
+}
+
+// approxTokens is a cheap, tokenizer-free size estimate — roughly four characters
+// per token. ADR 0021 (Part B) explicitly accepts an approximation here: the
+// context-size guard is a safety margin, not a billing count, so a heuristic is
+// enough. It counts runes, not bytes, so a multi-byte script (e.g. Persian) is not
+// over-counted by its UTF-8 width.
+func approxTokens(s string) int {
+	return (utf8.RuneCountInString(s) + 3) / 4
+}
+
+// capContext bounds the assembled CONTEXT to maxTokens approximate tokens (ADR 0021
+// Part B, invariant #2 — a hard bound with no carve-out). Chunks arrive already
+// sorted by fused retrieval score, so the tail is the lowest-scored material: the
+// guard returns the longest score-ordered prefix whose rendered block fits —
+// dropping whole chunks from the tail, never a separate drop-by-score pass and never
+// a mid-chunk truncation. maxTokens <= 0 is a no-op (no cap): the knob's
+// requiredness is enforced at startup by the CLI, not here, so in-process callers and
+// tests without a cap are unaffected. If even the single top-scored chunk exceeds the
+// cap, nothing fits and the guard returns an empty set — the cap stays inviolable
+// (a chunk larger than the cap means the cap is set too small for the vault's
+// heading-sized chunks, a config error), and the caller's empty-retrieval refusal
+// path handles it. The caller warns on the empty-by-cap case so it is diagnosable.
+func capContext(chunks []Chunk, maxTokens int) []Chunk {
+	if maxTokens <= 0 || len(chunks) == 0 {
+		return chunks
+	}
+	for k := len(chunks); k >= 1; k-- {
+		if approxTokens(contextBlock(chunks[:k])) <= maxTokens {
+			return chunks[:k]
+		}
+	}
+	return nil
 }
 
 // groundedSystemPrompt renders the DEFAULT prompt — the byte-for-byte reference

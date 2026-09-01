@@ -260,6 +260,10 @@ type Engine struct {
 	// Empty = the base language, which adds nothing — the engine knows no specific
 	// language, it just injects whatever the pack provides.
 	language string
+	// contextTokens is the hard cap on the assembled CONTEXT, in approximate tokens
+	// (ADR 0021 Part B). Zero means no cap — the knob's requiredness is enforced at
+	// startup by the CLI, so an in-process engine built without it behaves as before.
+	contextTokens int
 }
 
 // Option configures an Engine at construction. Options keep New's required
@@ -285,6 +289,14 @@ func WithPromptTemplate(t *template.Template) Option {
 // as before.
 func WithLanguage(prompt string) Option {
 	return func(e *Engine) { e.language = prompt }
+}
+
+// WithContextTokens sets the hard cap on the assembled CONTEXT, in approximate
+// tokens (ADR 0021 Part B). Zero or negative is a no-op (no cap): the requiredness
+// is enforced at startup by the CLI, not here, so existing callers and tests that
+// build an engine without a cap keep working.
+func WithContextTokens(n int) Option {
+	return func(e *Engine) { e.contextTokens = n }
 }
 
 // New wires an engine from its collaborators. All are interfaces so the core
@@ -362,6 +374,25 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	if err != nil {
 		return Reply{}, err
 	}
+	// Hard context-size guard (ADR 0021 Part B): chunks arrive score-sorted, so cap
+	// the assembled CONTEXT by dropping whole chunks from the lowest-scored tail
+	// until the rendered block fits the configured token budget — never mid-chunk.
+	// The guard runs before the grounding trace and the empty-retrieval short-circuit
+	// so both reflect the chunks that actually ground the answer.
+	kept := capContext(chunks, e.contextTokens)
+	switch {
+	case len(chunks) > 0 && len(kept) == 0:
+		// The cap emptied a non-empty retrieval: even the top-scored chunk alone
+		// exceeds it. Warn so this is distinguishable from a genuinely empty
+		// retrieval — otherwise a too-small cap looks identical to "no relevant
+		// chunks" and is undiagnosable. The query falls through to the refusal path.
+		slog.Warn("context-size guard dropped every retrieved chunk: the top-scored chunk alone exceeds the cap — it is likely set too small for this vault's chunk sizes",
+			"cap_tokens", e.contextTokens, "retrieved", len(chunks))
+	case len(kept) < len(chunks):
+		slog.Info("context-size guard trimmed low-scored chunks",
+			"cap_tokens", e.contextTokens, "kept", len(kept), "dropped", len(chunks)-len(kept))
+	}
+	chunks = kept
 	// Server-side grounding trace (ADR 0008): the source tags never reach the user
 	// (they are internal, un-openable paths), so the sources that grounded an
 	// answer are recorded here instead — model-independent, straight from the

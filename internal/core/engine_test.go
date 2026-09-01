@@ -80,6 +80,28 @@ func TestSourcesNotSurfaced(t *testing.T) {
 	assert.Contains(t, sys, `<doc id="faq.md">`, "the chunk is wrapped in a structural block, not a [source] marker")
 }
 
+// The context-size cap is a hard bound (ADR 0021 Part B, invariant #2): a cap
+// smaller than the only retrieved chunk empties the CONTEXT and the query falls
+// through to the existing refusal path — a too-small cap surfaces, not silently
+// unbounded, and the model is never asked to answer on dropped grounding.
+func TestContextCapEmptiesToRefusal(t *testing.T) {
+	big := core.Chunk{Source: "a.md", Text: strings.Repeat("fact ", 500)}
+	ret := mockRetriever{chunks: []core.Chunk{big}}
+	mdl := textModel("must not be used")
+	e := core.New(mdl, ret, nopTools{}, "SCOPE", core.WithContextTokens(5))
+	reply, err := e.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.True(t, reply.Refused, "a cap smaller than the only chunk drops it and refuses")
+
+	// The same retrieval with a generous cap answers normally (the cap, not the
+	// retrieval, is what emptied it above).
+	mdl2 := textModel("ok")
+	e2 := core.New(mdl2, ret, nopTools{}, "SCOPE", core.WithContextTokens(100000))
+	reply2, err := e2.Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.False(t, reply2.Refused, "a generous cap keeps the chunk and answers")
+}
+
 // The language pack's guidance (ADR 0018) is injected into the system prompt when
 // set via WithLanguage, and absent otherwise.
 func TestLanguageInjected(t *testing.T) {
