@@ -18,6 +18,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
+	"github.com/yaad-index/yaad-grove/langpacks"
 )
 
 // transcriptMsg is a directed group message with the id/threading fields the
@@ -624,6 +625,7 @@ func TestHandlerCallbackDenials(t *testing.T) {
 			require.NoError(t, err)
 
 			assert.Equal(t, tc.wantNotice, reply.Notice)
+			assert.Empty(t, reply.Text, "a denial stays toast-only: it must never edit the (possibly shared) message")
 			assert.Equal(t, 0, spy.execCalls, "the executor is never reached on a denial")
 			assert.Equal(t, tc.wantAuthz, authz.called, "authorize is consulted only after a known verb")
 		})
@@ -657,6 +659,7 @@ func TestHandlerCallbackExecutorError(t *testing.T) {
 	reply, err := h(context.Background(), callbackInbound(token))
 	require.NoError(t, err)
 	assert.Equal(t, "That didn't go through — please try again.", reply.Notice)
+	assert.Empty(t, reply.Text, "the failed/executor-error branch stays toast-only, never editing the message")
 	assert.Equal(t, 1, spy.execCalls)
 
 	// The token was consumed on this resolve; a second click reports so.
@@ -688,6 +691,70 @@ func TestHandlerCallbackNonResolved(t *testing.T) {
 	assert.Equal(t, "Already completed.", reply.Notice)
 
 	assert.Equal(t, 1, spy.execCalls, "only the single fresh resolve executed")
+}
+
+// A dead button does more than toast: it returns a non-empty Text so the
+// transport edits the message body and drops the stale keyboard, instead of
+// leaving the expired button on screen (#162). Both expired paths — the no-store
+// guard and a token that never resolves — carry the edit text, and it names how
+// to get a fresh button rather than only reporting the expiry. The defect was an
+// empty Text flowing into the transport's "edit only when Text is non-empty"
+// guard, so the assertion pins Text non-empty at the source.
+func TestHandlerExpiredCallbackCarriesEditText(t *testing.T) {
+	enPack, err := langpacks.Load("en", "")
+	require.NoError(t, err)
+	wantEdit := enPack.Strings[runtime.StrCallbackExpiredEdit]
+	require.NotEmpty(t, wantEdit, "en pack defines the expired-edit body")
+
+	reg := registryWith("act", (&spyVerb{}).verb(acl.TierAdmin))
+	authz := &mockAuthz{authorized: true}
+
+	cases := []struct {
+		name  string
+		store pending.Store
+	}{
+		{"no-store", nil}, // callbacks == nil branch
+		{"dead-token", pending.NewMemoryStore(testTTL)}, // unknown token -> pending.Expired
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := runtime.NewHandler(&mockGate{}, &mockEngine{}, tc.store, reg, authz, nil, nil, runtime.Policy{})
+			reply, err := h(context.Background(), callbackInbound("never-minted"))
+			require.NoError(t, err)
+			assert.Equal(t, "This action has expired.", reply.Notice, "the transient toast still reports expiry")
+			assert.Equal(t, wantEdit, reply.Text, "a non-empty edit body replaces the dead button and its keyboard")
+		})
+	}
+}
+
+// A consumed button (its action already ran) also edits the message and drops
+// the stale keyboard (#164, the Consumed sibling of #162). Its edit body is
+// deliberately distinct from the expired one: the action is already done, so it
+// must NOT tell the user to get a fresh button. The denial paths stay toast-only
+// and are covered by TestHandlerCallbackDenials — they must never gain a Text.
+func TestHandlerConsumedCallbackCarriesEditText(t *testing.T) {
+	enPack, err := langpacks.Load("en", "")
+	require.NoError(t, err)
+	wantEdit := enPack.Strings[runtime.StrCallbackConsumedEdit]
+	require.NotEmpty(t, wantEdit, "en pack defines the consumed-edit body")
+	require.NotEqual(t, enPack.Strings[runtime.StrCallbackExpiredEdit], wantEdit,
+		"consumed and expired edit copy must stay distinct facts")
+
+	store := pending.NewMemoryStore(testTTL)
+	token := putToken(t, store, core.Action{Verb: "act"})
+	reg := registryWith("act", (&spyVerb{}).verb(acl.TierAdmin))
+	h := runtime.NewHandler(&mockGate{}, &mockEngine{}, store, reg, &mockAuthz{authorized: true}, nil, nil, runtime.Policy{})
+
+	// First tap resolves and consumes the token.
+	_, err = h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
+
+	// Second tap finds it consumed: toast reports so, and a non-empty edit body
+	// retires the dead button.
+	reply, err := h(context.Background(), callbackInbound(token))
+	require.NoError(t, err)
+	assert.Equal(t, "Already completed.", reply.Notice, "the transient toast still reports it was already done")
+	assert.Equal(t, wantEdit, reply.Text, "a non-empty edit body replaces the dead button and its keyboard")
 }
 
 // The load-bearing rule end to end over a real acl gate: a tier demotion between
