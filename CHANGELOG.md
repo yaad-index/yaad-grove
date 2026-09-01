@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.18.0](https://github.com/yaad-index/yaad-grove/compare/v0.17.3...v0.18.0) (2026-09-01)
+
+
+### Features
+
+* required context-size guard with tail-trim (ADR 0021 Part B) ([#173](https://github.com/yaad-index/yaad-grove/issues/173)) ([3dde646](https://github.com/yaad-index/yaad-grove/commit/3dde646361da275591c35942347b676c8cf3610b))
+* structural &lt;doc&gt; context blocks (ADR 0021 Part A) ([#170](https://github.com/yaad-index/yaad-grove/issues/170)) ([c2f393d](https://github.com/yaad-index/yaad-grove/commit/c2f393d02f906c14917644126a52dcb49a2697d8))
+
 ## [0.17.3](https://github.com/yaad-index/yaad-grove/compare/v0.17.2...v0.17.3) (2026-08-28)
 
 
