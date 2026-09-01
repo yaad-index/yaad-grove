@@ -190,34 +190,22 @@ func TestCapContext(t *testing.T) {
 	require.Less(t, one, two)
 	require.Less(t, two, full)
 
-	// No cap (<= 0) is a no-op: every chunk is kept, no overflow.
-	kept, overflow := capContext(chunks, 0)
-	assert.Equal(t, chunks, kept)
-	assert.False(t, overflow)
+	// No cap (<= 0) is a no-op: every chunk is kept.
+	assert.Equal(t, chunks, capContext(chunks, 0))
 
 	// A cap at/above the full size keeps everything.
-	kept, overflow = capContext(chunks, full)
-	assert.Len(t, kept, 3)
-	assert.False(t, overflow)
+	assert.Len(t, capContext(chunks, full), 3)
 
 	// Just under full → the lowest-scored tail chunk (c.md) is dropped, whole.
-	kept, overflow = capContext(chunks, full-1)
-	assert.Equal(t, chunks[:2], kept, "score-ordered prefix kept, tail dropped whole")
-	assert.False(t, overflow)
+	assert.Equal(t, chunks[:2], capContext(chunks, full-1), "score-ordered prefix kept, tail dropped whole")
 
 	// Under the two-chunk size → down to the single top chunk.
-	kept, overflow = capContext(chunks, two-1)
-	assert.Equal(t, chunks[:1], kept)
-	assert.False(t, overflow)
+	assert.Equal(t, chunks[:1], capContext(chunks, two-1))
 
-	// Even the top chunk alone exceeds the cap → it is kept whole (grounding over a
-	// hard bound for the one best chunk) and overflow is reported.
-	kept, overflow = capContext(chunks, one-1)
-	assert.Equal(t, chunks[:1], kept, "never returns empty / never truncates mid-chunk")
-	assert.True(t, overflow)
+	// Even the top chunk alone exceeds the cap → nothing fits, empty set (invariant
+	// #2 is a hard bound; the caller's refusal path handles the empty CONTEXT).
+	assert.Empty(t, capContext(chunks, one-1), "cap stays inviolable; no partial or mid-chunk keep")
 
-	// Empty retrieval is a no-op, no overflow.
-	kept, overflow = capContext(nil, 8000)
-	assert.Empty(t, kept)
-	assert.False(t, overflow)
+	// Empty retrieval is a no-op.
+	assert.Empty(t, capContext(nil, 8000))
 }

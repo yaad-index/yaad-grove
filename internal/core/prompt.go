@@ -161,25 +161,27 @@ func approxTokens(s string) int {
 }
 
 // capContext bounds the assembled CONTEXT to maxTokens approximate tokens (ADR 0021
-// Part B). Chunks arrive already sorted by fused retrieval score, so the tail is the
-// lowest-scored material: the guard simply returns the longest score-ordered prefix
-// whose rendered block fits — dropping whole chunks from the tail, never a separate
-// drop-by-score pass and never a mid-chunk truncation. maxTokens <= 0 is a no-op
-// (no cap): the knob's requiredness is enforced at startup by the CLI, not here, so
-// in-process callers and tests without a cap are unaffected. If even the single
-// top-scored chunk exceeds the cap it is kept whole — grounding for the one best
-// chunk is preserved over a hard bound — and overflow reports it so the caller can
-// warn that the cap may be set too small for the model.
-func capContext(chunks []Chunk, maxTokens int) (kept []Chunk, overflow bool) {
+// Part B, invariant #2 — a hard bound with no carve-out). Chunks arrive already
+// sorted by fused retrieval score, so the tail is the lowest-scored material: the
+// guard returns the longest score-ordered prefix whose rendered block fits —
+// dropping whole chunks from the tail, never a separate drop-by-score pass and never
+// a mid-chunk truncation. maxTokens <= 0 is a no-op (no cap): the knob's
+// requiredness is enforced at startup by the CLI, not here, so in-process callers and
+// tests without a cap are unaffected. If even the single top-scored chunk exceeds the
+// cap, nothing fits and the guard returns an empty set — the cap stays inviolable
+// (a chunk larger than the cap means the cap is set too small for the vault's
+// heading-sized chunks, a config error), and the caller's empty-retrieval refusal
+// path handles it. The caller warns on the empty-by-cap case so it is diagnosable.
+func capContext(chunks []Chunk, maxTokens int) []Chunk {
 	if maxTokens <= 0 || len(chunks) == 0 {
-		return chunks, false
+		return chunks
 	}
 	for k := len(chunks); k >= 1; k-- {
 		if approxTokens(contextBlock(chunks[:k])) <= maxTokens {
-			return chunks[:k], false
+			return chunks[:k]
 		}
 	}
-	return chunks[:1], true
+	return nil
 }
 
 // groundedSystemPrompt renders the DEFAULT prompt — the byte-for-byte reference

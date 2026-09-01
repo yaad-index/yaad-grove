@@ -379,14 +379,18 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	// until the rendered block fits the configured token budget — never mid-chunk.
 	// The guard runs before the grounding trace and the empty-retrieval short-circuit
 	// so both reflect the chunks that actually ground the answer.
-	kept, overflow := capContext(chunks, e.contextTokens)
-	if len(kept) < len(chunks) {
+	kept := capContext(chunks, e.contextTokens)
+	switch {
+	case len(chunks) > 0 && len(kept) == 0:
+		// The cap emptied a non-empty retrieval: even the top-scored chunk alone
+		// exceeds it. Warn so this is distinguishable from a genuinely empty
+		// retrieval — otherwise a too-small cap looks identical to "no relevant
+		// chunks" and is undiagnosable. The query falls through to the refusal path.
+		slog.Warn("context-size guard dropped every retrieved chunk: the top-scored chunk alone exceeds the cap — it is likely set too small for this vault's chunk sizes",
+			"cap_tokens", e.contextTokens, "retrieved", len(chunks))
+	case len(kept) < len(chunks):
 		slog.Info("context-size guard trimmed low-scored chunks",
 			"cap_tokens", e.contextTokens, "kept", len(kept), "dropped", len(chunks)-len(kept))
-	}
-	if overflow {
-		slog.Warn("context-size guard: the top-scored chunk alone exceeds the cap; keeping it whole (never mid-chunk) — the cap may be too small for this model",
-			"cap_tokens", e.contextTokens)
 	}
 	chunks = kept
 	// Server-side grounding trace (ADR 0008): the source tags never reach the user
