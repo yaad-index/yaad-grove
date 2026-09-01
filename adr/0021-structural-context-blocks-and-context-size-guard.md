@@ -37,7 +37,7 @@ One config knob: a maximum size for the assembled CONTEXT, next to `--similarity
 - **Why the tail is enough:** retrieval already sorts chunks by fused score (`internal/retrieval/planner.go`), so the tail *is* the lowest-scored material. No separate drop-by-score pass, no re-ranking. Drop whole chunks, never truncate mid-chunk.
 - **Unit: approximate tokens.** The thing being stayed under is a token window, so count in tokens — but an approximate count (a cheap heuristic, not a real tokenizer) is sufficient: this is a safety margin, not billing. Characters were considered and rejected only because the number is less legible against a model's token limit.
 - **Why configure at all instead of relying on the provider's limit:** to sit *deliberately under* it. At the API ceiling providers truncate silently and unpredictably, and you pay for the bloat either way; a conservative local cap keeps latency and cost bounded and the truncation decision ours.
-- **Default: a conservative ceiling**, overridable per deploy (spirit of `spend-ceiling`'s default). A one-line log when chunks are dropped is nice-to-have, not required.
+- **No default — the knob is required.** An unset context-size is **startup-fatal**, like an unreadable prompt template (ADR 0016): the cap depends on the chosen model's window, so it must be set deliberately alongside the model rather than inheriting a number that is wrong for that model. This makes the model+size a single deliberate choice at deploy time. A one-line log when chunks are dropped is nice-to-have, not required.
 
 ## Invariant (acceptance test)
 
@@ -63,4 +63,4 @@ One config knob: a maximum size for the assembled CONTEXT, next to `--similarity
 
 ## Open for maintainer
 
-- **The ceiling default value.** Unit is settled (approximate tokens); the default number wants the maintainer's call against the deploy's model window and cost target.
+- **Resolved:** no default. Unit is approximate tokens; the value is a required per-deploy config, chosen with the model. Sizing guidance for the operator: a small retrieval budget well under the smallest model's window, not a fraction of a large one — retrieval quality degrades and cost climbs as the block grows, so a few thousand tokens is typical, not tens of thousands.
