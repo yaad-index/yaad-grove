@@ -30,19 +30,19 @@ Because the marker is no longer citation-shaped, the grounding prompt's "use the
 
 This mirrors how a well-built agent harness feeds tool results and retrieved documents: as typed, clearly-delimited blocks the model reads as data, not as prose it authored.
 
-**B. A hard, configurable context-size guard.**
+**B. A hard, configurable context-size guard — deliberately minimal.**
 
-Add a configurable maximum on the assembled CONTEXT, enforced deterministically at render time.
+One config knob: a maximum size for the assembled CONTEXT, next to `--similarity-threshold` / `--memory-inject`. If the rendered block exceeds it, **drop chunks from the tail until it fits**. That is the whole guard.
 
-- **Unit: tokens**, not characters. It matches the existing spend meter and the real model limit. (An approximate tokenizer is acceptable for the guard; the guard is a safety bound, not billing.)
-- **Overflow behaviour: drop lowest-fused-score chunks first**, never truncate mid-chunk. Retrieval already ranks chunks by fused score (`internal/retrieval/planner.go`); the guard drops from the bottom until the assembled block fits. A half-a-document chunk is worse than one fewer document.
-- **Observability: the drop is logged**, never silent — a `slog` line naming how many chunks and roughly how many tokens were dropped, alongside the existing `grounding sources` trace. A silent truncation reads as "the model had everything" when it did not.
-- **Default: a conservative token ceiling** that is safe out of the box (in the spirit of `spend-ceiling`'s conservative default), overridable per deploy via a new knob next to `--similarity-threshold` / `--memory-inject`.
+- **Why the tail is enough:** retrieval already sorts chunks by fused score (`internal/retrieval/planner.go`), so the tail *is* the lowest-scored material. No separate drop-by-score pass, no re-ranking. Drop whole chunks, never truncate mid-chunk.
+- **Unit: approximate tokens.** The thing being stayed under is a token window, so count in tokens — but an approximate count (a cheap heuristic, not a real tokenizer) is sufficient: this is a safety margin, not billing. Characters were considered and rejected only because the number is less legible against a model's token limit.
+- **Why configure at all instead of relying on the provider's limit:** to sit *deliberately under* it. At the API ceiling providers truncate silently and unpredictably, and you pay for the bloat either way; a conservative local cap keeps latency and cost bounded and the truncation decision ours.
+- **Default: a conservative ceiling**, overridable per deploy (spirit of `spend-ceiling`'s default). A one-line log when chunks are dropped is nice-to-have, not required.
 
 ## Invariant (acceptance test)
 
 1. **No citation string reaches a reply.** For both `deepseek-chat` and `gemini-2.5-flash`, no `[source]` / `[منبع]` / bracket-citation token appears in output, **without any output-scrubbing step** — the format alone prevents it. Golden/e2e test asserts absence across the leak fixtures.
-2. **Context is provably bounded.** A synthetic oversized retrieval set renders a CONTEXT block whose token count is ≤ the configured cap; the dropped chunks are the lowest-scored ones; the drop is logged.
+2. **Context is provably bounded.** A synthetic oversized retrieval set renders a CONTEXT block whose approximate token count is ≤ the configured cap; the dropped chunks are the tail (lowest-scored) ones.
 3. **Grounding is preserved.** The structural rewrite does not weaken the grounding guarantee (ADR 0008/0011): the same facts are answerable from the same retrieved set, minus anything the size guard deliberately dropped.
 
 ## Preserved
@@ -59,9 +59,8 @@ Add a configurable maximum on the assembled CONTEXT, enforced deterministically 
 
 ## Deferred
 
-- Exact tokenizer choice for the guard (provider-accurate vs approximate) — an approximate count is sufficient for a safety bound; revisit only if the cap needs to be tight against a hard model limit.
 - Per-tier or per-dimension size caps — single global cap first.
 
 ## Open for maintainer
 
-- **The token ceiling default.** Proposed conservative; the real number wants the maintainer's call against the deploy's model context window and cost target.
+- **The ceiling default value.** Unit is settled (approximate tokens); the default number wants the maintainer's call against the deploy's model window and cost target.
