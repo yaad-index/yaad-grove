@@ -77,7 +77,8 @@ func TestSourcesNotSurfaced(t *testing.T) {
 	sys := systemOf(mdl)
 	assert.Contains(t, sys, "Ground every factual claim only in those documents")
 	assert.NotContains(t, sys, "[source]", "no citation-shaped marker language remains in the prompt")
-	assert.Contains(t, sys, `<doc id="faq.md">`, "the chunk is wrapped in a structural block, not a [source] marker")
+	assert.Contains(t, sys, `id="faq.md">`, "the chunk is wrapped in a structural block, not a [source] marker")
+	assert.Contains(t, sys, "<doc-", "the wrapper is a per-render nonced <doc-…> tag (#171)")
 }
 
 // The context-size cap is a hard bound (ADR 0021 Part B, invariant #2): a cap
