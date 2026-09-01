@@ -75,6 +75,33 @@ func TestSimilarityThresholdDefault(t *testing.T) {
 	assert.Equal(t, float32(0.30), cli.Serve.SimilarityThreshold, "block-early 0.30 is the shipped default")
 }
 
+// The context-size guard (ADR 0021 Part B) is REQUIRED with no default: it has no
+// default value (unset parses to 0), and serve refuses to start on a non-positive
+// cap — the number depends on the model's window, so it must be set deliberately.
+func TestContextSizeRequired(t *testing.T) {
+	// Unset is startup-fatal — Run rejects it before any I/O.
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := (&ServeCmd{}).Run(log)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "context-size", "startup fails naming the missing knob")
+
+	// No silent default: an unset --context-size parses to 0 (which Run rejects).
+	var cli CLI
+	parser, err := kong.New(&cli)
+	require.NoError(t, err)
+	_, err = parser.Parse([]string{"serve"})
+	require.NoError(t, err)
+	assert.Equal(t, 0, cli.Serve.ContextSize, "no default — unset is 0")
+
+	// Set via the flag → carried through as the cap.
+	var cli2 CLI
+	p2, err := kong.New(&cli2)
+	require.NoError(t, err)
+	_, err = p2.Parse([]string{"serve", "--context-size", "8000"})
+	require.NoError(t, err)
+	assert.Equal(t, 8000, cli2.Serve.ContextSize)
+}
+
 // The language pack defaults to "en" (ADR 0018): without --language the base pack
 // loads, adding no prompt guidance.
 func TestLanguageDefault(t *testing.T) {

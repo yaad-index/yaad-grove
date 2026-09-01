@@ -194,6 +194,14 @@ type ServeCmd struct {
 	MemoryTurns  int `name:"memory-turns" default:"100" help:"Recent conversation turns retained per chat for follow-ups (0 disables)."`
 	MemoryInject int `name:"memory-inject" default:"15" help:"How many retained turns may enter a prompt (the injected slice)."`
 
+	// ContextSize (ADR 0021 Part B) is the REQUIRED hard cap on the assembled CONTEXT
+	// block, in approximate tokens. It has no default: the right cap depends on the
+	// chosen model's window, so it must be set deliberately alongside the model —
+	// unset is startup-fatal, like an unreadable prompt template (ADR 0016). Retrieval
+	// is already score-sorted, so the guard drops whole chunks from the lowest-scored
+	// tail until the rendered block fits; it never truncates mid-chunk.
+	ContextSize int `name:"context-size" help:"REQUIRED. Hard cap on the assembled CONTEXT, in approximate tokens; the lowest-scored chunks are dropped whole from the tail until it fits (never mid-chunk). No default — set it for the chosen model's window (e.g. 8000). Unset is startup-fatal."`
+
 	// FollowupWindow gates non-reply follow-ups by a language-neutral recency signal
 	// (ADR 0018): a non-reply is treated as a follow-up only if its sender already
 	// has a turn in the chat within this window. A reply is always a follow-up. Zero
@@ -204,6 +212,14 @@ type ServeCmd struct {
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
 // behavior is not yet implemented.
 func (c *ServeCmd) Run(log *slog.Logger) error {
+	// The context-size guard (ADR 0021 Part B) is required, with no default: the cap
+	// depends on the chosen model's window, so refuse to start without it rather than
+	// inherit a number that is wrong for the model (startup-fatal, like an unreadable
+	// prompt template — ADR 0016).
+	if c.ContextSize <= 0 {
+		return fmt.Errorf("--context-size is required: set the CONTEXT token cap for the chosen model's window (e.g. 8000); there is no default because the right cap depends on the model")
+	}
+
 	// The spend ceiling is built first: cost-safety must exist before any
 	// model-call path (ADR 0006). It fails closed on a non-positive ceiling/period,
 	// and its meter is persisted so a restart cannot reset the budget. The
@@ -276,7 +292,8 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	engine := core.New(m, retriever, toolset, c.Scope,
-		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt))
+		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
+		core.WithContextTokens(c.ContextSize))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.

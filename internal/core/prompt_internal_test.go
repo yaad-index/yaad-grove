@@ -166,3 +166,58 @@ func TestContextBlockStructuralNoLeakMarkers(t *testing.T) {
 	// data inside the block, not a marker the renderer emits.
 	assert.Contains(t, got, "Text mentioning [source] and [منبع] lives in the DATA")
 }
+
+// approxTokens is a rune-based ~4-chars-per-token estimate (ADR 0021 Part B), so a
+// multi-byte script is sized by its characters, not its wider UTF-8 byte count.
+func TestApproxTokens(t *testing.T) {
+	assert.Equal(t, 2, approxTokens("héllo"), "5 runes → ceil(5/4) = 2")
+	assert.Equal(t, 1, approxTokens("سلام"), "4 Persian runes → 1 token, not sized by 8 bytes")
+	assert.Equal(t, 0, approxTokens(""), "empty is zero")
+}
+
+// capContext bounds the assembled CONTEXT by dropping whole chunks from the
+// lowest-scored tail (chunks arrive score-sorted) until the rendered block fits —
+// never mid-chunk, never a separate drop-by-score pass (ADR 0021 Part B).
+func TestCapContext(t *testing.T) {
+	chunks := []Chunk{
+		{Source: "a.md", Text: strings.Repeat("x", 400)}, // highest-scored (front)
+		{Source: "b.md", Text: strings.Repeat("y", 400)},
+		{Source: "c.md", Text: strings.Repeat("z", 400)}, // lowest-scored (tail)
+	}
+	full := approxTokens(contextBlock(chunks))
+	two := approxTokens(contextBlock(chunks[:2]))
+	one := approxTokens(contextBlock(chunks[:1]))
+	require.Less(t, one, two)
+	require.Less(t, two, full)
+
+	// No cap (<= 0) is a no-op: every chunk is kept, no overflow.
+	kept, overflow := capContext(chunks, 0)
+	assert.Equal(t, chunks, kept)
+	assert.False(t, overflow)
+
+	// A cap at/above the full size keeps everything.
+	kept, overflow = capContext(chunks, full)
+	assert.Len(t, kept, 3)
+	assert.False(t, overflow)
+
+	// Just under full → the lowest-scored tail chunk (c.md) is dropped, whole.
+	kept, overflow = capContext(chunks, full-1)
+	assert.Equal(t, chunks[:2], kept, "score-ordered prefix kept, tail dropped whole")
+	assert.False(t, overflow)
+
+	// Under the two-chunk size → down to the single top chunk.
+	kept, overflow = capContext(chunks, two-1)
+	assert.Equal(t, chunks[:1], kept)
+	assert.False(t, overflow)
+
+	// Even the top chunk alone exceeds the cap → it is kept whole (grounding over a
+	// hard bound for the one best chunk) and overflow is reported.
+	kept, overflow = capContext(chunks, one-1)
+	assert.Equal(t, chunks[:1], kept, "never returns empty / never truncates mid-chunk")
+	assert.True(t, overflow)
+
+	// Empty retrieval is a no-op, no overflow.
+	kept, overflow = capContext(nil, 8000)
+	assert.Empty(t, kept)
+	assert.False(t, overflow)
+}
