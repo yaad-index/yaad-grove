@@ -65,17 +65,19 @@ func TestNoHistoryNoBlock(t *testing.T) {
 	assert.NotContains(t, systemOf(mdl), "RECENT CONVERSATION")
 }
 
-// The grounding instruction tells the model to ground on the [source] tags but
-// NOT surface them (their vault paths aren't user-openable); the old "cite the
-// [source] tags" instruction is gone (#63 follow-up).
+// Grounding is positive framing, not an anti-echo instruction against a
+// citation-shaped marker (ADR 0021): the prompt says facts come only from the
+// CONTEXT documents, and carries no [source]-tag language at all — the structural
+// <doc id="…"> wrapper, not an instruction, is what keeps source refs out of replies.
 func TestSourcesNotSurfaced(t *testing.T) {
 	ret := mockRetriever{chunks: []core.Chunk{{Source: "faq.md", Text: "x"}}}
 	mdl := textModel("ok")
 	_, err := core.New(mdl, ret, nopTools{}, "SCOPE").Answer(context.Background(), core.Query{Text: "q"})
 	require.NoError(t, err)
 	sys := systemOf(mdl)
-	assert.Contains(t, sys, "do NOT mention, cite, or link the source")
-	assert.NotContains(t, sys, "cite the [source] tags you rely on", "the old cite-the-sources instruction is gone")
+	assert.Contains(t, sys, "Ground every factual claim only in those documents")
+	assert.NotContains(t, sys, "[source]", "no citation-shaped marker language remains in the prompt")
+	assert.Contains(t, sys, `<doc id="faq.md">`, "the chunk is wrapped in a structural block, not a [source] marker")
 }
 
 // The language pack's guidance (ADR 0018) is injected into the system prompt when

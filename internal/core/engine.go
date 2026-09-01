@@ -438,7 +438,7 @@ func conversationBlock(history []HistoryTurn) string {
 		}
 	}
 	var b strings.Builder
-	b.WriteString("\n\nRECENT CONVERSATION — the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no [source] citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the CONTEXT below. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke.\n")
+	b.WriteString("\n\nRECENT CONVERSATION — the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no grounding citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the CONTEXT below. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke.\n")
 	for _, t := range history {
 		b.WriteString("\n[")
 		b.WriteString(t.Time.Format("15:04"))
