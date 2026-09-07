@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.18.1](https://github.com/yaad-index/yaad-grove/compare/v0.18.0...v0.18.1) (2026-09-01)
+
+
+### Bug Fixes
+
+* nonce the &lt;doc&gt; tag so a chunk body can't forge a block boundary ([#171](https://github.com/yaad-index/yaad-grove/issues/171)) ([#174](https://github.com/yaad-index/yaad-grove/issues/174)) ([37882d9](https://github.com/yaad-index/yaad-grove/commit/37882d9241e69e975eb5382ccf38832fcb6ff482))
+
 ## [0.18.0](https://github.com/yaad-index/yaad-grove/compare/v0.17.3...v0.18.0) (2026-09-01)
 
 
