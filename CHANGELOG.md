@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.19.0](https://github.com/yaad-index/yaad-grove/compare/v0.18.1...v0.19.0) (2026-09-08)
+
+
+### Features
+
+* ordered recall by a declared field (ADR 0022) ([#180](https://github.com/yaad-index/yaad-grove/issues/180)) ([b2b6d7c](https://github.com/yaad-index/yaad-grove/commit/b2b6d7c400a6e3f042ec488c8838fc1735b2e59f))
+
 ## [0.18.1](https://github.com/yaad-index/yaad-grove/compare/v0.18.0...v0.18.1) (2026-09-01)
 
 
