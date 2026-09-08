@@ -40,6 +40,13 @@ func (f *fakeStore) Enumerate(context.Context, string, string) ([]store.DocRef, 
 
 func (f *fakeStore) Dimensions(context.Context) (map[string][]string, error) { return nil, nil }
 
+// The planner never orders — grounding retrieval is the similarity path — so this
+// fake refuses loudly rather than returning an empty set a caller could mistake
+// for "no document carries that field".
+func (f *fakeStore) Ordered(context.Context, string, store.Direction, int) ([]store.DocRef, error) {
+	return nil, store.ErrOrderedNotImplemented
+}
+
 func (f *fakeStore) Close() error { return nil }
 
 // fakeEmb yields one fixed vector per Embed and counts calls, so "did we embed the

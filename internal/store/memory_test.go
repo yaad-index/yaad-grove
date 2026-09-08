@@ -5,6 +5,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -355,4 +356,189 @@ func paths(refs []DocRef) []string {
 		out[i] = r.Path
 	}
 	return out
+}
+
+// --- ordered recall (ADR 0022) ---
+
+// orderedDocs is a vault where only some notes carry the field: ep20 has no
+// episode value at all, which is the case an implementation must not sort as zero.
+func orderedDocs() []Doc {
+	return []Doc{
+		{Ref: DocRef{Path: "c.md", Title: "C"}, Ordered: map[string]float64{"episode": 30}},
+		{Ref: DocRef{Path: "a.md", Title: "A"}, Ordered: map[string]float64{"episode": 10}},
+		{Ref: DocRef{Path: "ep20.md", Title: "No number"}},
+		{Ref: DocRef{Path: "b.md", Title: "B"}, Ordered: map[string]float64{"episode": 20}},
+	}
+}
+
+// Descending is the whole set, highest first — and it is the whole set, so the
+// answer cannot be an artefact of which documents a sample happened to include.
+func TestOrderedSortsTheWholeSet(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), orderedDocs()))
+
+	got, err := m.Ordered(context.Background(), "episode", Descending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c.md", "b.md", "a.md"}, paths(got))
+
+	got, err = m.Ordered(context.Background(), "episode", Ascending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a.md", "b.md", "c.md"}, paths(got))
+}
+
+// A document with no value for the field is ABSENT from both ends, not sorted as
+// zero. Checking both directions is the point: a zero-keyed document hides at the
+// bottom of a descending answer and only surfaces when you ask for the oldest,
+// which is exactly the question a reader would trust least to be wrong.
+func TestOrderedOmitsDocumentsWithNoValue(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), orderedDocs()))
+
+	for _, dir := range []Direction{Descending, Ascending} {
+		got, err := m.Ordered(context.Background(), "episode", dir, 0)
+		require.NoError(t, err)
+		assert.NotContains(t, paths(got), "ep20.md", "direction %s", dir)
+		assert.Len(t, got, 3)
+	}
+}
+
+// The cap applies after sorting, and takes from the asked-for end.
+func TestOrderedLimitTakesFromTheSortedEnd(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), orderedDocs()))
+
+	got, err := m.Ordered(context.Background(), "episode", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"c.md"}, paths(got))
+
+	got, err = m.Ordered(context.Background(), "episode", Ascending, 2)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"a.md", "b.md"}, paths(got))
+}
+
+// Equal values break on path, so a repeated key yields a stable order rather than
+// map iteration order — otherwise the same question answers differently per run.
+func TestOrderedTiesBreakOnPathDeterministically(t *testing.T) {
+	docs := []Doc{
+		{Ref: DocRef{Path: "z.md"}, Ordered: map[string]float64{"n": 1}},
+		{Ref: DocRef{Path: "y.md"}, Ordered: map[string]float64{"n": 1}},
+		{Ref: DocRef{Path: "x.md"}, Ordered: map[string]float64{"n": 1}},
+	}
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), docs))
+
+	for i := 0; i < 20; i++ {
+		got, err := m.Ordered(context.Background(), "n", Ascending, 0)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got))
+	}
+
+	// Descending reverses the FIELD order, not the tie-break: equal keys stay in
+	// ascending path order, which is what the graph backend's query does and what
+	// both backends document. Reversing the sorted slice wholesale would flip this
+	// too, and then "the latest one" with a tie at the top value answers with a
+	// different document depending on which backend is deployed — a single wrong
+	// answer under limit 1, not a cosmetic difference in a list.
+	for i := 0; i < 20; i++ {
+		got, err := m.Ordered(context.Background(), "n", Descending, 0)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got))
+	}
+}
+
+// The tie-break survives a cap, which is the case that actually reaches a reader:
+// "the latest one" is limit 1, so a flipped tie order is not a reordered list, it
+// is a different document.
+func TestOrderedTieBreakDecidesTheSingleTopAnswer(t *testing.T) {
+	docs := []Doc{
+		{Ref: DocRef{Path: "z.md"}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "x.md"}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "m.md"}, Ordered: map[string]float64{"n": 1}},
+	}
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), docs))
+
+	got, err := m.Ordered(context.Background(), "n", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x.md"}, paths(got), "the tie is broken on ascending path, even at the top")
+}
+
+// An undeclared or unindexed field is an empty set, not an error — matching how
+// Enumerate answers an unmatched value.
+func TestOrderedUnknownFieldIsEmpty(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), orderedDocs()))
+
+	got, err := m.Ordered(context.Background(), "published", Descending, 0)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// Re-indexing replaces the ordered index wholesale, so a value removed from the
+// vault stops being answerable rather than lingering in the old order.
+func TestOrderedIsRebuiltOnReindex(t *testing.T) {
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), orderedDocs()))
+	require.NoError(t, m.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "only.md"}, Ordered: map[string]float64{"episode": 5}},
+	}))
+
+	got, err := m.Ordered(context.Background(), "episode", Descending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"only.md"}, paths(got))
+}
+
+// ParseOrderedValue reads the shapes a YAML frontmatter parser actually produces.
+// An unquoted date arrives as a time.Time and a quoted one as a string, so both
+// have to work; a field that reads only one of them silently loses half a vault.
+func TestParseOrderedValue(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		in   any
+		key  float64
+		kind OrderKind
+		ok   bool
+	}{
+		{"int", 47, 47, OrderNumber, true},
+		{"int64", int64(47), 47, OrderNumber, true},
+		{"float", 3.5, 3.5, OrderNumber, true},
+		{"negative", -2, -2, OrderNumber, true},
+		{"zero is a real value", 0, 0, OrderNumber, true},
+		{"numeric string", "47", 47, OrderNumber, true},
+		{"typed date", time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC), 1767571200, OrderDate, true},
+		{"quoted date", "2026-01-05", 1767571200, OrderDate, true},
+		{"rfc3339", "2026-01-05T00:00:00Z", 1767571200, OrderDate, true},
+		{"slashed date", "2026/01/05", 1767571200, OrderDate, true},
+		{"nil", nil, 0, OrderNone, false},
+		{"empty", "", 0, OrderNone, false},
+		{"prose", "N/A", 0, OrderNone, false},
+		{"list", []any{1, 2}, 0, OrderNone, false},
+		{"bool is a facet, not an ordinal", true, 0, OrderNone, false},
+		// ParseFloat accepts these, and each would poison the ordering: NaN compares
+		// false against everything including itself, so it breaks both the sort and
+		// the equal-key grouping the tie-break depends on.
+		{"NaN is not a position", "NaN", 0, OrderNone, false},
+		{"Inf is not a position", "Inf", 0, OrderNone, false},
+		{"-Inf is not a position", "-Inf", 0, OrderNone, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			key, kind, ok := ParseOrderedValue(tc.in)
+			assert.Equal(t, tc.ok, ok)
+			assert.Equal(t, tc.kind, kind)
+			if tc.ok {
+				assert.Equal(t, tc.key, key)
+			}
+		})
+	}
+}
+
+// A date and a number must not be read into the same scale: the Unix second for a
+// 2026 date is ~1.7e9, so a mixed field would sort every date above every episode
+// number regardless of meaning. The kinds are what let the caller refuse the mix.
+func TestNumbersAndDatesAreDistinguishableKinds(t *testing.T) {
+	_, numKind, ok := ParseOrderedValue(47)
+	require.True(t, ok)
+	_, dateKind, ok := ParseOrderedValue("2026-01-05")
+	require.True(t, ok)
+	assert.NotEqual(t, numKind, dateKind)
 }

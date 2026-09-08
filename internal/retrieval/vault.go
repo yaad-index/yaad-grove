@@ -39,8 +39,9 @@ import (
 // Flattening every doc's Chunks in order reproduces the flat chunk stream the
 // pre-store retrievers built on, so semantic and keyword indexing are over the
 // identical units.
-func VaultDocs(ctx context.Context, vaultDir string, dimensions []string) ([]store.Doc, error) {
+func VaultDocs(ctx context.Context, vaultDir string, dimensions, orderable []string) ([]store.Doc, error) {
 	var docs []store.Doc
+	kinds := orderedKinds{}
 	err := filepath.WalkDir(vaultDir, func(path string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
@@ -83,11 +84,14 @@ func VaultDocs(ctx context.Context, vaultDir string, dimensions []string) ([]sto
 		if len(chunks) == 0 {
 			return nil
 		}
+		ordered, skipped := frontOrdered(front, orderable, kinds)
 		docs = append(docs, store.Doc{
-			Ref:        store.DocRef{Path: rel, Title: frontString(front, "title")},
-			Chunks:     chunks,
-			Dimensions: frontDimensions(front, dimensions),
-			Aliases:    frontAliases(front),
+			Ref:            store.DocRef{Path: rel, Title: frontString(front, "title")},
+			Chunks:         chunks,
+			Dimensions:     frontDimensions(front, dimensions),
+			Aliases:        frontAliases(front),
+			Ordered:        ordered,
+			OrderedSkipped: skipped,
 		})
 		return nil
 	})
@@ -202,6 +206,53 @@ func frontDimensions(front map[string]any, dimensions []string) map[string][]str
 		return nil
 	}
 	return out
+}
+
+// orderedKinds fixes each declared orderable field's kind across a whole vault
+// scan: the first document with a usable value decides whether the field is read
+// as a number or as a date, and later values of the other kind are refused.
+//
+// Mixing them would sort a Unix second against a sequence number and produce an
+// order that is wrong without looking wrong. Because a scan walks the vault in one
+// pass and in lexical path order, the deciding document is deterministic.
+type orderedKinds map[string]store.OrderKind
+
+// frontOrdered reads the declared orderable fields from one note's frontmatter,
+// returning the usable sort keys and the names of the fields the note carries but
+// could not be used (ADR 0022).
+//
+// A field the note does not mention is in neither result — it is not a value and
+// not a failure. A field it does mention but whose value is unreadable, or is of a
+// different kind than the field's first usable value, is SKIPPED and named, so the
+// count of them can be reported rather than silently becoming an empty index.
+func frontOrdered(front map[string]any, fields []string, kinds orderedKinds) (map[string]float64, []string) {
+	if len(fields) == 0 || front == nil {
+		return nil, nil
+	}
+	var values map[string]float64
+	var skipped []string
+	for _, f := range fields {
+		raw, present := front[f]
+		if !present || raw == nil {
+			continue
+		}
+		key, kind, ok := store.ParseOrderedValue(raw)
+		if !ok {
+			skipped = append(skipped, f)
+			continue
+		}
+		if fixed, seen := kinds[f]; seen && fixed != kind {
+			skipped = append(skipped, f)
+			continue
+		} else if !seen {
+			kinds[f] = kind
+		}
+		if values == nil {
+			values = map[string]float64{}
+		}
+		values[f] = key
+	}
+	return values, skipped
 }
 
 // frontAliases collects a note's alias surface forms: the `aliases` list plus any

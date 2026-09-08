@@ -237,3 +237,163 @@ func TestLadybugConcurrentReindexAndQuery(t *testing.T) {
 	close(stop)
 	wg.Wait()
 }
+
+// Ordered recall on the graph backend (ADR 0022). The sort and the cap are pushed
+// into the database, so this is the only place their behaviour can be confirmed —
+// the memory backend's tests say nothing about a Cypher ORDER BY.
+//
+// It also pins the two properties both backends must agree on: a document with no
+// value is absent rather than zero-keyed, and equal keys break on path so the two
+// backends do not answer the same question in different orders.
+func TestLadybugOrdered(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	docs := []Doc{
+		{Ref: DocRef{Path: "ep30.md", Title: "Thirty"}, Chunks: []core.Chunk{{Source: "ep30.md", Text: "a"}},
+			Ordered: map[string]float64{"episode": 30}},
+		{Ref: DocRef{Path: "ep10.md", Title: "Ten"}, Chunks: []core.Chunk{{Source: "ep10.md", Text: "b"}},
+			Ordered: map[string]float64{"episode": 10}},
+		// No episode value at all — must never appear in an ordered answer.
+		{Ref: DocRef{Path: "none.md", Title: "None"}, Chunks: []core.Chunk{{Source: "none.md", Text: "c"}}},
+		{Ref: DocRef{Path: "ep20.md", Title: "Twenty"}, Chunks: []core.Chunk{{Source: "ep20.md", Text: "d"}},
+			Ordered: map[string]float64{"episode": 20}},
+	}
+	require.NoError(t, l.Index(context.Background(), docs))
+
+	desc, err := l.Ordered(context.Background(), "episode", Descending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep30.md", "ep20.md", "ep10.md"}, paths(desc))
+
+	asc, err := l.Ordered(context.Background(), "episode", Ascending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep10.md", "ep20.md", "ep30.md"}, paths(asc))
+
+	// Both ends omit the valueless document, not just the one it would sort last on.
+	for _, refs := range [][]DocRef{desc, asc} {
+		assert.NotContains(t, paths(refs), "none.md")
+	}
+
+	top, err := l.Ordered(context.Background(), "episode", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"ep30.md"}, paths(top), "the cap takes from the sorted end")
+
+	unknown, err := l.Ordered(context.Background(), "episode2", Descending, 0)
+	require.NoError(t, err)
+	assert.Empty(t, unknown, "an unindexed field is empty, not an error")
+}
+
+// A reindex replaces the ordered index rather than adding to it, so a document
+// dropped from the vault stops being answerable.
+//
+// ⚠️ Note what this does NOT prove. Deleting the Doc nodes is DETACH, so the
+// HAS_ORDER edges go with them and an orphaned Ordinal is already unreachable —
+// this test passes with the Ordinal cleanup removed entirely (verified by
+// mutation). The cleanup exists to stop orphaned Ordinal nodes accumulating on
+// every reindex, which is storage rather than correctness, and that is pinned
+// separately below. Left unsaid, this test's name would have implied cover it does
+// not give.
+func TestLadybugOrderedIsRebuiltOnReindex(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	require.NoError(t, l.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "old.md", Title: "Old"}, Chunks: []core.Chunk{{Source: "old.md", Text: "a"}},
+			Ordered: map[string]float64{"episode": 99}},
+	}))
+	require.NoError(t, l.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "new.md", Title: "New"}, Chunks: []core.Chunk{{Source: "new.md", Text: "b"}},
+			Ordered: map[string]float64{"episode": 1}},
+	}))
+
+	got, err := l.Ordered(context.Background(), "episode", Descending, 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"new.md"}, paths(got), "the removed document is gone from the order")
+}
+
+// The Ordinal cleanup itself: reindexing must not leave the previous pass's nodes
+// behind. Orphaned Ordinals are unreachable by query, so no answer goes wrong —
+// which is exactly why this needs its own assertion. Without it the store grows by
+// one node per (document, field) on every reindex, and a persistent backend that
+// reindexes on every vault edit would never give the space back.
+func TestLadybugReindexLeavesNoOrphanedOrdinals(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	lb := l.(*Ladybug) // the node count is a storage fact, not part of the port
+	countOrdinals := func() int {
+		r, qerr := lb.conn.Query("MATCH (o:Ordinal) RETURN COUNT(o);")
+		require.NoError(t, qerr)
+		defer r.Close()
+		require.True(t, r.HasNext())
+		row, nerr := r.Next()
+		require.NoError(t, nerr)
+		vals, serr := row.GetAsSlice()
+		require.NoError(t, serr)
+		require.NotEmpty(t, vals)
+		// COUNT comes back as an integer, so it is read as one. The package's
+		// toFloat only handles the float cases and returns 0 for anything else,
+		// which would make this probe report "no orphans" no matter what the store
+		// held — a check that cannot fail is worse than no check.
+		switch n := vals[0].(type) {
+		case int64:
+			return int(n)
+		case int:
+			return n
+		case float64:
+			return int(n)
+		default:
+			t.Fatalf("unexpected COUNT type %T", vals[0])
+			return 0
+		}
+	}
+
+	index := func(path string, key float64) {
+		require.NoError(t, l.Index(context.Background(), []Doc{
+			{Ref: DocRef{Path: path}, Chunks: []core.Chunk{{Source: path, Text: "x"}},
+				Ordered: map[string]float64{"episode": key}},
+		}))
+	}
+
+	index("a.md", 1)
+	require.Equal(t, 1, countOrdinals())
+	index("b.md", 2)
+	assert.Equal(t, 1, countOrdinals(), "the previous pass's Ordinal is gone, not orphaned")
+	index("c.md", 3)
+	assert.Equal(t, 1, countOrdinals(), "and it does not grow with each reindex")
+}
+
+// The tie-break contract, pinned on this backend too. Descending reverses the
+// field order but NOT the tie-break: equal keys stay in ascending path order.
+//
+// This is the half that makes the claim "both backends answer the same question
+// in the same order" checkable. Asserting it only in the memory backend's tests
+// leaves the two free to drift apart, and the drift is invisible until a
+// deployment swaps backends and "the latest one" starts naming a different
+// document whenever the top value is tied.
+func TestLadybugOrderedTieBreakMatchesTheMemoryBackend(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	docs := []Doc{
+		{Ref: DocRef{Path: "z.md"}, Chunks: []core.Chunk{{Source: "z.md", Text: "a"}}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "x.md"}, Chunks: []core.Chunk{{Source: "x.md", Text: "b"}}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "y.md"}, Chunks: []core.Chunk{{Source: "y.md", Text: "c"}}, Ordered: map[string]float64{"n": 9}},
+	}
+	require.NoError(t, l.Index(context.Background(), docs))
+
+	for _, dir := range []Direction{Ascending, Descending} {
+		got, gerr := l.Ordered(context.Background(), "n", dir, 0)
+		require.NoError(t, gerr)
+		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got), "direction %s", dir)
+	}
+
+	// And it decides the single top answer, which is the form a reader sees.
+	top, err := l.Ordered(context.Background(), "n", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x.md"}, paths(top))
+}

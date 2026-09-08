@@ -30,7 +30,7 @@ func TestReindexPicksUpVaultChanges(t *testing.T) {
 	write("a.md", "---\ntitle: A\ngames: [Acme]\n---\n# A\nfirst note\n")
 
 	st := store.NewMemory(nil, 0)
-	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"})
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"}, nil)
 	require.NoError(t, err)
 	require.NoError(t, st.Index(context.Background(), docs))
 
@@ -39,7 +39,7 @@ func TestReindexPicksUpVaultChanges(t *testing.T) {
 
 	// Edit the vault live, then reindex.
 	write("b.md", "---\ntitle: B\ngames: [Beta]\n---\n# B\nsecond note\n")
-	reindex(context.Background(), st, dir, []string{"games"}, log)
+	reindex(context.Background(), st, dir, []string{"games"}, nil, log)
 
 	after, _ := st.Keyword(context.Background(), "second", 8)
 	require.Len(t, after, 1, "reindex picked up the new note")
@@ -57,7 +57,7 @@ func TestReindexFailureKeepsIndex(t *testing.T) {
 		{Ref: store.DocRef{Path: "a"}, Chunks: []core.Chunk{{Source: "a", Text: "keep me"}}},
 	}))
 
-	reindex(context.Background(), st, filepath.Join(t.TempDir(), "nope"), nil, log)
+	reindex(context.Background(), st, filepath.Join(t.TempDir(), "nope"), nil, nil, log)
 
 	kw, _ := st.Keyword(context.Background(), "keep", 8)
 	assert.Len(t, kw, 1, "a failed reindex leaves the current index serving")
