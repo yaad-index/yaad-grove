@@ -11,6 +11,7 @@ import (
 
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/store"
+	"github.com/yaad-index/yaad-grove/internal/tools"
 )
 
 // End to end over a real on-disk vault: the "one entity reviewed across multiple
@@ -34,7 +35,7 @@ func TestEnumerateEndToEnd(t *testing.T) {
 	write("episodes/ep-02.md", "---\ntitle: Episode 2\ngames: [acme-rail, Widget Wars]\n---\n# Episode 2\nMore, plus another.\n")
 	write("episodes/ep-03.md", "---\ntitle: Episode 3\ngames: [Widget Wars]\n---\n# Episode 3\nA different game.\n")
 
-	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"})
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"}, nil)
 	require.NoError(t, err)
 
 	mem := store.NewMemory(nil, 0) // a keyword-only backend is enough for enumerate
@@ -73,7 +74,7 @@ func TestEnumerateFacetedValueResolution(t *testing.T) {
 	write("games/g2.md", "---\ntitle: G2\ncategory: [Trains, \"Route/Network Building\"]\n---\n# G2\n")
 	write("games/g3.md", "---\ntitle: G3\ncategory: [\"Route/Network Building\"]\n---\n# G3\n")
 
-	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"category"})
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"category"}, nil)
 	require.NoError(t, err)
 	mem := store.NewMemory(nil, 0)
 	require.NoError(t, mem.Index(context.Background(), docs))
@@ -101,4 +102,53 @@ func refPaths(refs []store.DocRef) []string {
 		out[i] = r.Path
 	}
 	return out
+}
+
+// End to end for ordered recall (ADR 0022): a real vault, read by the real
+// frontmatter parser, indexed by the real store, queried through the real tool.
+//
+// This is the seam a wiring bug hides in — each layer can be right on its own
+// while the parse, the index and the cap disagree about which document is newest.
+// The vault is built so that the newest episode overall is NOT the newest one
+// about the game, so an answer that skips the intersection is visibly wrong rather
+// than plausibly right.
+func TestOrderedRecallEndToEnd(t *testing.T) {
+	dir := t.TempDir()
+	write := func(rel, content string) {
+		p := filepath.Join(dir, filepath.FromSlash(rel))
+		require.NoError(t, os.MkdirAll(filepath.Dir(p), 0o755))
+		require.NoError(t, os.WriteFile(p, []byte(content), 0o600))
+	}
+	write("episodes/ep-01.md", "---\ntitle: Episode 1\nepisode: 1\ngames: [acme-rail]\n---\n# One\nWe review it.\n")
+	write("episodes/ep-07.md", "---\ntitle: Episode 7\nepisode: 7\ngames: [acme-rail]\n---\n# Seven\nAgain.\n")
+	// The newest episode overall — and it is about a different game.
+	write("episodes/ep-09.md", "---\ntitle: Episode 9\nepisode: 9\ngames: [widget-wars]\n---\n# Nine\nSomething else.\n")
+	// Carries no episode number at all: it must never be "the latest".
+	write("episodes/extra.md", "---\ntitle: Bonus\ngames: [acme-rail]\n---\n# Bonus\nUnnumbered.\n")
+
+	docs, err := retrieval.VaultDocs(context.Background(), dir, []string{"games"}, []string{"episode"})
+	require.NoError(t, err)
+
+	mem := store.NewMemory(nil, 0)
+	require.NoError(t, mem.Index(context.Background(), docs))
+	ts := tools.WithEnumerate(nil, mem, []string{"games"}, []string{"episode"})
+
+	// "The latest episode about acme-rail" is 7 — not 9, which is newer but about
+	// another game, and not the unnumbered bonus.
+	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "games", "value": "acme-rail",
+		"sort": "episode", "limit": float64(1),
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "Episode 7")
+	assert.NotContains(t, out, "Episode 9", "newer, but not about this game")
+	assert.NotContains(t, out, "Bonus", "no episode number means it cannot be the latest")
+
+	// Without the facet, the latest is 9 — so the facet is genuinely doing work
+	// above, rather than the answer being the global maximum by coincidence.
+	out, err = ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"sort": "episode", "limit": float64(1),
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, "Episode 9")
 }

@@ -104,6 +104,14 @@ type ServeCmd struct {
 	// structured lookup. Set in config.yaml under serve, like other options.
 	StoreDimensions []string `name:"store-dimensions" help:"Frontmatter fields to index for structured lookup (e.g. 'games,hosts'); enables the kb_enumerate tool. Empty disables it."`
 
+	// StoreOrderable (ADR 0022) names the frontmatter fields with a total order —
+	// numeric or date — to index for ordered recall. Declaring any lets
+	// kb_enumerate sort, which is what makes "the latest / the newest / the Nth"
+	// answerable: those are questions about the whole collection, and retrieval's
+	// sample can omit the very document that decides them. Empty = no ordered
+	// recall, which is a valid deployment rather than an error.
+	StoreOrderable []string `name:"store-orderable" help:"Frontmatter fields with a total order (numeric or date, e.g. 'episode,published'); lets kb_enumerate sort for recency/ordinal questions. Empty disables ordering."`
+
 	// RetrievalStore (ADR 0019, #86) selects the store backend: 'memory' (pure-Go
 	// default, volatile, re-embeds the vault each boot) or 'ladybug' (persistent
 	// embedded graph — restart embeds only changed chunks). ladybug is compiled in
@@ -267,8 +275,9 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	registry := tools.New(servers)
 	// The instance's tool set is the MCP registry plus, when structured dimensions
 	// are declared, the built-in kb_enumerate structured-lookup tool over the store
-	// (ADR 0019). With no dimensions, WithEnumerate returns the registry unchanged.
-	toolset := tools.WithEnumerate(registry, kbStore, c.StoreDimensions)
+	// (ADR 0019/0022). With neither dimensions nor orderable fields, WithEnumerate
+	// returns the registry unchanged.
+	toolset := tools.WithEnumerate(registry, kbStore, c.StoreDimensions, c.StoreOrderable)
 
 	// The optional persona layer (ADR 0013): operator-authored behavior prepended
 	// to the system prompt ahead of scope/grounding. Load before the engine so a
@@ -451,7 +460,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 			case <-ctx.Done():
 				return
 			case <-hup:
-				reindex(ctx, kbStore, c.VaultDir, c.StoreDimensions, log)
+				reindex(ctx, kbStore, c.VaultDir, c.StoreDimensions, c.StoreOrderable, log)
 			}
 		}
 	}()
@@ -463,13 +472,39 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	return nil
 }
 
+// orderedIndexed counts the (document, orderable field) pairs that produced a
+// usable sort key.
+func orderedIndexed(docs []store.Doc) int {
+	n := 0
+	for _, d := range docs {
+		n += len(d.Ordered)
+	}
+	return n
+}
+
+// orderedSkipped counts the (document, orderable field) pairs where a note DID
+// carry a declared orderable field but its value could not be used (ADR 0022).
+//
+// Both counts are logged, and logged even at zero, because the PAIR carries the
+// meaning: 0 indexed with 0 skipped says no note declares the field, while 0
+// indexed with 200 skipped says every note declares it and every value is
+// unreadable. Reporting only failures, or only on failure, lets the second read as
+// the first — and an unordered index answers "the latest" with silence either way.
+func orderedSkipped(docs []store.Doc) int {
+	n := 0
+	for _, d := range docs {
+		n += len(d.OrderedSkipped)
+	}
+	return n
+}
+
 // reindex re-reads the vault and rebuilds the store's index in place (#86), so an
 // operator picks up vault edits without a restart. On any failure it logs and
 // leaves the current index serving — Index only swaps the live snapshot on success,
 // so a failed reindex never takes the bot's retrieval down.
-func reindex(ctx context.Context, st store.Store, vaultDir string, dimensions []string, log *slog.Logger) {
+func reindex(ctx context.Context, st store.Store, vaultDir string, dimensions, orderable []string, log *slog.Logger) {
 	log.Info("reindex: re-reading vault", "vault_dir", vaultDir)
-	docs, err := retrieval.VaultDocs(ctx, vaultDir, dimensions)
+	docs, err := retrieval.VaultDocs(ctx, vaultDir, dimensions, orderable)
 	if err != nil {
 		log.Error("reindex: read vault failed; keeping current index", "err", err)
 		return
@@ -574,7 +609,7 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	// Read the vault (with the declared structured dimensions, ADR 0019) and index
 	// it into the memory backend. Index embeds every chunk (when an embedder is set),
 	// so this is where the boot embedding cost lands.
-	docs, err := retrieval.VaultDocs(context.Background(), c.VaultDir, c.StoreDimensions)
+	docs, err := retrieval.VaultDocs(context.Background(), c.VaultDir, c.StoreDimensions, c.StoreOrderable)
 	if err != nil {
 		return nil, nil, fmt.Errorf("serve: read vault: %w", err)
 	}
@@ -609,6 +644,13 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	}
 	if len(c.StoreDimensions) > 0 {
 		attrs = append(attrs, "dimensions", strings.Join(c.StoreDimensions, ","))
+	}
+	if len(c.StoreOrderable) > 0 {
+		attrs = append(attrs, "orderable", strings.Join(c.StoreOrderable, ","))
+		// Skipped values are reported even when zero: a vault whose dates are all
+		// unreadable indexes no order at all and would otherwise look identical to
+		// one that is ordered correctly (ADR 0022).
+		attrs = append(attrs, "orderable_indexed", orderedIndexed(docs), "orderable_skipped", orderedSkipped(docs))
 	}
 	log.Info("retrieval index built", attrs...)
 

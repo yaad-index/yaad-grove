@@ -47,6 +47,18 @@ type memIndex struct {
 	// aliasMap resolves a normalized surface form (a transliteration / cross-script
 	// spelling) to the normalized canonical key of the entity it names.
 	aliasMap map[string]string
+	// ordIndex is the ordered-recall index (ADR 0022): declared orderable field →
+	// the documents carrying a usable value for it, sorted ascending. A document
+	// without a usable value is not in the slice at all.
+	ordIndex map[string][]orderedEntry
+}
+
+// orderedEntry is one document's position under one orderable field: its sort key
+// and the ref to return. The key is comparable within a field only — a date field
+// is keyed in Unix seconds and a sequence field in its own units.
+type orderedEntry struct {
+	ref DocRef
+	key float64
 }
 
 // NewMemory builds an empty memory backend. embedder may be nil (keyword-only
@@ -82,8 +94,41 @@ func (m *Memory) Index(ctx context.Context, docs []Doc) error {
 		return err
 	}
 	dimIndex, dispIndex, aliasMap := buildStructured(docs)
-	m.idx.Store(&memIndex{chunks: chunks, vectors: vectors, dimIndex: dimIndex, dispIndex: dispIndex, aliasMap: aliasMap})
+	m.idx.Store(&memIndex{
+		chunks:    chunks,
+		vectors:   vectors,
+		dimIndex:  dimIndex,
+		dispIndex: dispIndex,
+		aliasMap:  aliasMap,
+		ordIndex:  buildOrdered(docs),
+	})
 	return nil
+}
+
+// buildOrdered builds the ordered-recall index (ADR 0022): one ascending slice per
+// declared orderable field, holding only the documents that carry a usable value.
+// Sorting once at index time makes Ordered a slice read; ties break on path so a
+// vault with duplicate values still enumerates in a stable order.
+//
+// Documents with no value for a field are absent rather than zero-keyed — the
+// distinction the whole primitive rests on.
+func buildOrdered(docs []Doc) map[string][]orderedEntry {
+	out := map[string][]orderedEntry{}
+	for _, d := range docs {
+		for field, key := range d.Ordered {
+			out[field] = append(out[field], orderedEntry{ref: d.Ref, key: key})
+		}
+	}
+	for field := range out {
+		entries := out[field]
+		sort.Slice(entries, func(i, j int) bool {
+			if entries[i].key != entries[j].key {
+				return entries[i].key < entries[j].key
+			}
+			return entries[i].ref.Path < entries[j].ref.Path
+		})
+	}
+	return out
 }
 
 // buildStructured builds the dimension index and alias map (ADR 0019). Every
@@ -253,6 +298,35 @@ func (m *Memory) Dimensions(_ context.Context) (map[string][]string, error) {
 		}
 		sort.Strings(vals)
 		out[dim] = vals
+	}
+	return out, nil
+}
+
+// Ordered returns the documents carrying field, sorted by it (ADR 0022). The
+// index is already ascending, so descending is a reverse walk rather than a
+// re-sort. An undeclared or unindexed field returns an empty set, not an error —
+// the same shape Enumerate uses for an unmatched value.
+//
+// The cap is applied last, over the documents that actually carry the field. It is
+// only ever safe here because this result is not filtered afterwards by any caller
+// that also passed a limit; see the interface note and the enumerate tool.
+func (m *Memory) Ordered(_ context.Context, field string, dir Direction, limit int) ([]DocRef, error) {
+	entries := m.load().ordIndex[field]
+	if len(entries) == 0 {
+		return nil, nil
+	}
+	out := make([]DocRef, 0, len(entries))
+	if dir == Descending {
+		for i := len(entries) - 1; i >= 0; i-- {
+			out = append(out, entries[i].ref)
+		}
+	} else {
+		for _, e := range entries {
+			out = append(out, e.ref)
+		}
+	}
+	if limit > 0 && len(out) > limit {
+		out = out[:limit]
 	}
 	return out, nil
 }

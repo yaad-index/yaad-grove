@@ -19,7 +19,7 @@ func TestDimensionsCallLists(t *testing.T) {
 		"games":    {"Acme Rail", "Widget Wars"},
 		"category": {"Route/Network Building", "Trains"},
 	}}
-	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"games", "category"})
+	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"games", "category"}, nil)
 
 	out, err := ts.Call(context.Background(), "kb_dimensions", map[string]any{})
 	require.NoError(t, err)
@@ -35,7 +35,7 @@ func TestDimensionsCallFilterOne(t *testing.T) {
 		"games":    {"Acme Rail"},
 		"category": {"Trains"},
 	}}
-	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"games", "category"})
+	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"games", "category"}, nil)
 
 	out, err := ts.Call(context.Background(), "kb_dimensions", map[string]any{"dimension": "category"})
 	require.NoError(t, err)
@@ -51,7 +51,7 @@ func TestDimensionsCapsHighCardinality(t *testing.T) {
 		many[i] = fmt.Sprintf("v%02d", i) // sorted, distinct
 	}
 	enum := &fakeEnum{vocab: map[string][]string{"designer": many}}
-	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"designer"})
+	ts := tools.WithEnumerate(&fakeBase{}, enum, []string{"designer"}, nil)
 
 	out, err := ts.Call(context.Background(), "kb_dimensions", map[string]any{})
 	require.NoError(t, err)
@@ -63,7 +63,7 @@ func TestDimensionsCapsHighCardinality(t *testing.T) {
 
 // An empty vocabulary (nothing indexed yet) is stated, not an error.
 func TestDimensionsEmptyVocab(t *testing.T) {
-	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{vocab: nil}, []string{"games"})
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{vocab: nil}, []string{"games"}, nil)
 	out, err := ts.Call(context.Background(), "kb_dimensions", map[string]any{})
 	require.NoError(t, err)
 	assert.Contains(t, out, "no values indexed")
@@ -71,14 +71,14 @@ func TestDimensionsEmptyVocab(t *testing.T) {
 
 // An undeclared dimension argument is a loud error, not a silent empty.
 func TestDimensionsRejectsUnknownDim(t *testing.T) {
-	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games"})
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games"}, nil)
 	_, err := ts.Call(context.Background(), "kb_dimensions", map[string]any{"dimension": "publishers"})
 	assert.ErrorContains(t, err, "unknown dimension")
 }
 
 // kb_dimensions advertises the declared dimensions and an optional dimension filter.
 func TestDimensionsAdvertises(t *testing.T) {
-	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games", "hosts"})
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games", "hosts"}, nil)
 	def, has := defByName(ts.Defs(), "kb_dimensions")
 	require.True(t, has)
 	assert.Contains(t, def.Description, "games")

@@ -121,7 +121,7 @@ func (l *Ladybug) pruneChunks(keep map[string]bool) error {
 // doc/value: a per-row loop is thousands of Cypher round-trips that make a real
 // vault's index take tens of seconds / hang (#132).
 func (l *Ladybug) rebuildStructured(docs []Doc) error {
-	for _, del := range []string{"MATCH (d:Doc) DETACH DELETE d;", "MATCH (v:Value) DETACH DELETE v;", "MATCH (a:Alias) DELETE a;"} {
+	for _, del := range []string{"MATCH (d:Doc) DETACH DELETE d;", "MATCH (v:Value) DETACH DELETE v;", "MATCH (a:Alias) DELETE a;", "MATCH (o:Ordinal) DETACH DELETE o;"} {
 		if err := l.exec(del); err != nil {
 			return err
 		}
@@ -129,8 +129,17 @@ func (l *Ladybug) rebuildStructured(docs []Doc) error {
 
 	// Collect distinct rows across all docs.
 	var docRows, aliasRows, valueRows, edgeRows []string
+	var ordRows, ordEdgeRows []string
 	valueSeen := map[string]bool{}
 	for _, d := range docs {
+		// Ordered values (ADR 0022): one Ordinal node per (document, field), keyed
+		// numerically so ORDER BY happens in the database. Fields the note does not
+		// carry, and values that could not be read, produce no node at all.
+		for field, key := range d.Ordered {
+			id := field + "|" + d.Ref.Path
+			ordRows = append(ordRows, "{id:"+cypherString(id)+",field:"+cypherString(field)+",key:"+strconv.FormatFloat(key, 'g', -1, 64)+"}")
+			ordEdgeRows = append(ordEdgeRows, mapLiteral("path", d.Ref.Path, "id", id))
+		}
 		docRows = append(docRows, mapLiteral("path", d.Ref.Path, "title", d.Ref.Title))
 		if canon := normalizeKey(d.Ref.Title); canon != "" {
 			for _, a := range d.Aliases {
@@ -167,6 +176,8 @@ func (l *Ladybug) rebuildStructured(docs []Doc) error {
 		{aliasRows, "UNWIND %s AS r MERGE (a:Alias {nk: r.nk}) SET a.canon = r.canon;"},
 		{valueRows, "UNWIND %s AS r MERGE (v:Value {id: r.id}) SET v.dim = r.dim, v.nk = r.nk, v.disp = r.disp;"},
 		{edgeRows, "UNWIND %s AS r MATCH (d:Doc {path: r.path}), (v:Value {id: r.id}) MERGE (d)-[:HAS_VALUE]->(v);"},
+		{ordRows, "UNWIND %s AS r MERGE (o:Ordinal {id: r.id}) SET o.field = r.field, o.key = r.key;"},
+		{ordEdgeRows, "UNWIND %s AS r MATCH (d:Doc {path: r.path}), (o:Ordinal {id: r.id}) MERGE (d)-[:HAS_ORDER]->(o);"},
 	}
 	for _, b := range batches {
 		if len(b.rows) == 0 {
@@ -305,6 +316,53 @@ func (l *Ladybug) Enumerate(_ context.Context, dimension, value string) ([]DocRe
 		"MATCH (d:Doc)-[:HAS_VALUE]->(v:Value {dim: %s, nk: %s}) RETURN d.path, d.title;",
 		cypherString(dimension), cypherString(nk))
 	r, err := l.conn.Query(q)
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	var out []DocRef
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return nil, err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 2 {
+			continue
+		}
+		out = append(out, DocRef{Path: asString(vals[0]), Title: asString(vals[1])})
+	}
+	return out, nil
+}
+
+// Ordered returns the documents carrying field, sorted by it (ADR 0022) — a
+// one-hop Doc-[:HAS_ORDER]->Ordinal traversal with the sort and the cap pushed
+// into the database. Only documents with an Ordinal node for that field take part,
+// so one with no usable value is absent rather than ordered as zero.
+//
+// The path tie-break mirrors the memory backend, so both backends over the same
+// vault return equal-keyed documents in the same order rather than in whatever
+// order storage happens to yield.
+func (l *Ladybug) Ordered(_ context.Context, field string, dir Direction, limit int) ([]DocRef, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.poisoned {
+		return nil, errStorePoisoned
+	}
+	if strings.TrimSpace(field) == "" {
+		return nil, nil
+	}
+	sense := "DESC"
+	if dir == Ascending {
+		sense = "ASC"
+	}
+	q := fmt.Sprintf(
+		"MATCH (d:Doc)-[:HAS_ORDER]->(o:Ordinal {field: %s}) RETURN d.path, d.title ORDER BY o.key %s, d.path ASC",
+		cypherString(field), sense)
+	if limit > 0 {
+		q += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	r, err := l.conn.Query(q + ";")
 	if err != nil {
 		return nil, err
 	}

@@ -130,7 +130,13 @@ func (l *Ladybug) ensureBaseSchema() error {
 		"CREATE NODE TABLE IF NOT EXISTS Doc(path STRING, title STRING, PRIMARY KEY(path));",
 		"CREATE NODE TABLE IF NOT EXISTS Value(id STRING, dim STRING, nk STRING, disp STRING, PRIMARY KEY(id));",
 		"CREATE NODE TABLE IF NOT EXISTS Alias(nk STRING, canon STRING, PRIMARY KEY(nk));",
+		// Ordinal is one document's value for one declared orderable field (ADR
+		// 0022), keyed to a DOUBLE so the database does the ordering. A document
+		// without a usable value simply has no Ordinal node for that field, which is
+		// what keeps "carries no value" from sorting as zero.
+		"CREATE NODE TABLE IF NOT EXISTS Ordinal(id STRING, field STRING, key DOUBLE, PRIMARY KEY(id));",
 		"CREATE REL TABLE IF NOT EXISTS HAS_VALUE(FROM Doc TO Value);",
+		"CREATE REL TABLE IF NOT EXISTS HAS_ORDER(FROM Doc TO Ordinal);",
 	}
 	for _, s := range stmts {
 		if err := l.exec(s); err != nil {
