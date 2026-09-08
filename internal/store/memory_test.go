@@ -432,6 +432,35 @@ func TestOrderedTiesBreakOnPathDeterministically(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got))
 	}
+
+	// Descending reverses the FIELD order, not the tie-break: equal keys stay in
+	// ascending path order, which is what the graph backend's query does and what
+	// both backends document. Reversing the sorted slice wholesale would flip this
+	// too, and then "the latest one" with a tie at the top value answers with a
+	// different document depending on which backend is deployed — a single wrong
+	// answer under limit 1, not a cosmetic difference in a list.
+	for i := 0; i < 20; i++ {
+		got, err := m.Ordered(context.Background(), "n", Descending, 0)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got))
+	}
+}
+
+// The tie-break survives a cap, which is the case that actually reaches a reader:
+// "the latest one" is limit 1, so a flipped tie order is not a reordered list, it
+// is a different document.
+func TestOrderedTieBreakDecidesTheSingleTopAnswer(t *testing.T) {
+	docs := []Doc{
+		{Ref: DocRef{Path: "z.md"}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "x.md"}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "m.md"}, Ordered: map[string]float64{"n": 1}},
+	}
+	m := NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), docs))
+
+	got, err := m.Ordered(context.Background(), "n", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x.md"}, paths(got), "the tie is broken on ascending path, even at the top")
 }
 
 // An undeclared or unindexed field is an empty set, not an error — matching how
@@ -485,6 +514,12 @@ func TestParseOrderedValue(t *testing.T) {
 		{"prose", "N/A", 0, OrderNone, false},
 		{"list", []any{1, 2}, 0, OrderNone, false},
 		{"bool is a facet, not an ordinal", true, 0, OrderNone, false},
+		// ParseFloat accepts these, and each would poison the ordering: NaN compares
+		// false against everything including itself, so it breaks both the sort and
+		// the equal-key grouping the tie-break depends on.
+		{"NaN is not a position", "NaN", 0, OrderNone, false},
+		{"Inf is not a position", "Inf", 0, OrderNone, false},
+		{"-Inf is not a position", "-Inf", 0, OrderNone, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			key, kind, ok := ParseOrderedValue(tc.in)

@@ -14,6 +14,7 @@ package store
 import (
 	"context"
 	"errors"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -102,6 +103,13 @@ func ParseOrderedValue(v any) (float64, OrderKind, bool) {
 			return 0, OrderNone, false
 		}
 		if n, err := strconv.ParseFloat(s, 64); err == nil {
+			// ParseFloat accepts "NaN", "Inf" and "-Inf". None of them has a place in
+			// a total order: NaN compares false against everything including itself,
+			// which breaks both the sort and the equal-key grouping that keeps the
+			// tie-break stable. An unorderable value is treated as no value.
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return 0, OrderNone, false
+			}
 			return n, OrderNumber, true
 		}
 		for _, layout := range orderedDateLayouts {

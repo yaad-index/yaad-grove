@@ -365,3 +365,35 @@ func TestLadybugReindexLeavesNoOrphanedOrdinals(t *testing.T) {
 	index("c.md", 3)
 	assert.Equal(t, 1, countOrdinals(), "and it does not grow with each reindex")
 }
+
+// The tie-break contract, pinned on this backend too. Descending reverses the
+// field order but NOT the tie-break: equal keys stay in ascending path order.
+//
+// This is the half that makes the claim "both backends answer the same question
+// in the same order" checkable. Asserting it only in the memory backend's tests
+// leaves the two free to drift apart, and the drift is invisible until a
+// deployment swaps backends and "the latest one" starts naming a different
+// document whenever the top value is tied.
+func TestLadybugOrderedTieBreakMatchesTheMemoryBackend(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", dimEmb{dim: 4}, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	docs := []Doc{
+		{Ref: DocRef{Path: "z.md"}, Chunks: []core.Chunk{{Source: "z.md", Text: "a"}}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "x.md"}, Chunks: []core.Chunk{{Source: "x.md", Text: "b"}}, Ordered: map[string]float64{"n": 9}},
+		{Ref: DocRef{Path: "y.md"}, Chunks: []core.Chunk{{Source: "y.md", Text: "c"}}, Ordered: map[string]float64{"n": 9}},
+	}
+	require.NoError(t, l.Index(context.Background(), docs))
+
+	for _, dir := range []Direction{Ascending, Descending} {
+		got, gerr := l.Ordered(context.Background(), "n", dir, 0)
+		require.NoError(t, gerr)
+		assert.Equal(t, []string{"x.md", "y.md", "z.md"}, paths(got), "direction %s", dir)
+	}
+
+	// And it decides the single top answer, which is the form a reader sees.
+	top, err := l.Ordered(context.Background(), "n", Descending, 1)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"x.md"}, paths(top))
+}

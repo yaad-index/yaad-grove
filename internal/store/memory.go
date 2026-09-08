@@ -317,8 +317,24 @@ func (m *Memory) Ordered(_ context.Context, field string, dir Direction, limit i
 	}
 	out := make([]DocRef, 0, len(entries))
 	if dir == Descending {
-		for i := len(entries) - 1; i >= 0; i-- {
-			out = append(out, entries[i].ref)
+		// Walk the key groups backwards but each group FORWARDS, so descending
+		// reverses the field order without reversing the tie-break with it.
+		//
+		// Reversing the whole slice would be shorter and wrong: the index is sorted
+		// by (key asc, path asc), so a wholesale reverse yields path DESCENDING
+		// within a tie, while the graph backend's query keeps path ascending in both
+		// directions. Two backends would then answer "the latest one" with different
+		// documents whenever the top value is tied — under a limit of 1 that is a
+		// different answer, not a differently-ordered list.
+		for i := len(entries) - 1; i >= 0; {
+			j := i
+			for j > 0 && entries[j-1].key == entries[i].key {
+				j--
+			}
+			for k := j; k <= i; k++ {
+				out = append(out, entries[k].ref)
+			}
+			i = j - 1
 		}
 	} else {
 		for _, e := range entries {
