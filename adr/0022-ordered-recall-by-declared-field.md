@@ -23,7 +23,7 @@ Three parts, each small and building on ADR 0020.
 
 - "What is the latest item" returns the true maximum of the declared field over the whole indexed set, never the maximum within a similarity sample.
 - Ordered recall composes with facets: "the most recent item matching facet X" sorts the enumerated match set, not the global one.
-- A recency / count question never answers from the similarity CONTEXT alone (mirrors ADR 0020's completeness invariant); a test asserts the structured tool is invoked for these phrasings.
+- A recency / count question never answers from the similarity CONTEXT alone (mirrors ADR 0020's completeness invariant). ⚠️ **This is asserted as two testable halves, because the whole is not testable:** the routing text is present in the advertised tool definition, and, given a model that calls the tool, the plumbing returns the true maximum over the whole set rather than the maximum within a sample. 🔑 **No unit test can pin a live model's tool choice**, so an acceptance line claiming one would be satisfied only by a test that does not check what it appears to.
 - Grounding (ADR 0008/0011) is preserved: ordered recall returns real indexed documents and the answer is still grounded in them.
 
 ## Consequences
@@ -32,10 +32,12 @@ Three parts, each small and building on ADR 0020.
 - One new store method + one tool (or a `sort`/`limit` extension of the existing one) + a prompt-trigger widening. The field values are already in frontmatter, so indexing is an ingest-time capture, not new source data.
 - The operator decides which fields are orderable, so a deployment without a declared field has no ordered recall — no default, no surprise (spirit of ADR 0021 Part B's required-knob discipline, though here an empty list is a valid "none").
 
-## Open for maintainer
+## Decided by the maintainer
 
-- **A dedicated `kb_ordered` tool, or `sort`+`limit` args on `kb_enumerate`.** Lean: extend `kb_enumerate`, so ordering and facet-filtering compose in one call and the model keeps a single structured-recall tool rather than two.
-- **The direction default and whether a bare "latest" implies `limit 1`.** Lean: descending + `limit 1` for "the latest / the newest"; no limit for "list them newest-first".
+*Both were open at authoring time and were settled on approval. The leans are kept because they are the reasoning, not because the question is still live.*
+
+- **A dedicated `kb_ordered` tool, or `sort`+`limit` args on `kb_enumerate`.** ✅ **Decided: extend `kb_enumerate`**, so ordering and facet-filtering compose in one call and the model keeps a single structured-recall tool rather than two. ⚠️ **The cost this buys, named because it is not free:** a bare "what is the latest" carries no facet, so `dimension`/`value` become conditional rather than required arguments, and the tool must be advertised when orderable fields are declared even if no dimensions are.
+- **The direction default and whether a bare "latest" implies `limit 1`.** ✅ **Decided: descending + `limit 1`** for "the latest / the newest"; no limit for "list them newest-first".
 
 ## Deferred
 
