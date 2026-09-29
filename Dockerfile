@@ -8,7 +8,13 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . .
-RUN CGO_ENABLED=0 go build -o /out/yaad-grove ./cmd/yaad-grove
+# VERSION is stamped into main.version, which `yaad-grove version` prints and the
+# MCP client reports. docker-publish passes the release version; a local build
+# without it reports "dev".
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-s -w -X main.version=${VERSION}" \
+    -o /out/yaad-grove ./cmd/yaad-grove
 
 # Stage an empty /data here: distroless has no shell to mkdir at runtime, so the
 # writable data dir (for the default relative-path stores; see WORKDIR below) is

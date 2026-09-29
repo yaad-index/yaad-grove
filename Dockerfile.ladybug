@@ -20,9 +20,12 @@ RUN curl -fsSL https://raw.githubusercontent.com/LadybugDB/ladybug/refs/heads/ma
 # Build the ladybug-tagged binary (cgo, dynamically linked to liblbug.so). No
 # rpath: the runtime finds the library via ldconfig (see below).
 ENV CGO_ENABLED=1
+# VERSION is stamped into main.version, as in the default Dockerfile.
+ARG VERSION=dev
 RUN CGO_CFLAGS="-I/src/lib-ladybug" \
     CGO_LDFLAGS="-L/src/lib-ladybug -lstdc++ -lm" \
-    go build -tags "ladybug system_ladybug" -o /out/yaad-grove ./cmd/yaad-grove
+    go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" \
+    -tags "ladybug system_ladybug" -o /out/yaad-grove ./cmd/yaad-grove
 
 # Bake the vector + FTS extensions into ~/.lbdb by running the tagged store test:
 # its NewLadybug LOADs-else-INSTALLs the extensions (network available here), which

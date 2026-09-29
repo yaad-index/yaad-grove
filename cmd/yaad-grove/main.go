@@ -272,7 +272,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	registry := tools.New(servers)
+	registry := tools.New(servers, version)
 	// The instance's tool set is the MCP registry plus, when structured dimensions
 	// are declared, the built-in kb_enumerate structured-lookup tool over the store
 	// (ADR 0019/0022). With neither dimensions nor orderable fields, WithEnumerate

@@ -30,9 +30,6 @@ import (
 
 const clientName = "yaad-grove"
 
-// clientVersion is reported to MCP servers as the client implementation version.
-var clientVersion = "dev"
-
 // ServerConfig points at one MCP server to connect for an instance.
 //
 // Allow/Deny scope which of the server's advertised tools this instance exposes
@@ -89,12 +86,14 @@ type Registry struct {
 	names    []string           // tool names, in discovery order
 }
 
-// New returns a Registry for the given MCP servers. Connection is deferred to
-// Connect so wiring stays cheap.
-func New(servers []ServerConfig) *Registry {
+// New returns a Registry for the given MCP servers. version is reported to each
+// server as the client implementation version; pass the build version so the
+// binary has one stamped value. Connection is deferred to Connect so wiring
+// stays cheap.
+func New(servers []ServerConfig, version string) *Registry {
 	return &Registry{
 		servers: servers,
-		client:  mcp.NewClient(&mcp.Implementation{Name: clientName, Version: clientVersion}, nil),
+		client:  mcp.NewClient(&mcp.Implementation{Name: clientName, Version: version}, nil),
 		tools:   make(map[string]toolRef),
 	}
 }
