@@ -17,7 +17,14 @@ permissions:
   packages: write
 
 jobs:
+  # The test suite on the tag's own commit. Nothing is published unless it
+  # passes: the release tag is cut from a squash commit that the pull request's
+  # run never covered.
+  test:
+    uses: ./.github/workflows/ci.yml
+
   publish:
+    needs: test
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -58,6 +65,45 @@ jobs:
             type=semver,pattern={{major}}
             type=sha
 
+      # The version the binary is stamped with: the tag without its leading v,
+      # the same value the semver image tag carries. Taken from the ref rather
+      # than the metadata output, because the flavor suffix is applied to that
+      # output and the binary's version must not carry the variant suffix.
+      - name: Release version
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      # Build once without pushing and run the result, so an image that does not
+      # report its own release version is never published.
+      - name: Build for the version check
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          load: true
+          push: false
+          tags: yaad-grove:version-check
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+
+      - name: Check the image reports the release version
+        env:
+          WANT: ${{ steps.version.outputs.version }}
+          TAG: ghcr.io/yaad-index/yaad-grove:${{ steps.version.outputs.version }}${{ matrix.suffix }}
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: |
+          got="$(docker run --rm yaad-grove:version-check version)"
+          if [ "$got" != "$WANT" ]; then
+            echo "the built binary reports '$got', the release is '$WANT'"
+            exit 1
+          fi
+          if ! grep -qxF "$TAG" <<<"$TAGS"; then
+            echo "the image would not be pushed as $TAG; tags are:"
+            echo "$TAGS"
+            exit 1
+          fi
+          echo "binary reports $got and the image is tagged $TAG"
+
       - name: Build and push
         uses: docker/build-push-action@v7
         with:
@@ -66,3 +112,5 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}

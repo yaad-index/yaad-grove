@@ -48,10 +48,27 @@ func connectTo(t *testing.T, r *Registry, server *mcp.Server, cfg ...ServerConfi
 	t.Cleanup(func() { _ = r.Close() })
 }
 
+// The version passed to New is what a server sees as the client's version, so a
+// stamped build identifies itself to the servers it connects to.
+func TestClientReportsItsVersion(t *testing.T) {
+	ctx := context.Background()
+	r := New(nil, "1.2.3")
+	clientT, serverT := mcp.NewInMemoryTransports()
+	ss, err := referenceServer().Connect(ctx, serverT, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ss.Close() })
+	require.NoError(t, r.connect(ctx, clientT, ServerConfig{}))
+	t.Cleanup(func() { _ = r.Close() })
+
+	require.NotNil(t, ss.InitializeParams())
+	require.NotNil(t, ss.InitializeParams().ClientInfo)
+	assert.Equal(t, "1.2.3", ss.InitializeParams().ClientInfo.Version)
+}
+
 // Against the reference server: the client enumerates the advertised tools and
 // routes a call to one, returning its text.
 func TestListAndCall(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer())
 
 	assert.ElementsMatch(t, []string{"echo", "boom"}, defNames(r))
@@ -70,7 +87,7 @@ func TestListAndCall(t *testing.T) {
 // A tool that reports an error (IsError) surfaces as a Go error carrying its
 // message.
 func TestCallToolError(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer())
 
 	_, err := r.Call(context.Background(), "boom", nil)
@@ -80,7 +97,7 @@ func TestCallToolError(t *testing.T) {
 
 // An unknown tool is a clean error, not a panic or a nil-session deref.
 func TestCallUnknownTool(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer())
 
 	_, err := r.Call(context.Background(), "nonexistent", nil)
@@ -91,7 +108,7 @@ func TestCallUnknownTool(t *testing.T) {
 // Tools from multiple servers aggregate into one surface; a call routes to the
 // server that advertises the tool.
 func TestMultipleServersAggregate(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer())
 
 	// A second server advertising a distinct tool.
@@ -112,7 +129,7 @@ func TestMultipleServersAggregate(t *testing.T) {
 // advertised) AND rejected by Call as unknown (not routable) — closing the
 // invented-name hole (#87).
 func TestConnectAllowList(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref", Allow: []string{"echo"}})
 
 	assert.ElementsMatch(t, []string{"echo"}, defNames(r), "only the allow-listed tool is advertised")
@@ -130,7 +147,7 @@ func TestConnectAllowList(t *testing.T) {
 
 // A deny-list drops its tools and exposes the rest.
 func TestConnectDenyList(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref", Deny: []string{"boom"}})
 
 	assert.ElementsMatch(t, []string{"echo"}, defNames(r), "the denied tool is dropped, the rest exposed")
@@ -141,7 +158,7 @@ func TestConnectDenyList(t *testing.T) {
 
 // No allow/deny list exposes everything (backwards compatible).
 func TestConnectNoListExposesAll(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, referenceServer(), ServerConfig{Name: "ref"})
 	assert.ElementsMatch(t, []string{"echo", "boom"}, defNames(r))
 }
@@ -168,7 +185,7 @@ func TestServerConfigPermits(t *testing.T) {
 
 // A registry with no servers connects to nothing and lists nothing — no panic.
 func TestEmptyRegistry(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	require.NoError(t, r.Connect(context.Background()))
 	assert.Empty(t, r.Defs())
 	require.NoError(t, r.Close())
@@ -204,7 +221,7 @@ func strictServer() *mcp.Server {
 // error that feeds back, NOT ErrToolUnavailable (which aborts the whole turn).
 // Regression for #147: a null id where an integer is required dead-ended the turn.
 func TestCallInvalidArgsFeedsBackNotUnavailable(t *testing.T) {
-	r := New(nil)
+	r := New(nil, "test")
 	connectTo(t, r, strictServer())
 
 	_, err := r.Call(context.Background(), "get_things", map[string]any{"ids": []any{nil}})

@@ -1,8 +1,15 @@
 name: CI
 
+# Runs on the pull request, on the push that lands it (a squash onto a base that
+# has moved is a combination the pull request's run never covered), and as a
+# reusable workflow that docker-publish calls on the release tag before it
+# builds, so the published image and a passing test run share a commit.
 on:
   pull_request:
     branches: [main]
+  push:
+    branches: [main]
+  workflow_call:
 
 permissions:
   contents: read
