@@ -69,6 +69,7 @@ func (s ServerConfig) permits(tool string) bool {
 // model as-is; the MCP server validates arguments on its end.
 type toolRef struct {
 	session     *mcp.ClientSession
+	server      string // the configured name of the server serving it
 	description string
 	inputSchema any
 }
@@ -144,7 +145,7 @@ func (r *Registry) connect(ctx context.Context, transport mcp.Transport, cfg Ser
 				slog.Debug("tools: dropping non-permitted tool", "server", cfg.Name, "tool", t.Name)
 				continue
 			}
-			found = append(found, named{t.Name, toolRef{session: session, description: t.Description, inputSchema: t.InputSchema}})
+			found = append(found, named{t.Name, toolRef{session: session, server: cfg.Name, description: t.Description, inputSchema: t.InputSchema}})
 		}
 		if res.NextCursor == "" {
 			break
@@ -237,6 +238,14 @@ func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (
 		return "", fmt.Errorf("tools: %q reported an error: %s", name, text)
 	}
 	return text, nil
+}
+
+// Server is the configured name of the server serving the named tool, or ""
+// for a tool the registry does not hold.
+func (r *Registry) Server(name string) string {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.tools[name].server
 }
 
 // Close shuts down every open session (terminating the stdio subprocesses). It
