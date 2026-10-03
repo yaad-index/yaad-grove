@@ -37,6 +37,7 @@ The move is made in increments. Each keeps the engine's answers byte-identical w
 
 ### 2. Subjects and sessions
 
+- **Namespace:** each instance of the engine has its own memory namespace, set in its configuration. bonyan applies it when it builds the memory store, so two instances sharing one memory service never see each other's records, and neither the engine nor the backend can reach outside it (bonyan ADR 0001 §4).
 - **Subject:** the chat user's ID. Every memory record is about one user.
 - **Session:** the chat ID, the user's ID and the retention window the session started in. bonyan's session history is per subject, so a session is one person's turns in one chat. The window is in the key because the service deletes messages only a whole session at a time: a session that ends with its window can be deleted whole once retention has passed, where one that went on forever would keep its oldest messages.
 - **The group's recent conversation** (several speakers) stays the ADR 0014 buffer and reaches the run as its history. It is not long-term memory, and its rules do not change.
@@ -68,7 +69,7 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 
 | bonyan backend | the service |
 |---|---|
-| a subject | one workspace, holding the user's peer and the bot's peer |
+| a subject | one workspace, named by the namespace and the user's ID, escaped, holding the user's peer and the bot's peer |
 | an event | a message in a session, from the user's peer or the bot's |
 | a long-term record | a conclusion the deriver formed about the user's peer |
 | recall | a semantic query over the user's conclusions; whether the user's representation also comes back, as a record, is settled in the backend's increment |
@@ -76,11 +77,14 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 | `DeleteSubject` | deactivate the subject's sessions, then delete the workspace |
 | `DeleteBefore` | delete each conclusion older than the cut, and each session that ended before it |
 
+**Namespaces.** The service's workspaces do not nest, so the namespace is part of each workspace's name. The backend refuses to read or delete a workspace outside its namespace, so one instance's withdrawal or retention purge can never touch another instance's users.
+
 **Why one workspace per subject:** the service cannot delete a peer or a single message, and deleting a session leaves in place the peer itself and every conclusion the service keeps outside that session. Deleting a workspace is its only complete erase. The cost is one workspace per user who consents, each with its own configuration, and no modelling across users, which this design does not want anyway. A backend that cannot show complete deletion does not ship.
 
 ## Invariants (acceptance)
 
 - A turn from a user who has not consented never reaches the service.
+- Two instances never see each other's memory, and neither can delete the other's.
 - After `/consent remove`, recall for that user returns nothing, in any chat, and the service holds no workspace for them.
 - Recalled memory never enters the request as trusted.
 - A question the vault cannot ground is refused whether or not memory holds an answer to it.
