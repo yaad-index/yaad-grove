@@ -210,13 +210,13 @@ type ServeCmd struct {
 	MemoryTurns  int `name:"memory-turns" default:"100" help:"Recent conversation turns retained per chat for follow-ups (0 disables)."`
 	MemoryInject int `name:"memory-inject" default:"15" help:"How many retained turns may enter a prompt (the injected slice)."`
 
-	// ContextSize (ADR 0021 Part B) is the REQUIRED hard cap on the assembled CONTEXT
+	// ContextSize (ADR 0021 Part B) is the REQUIRED hard cap on the retrieved material
 	// block, in approximate tokens. It has no default: the right cap depends on the
 	// chosen model's window, so it must be set deliberately alongside the model —
 	// unset is startup-fatal, like an unreadable prompt template (ADR 0016). Retrieval
 	// is already score-sorted, so the guard drops whole chunks from the lowest-scored
 	// tail until the rendered block fits; it never truncates mid-chunk.
-	ContextSize int `name:"context-size" help:"REQUIRED. Hard cap on the assembled CONTEXT, in approximate tokens; the lowest-scored chunks are dropped whole from the tail until it fits (never mid-chunk). No default — set it for the chosen model's window (e.g. 8000). Unset is startup-fatal."`
+	ContextSize int `name:"context-size" help:"REQUIRED. Hard cap on the retrieved material sent to the model, in approximate tokens; the lowest-scored chunks are dropped whole from the tail until it fits (never mid-chunk). No default — set it for the chosen model's window (e.g. 8000). Unset is startup-fatal."`
 
 	// FollowupWindow gates non-reply follow-ups by a language-neutral recency signal
 	// (ADR 0018): a non-reply is treated as a follow-up only if its sender already
@@ -233,7 +233,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// inherit a number that is wrong for the model (startup-fatal, like an unreadable
 	// prompt template — ADR 0016).
 	if c.ContextSize <= 0 {
-		return fmt.Errorf("--context-size is required: set the CONTEXT token cap for the chosen model's window (e.g. 8000); there is no default because the right cap depends on the model")
+		return fmt.Errorf("--context-size is required: set the retrieved-material token cap for the chosen model's window (e.g. 8000); there is no default because the right cap depends on the model")
 	}
 
 	// The spend ceiling is built first: cost-safety must exist before any

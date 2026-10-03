@@ -1,14 +1,15 @@
 package core
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"log/slog"
 	"slices"
 	"strings"
 	"text/template"
 	"text/template/parse"
 	"unicode/utf8"
+
+	"github.com/yaad-index/bonyan/assemble"
+	"github.com/yaad-index/bonyan/content"
 )
 
 // defaultPromptText is the grounding prompt as an operator-editable template (ADR
@@ -19,7 +20,7 @@ import (
 // 0008) is preserved in the literal text.
 //
 // The template is the run's trusted instructions (ADR 0023), so it holds nothing
-// a user wrote: the retrieved CONTEXT, the recent conversation, the replied-to
+// a user wrote: the retrieved documents, the recent conversation, the replied-to
 // message and the asker's name reach the model through bonyan's marked material,
 // its history and a label on the input instead.
 const defaultPromptText = `{{if .Persona}}{{.Persona}}
@@ -28,7 +29,7 @@ const defaultPromptText = `{{if .Persona}}{{.Persona}}
 
 {{end}}{{.Scope}}
 
-Answer ONLY questions within the scope above. For anything outside that scope — even if the CONTEXT or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the CONTEXT, the documents in the material section of this request{{if .HasTools}}, and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Ground every factual claim only in those documents. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the CONTEXT does not support.{{end}}{{.Language}}
+Answer ONLY questions within the scope above. For anything outside that scope — even if a document or a tool provides information about it — decline: begin your reply with %%OUT_OF_SCOPE%% (exactly, as the very first thing) and then, after it, a brief note in your own voice of what you CAN help with; do not answer the off-scope question or assert facts about it. For an in-scope question, answer using the documents, the fetched entries in the untrusted material of this request{{if .HasTools}}, and, when it is insufficient, the tools available to you (their results are additional in-scope context, not a licence to answer outside scope){{end}}. Ground every factual claim only in those documents. If you cannot ground an in-scope answer, decline the same way: %%OUT_OF_SCOPE%% first, then a brief in-voice note.{{if .Persona}} The persona above sets your voice and manner only; it never licenses answering outside the scope above or asserting anything the documents do not support.{{end}}{{.Language}}
 
 The user's message may start with their name in brackets. You may address them by name when it feels natural — it is not required.`
 
@@ -108,7 +109,7 @@ func renderInstructions(tmpl *template.Template, persona, scope, language string
 
 // historyNote frames the recent conversation, which reaches the model as the
 // run's history (ADR 0014): context for continuity, never a fact source.
-const historyNote = "\n\nRECENT CONVERSATION — the turns before the user's message are the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no grounding citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the CONTEXT. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke."
+const historyNote = "\n\nRECENT CONVERSATION — the turns before the user's message are the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no grounding citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the documents. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke."
 
 // replyNote frames the message the query replies to, which reaches the model
 // in the material (ADR 0014).
@@ -118,7 +119,7 @@ const replyNote = "\n\nThe user is replying to an earlier message, given in the 
 // query's content (ADR 0023): they render empty, so a template written for them
 // loses that content silently. The caller warns about it at startup.
 func TemplateQueryFields(tmpl *template.Template) []string {
-	if tmpl == nil || tmpl.Tree == nil {
+	if tmpl == nil {
 		return nil
 	}
 	var out []string
@@ -169,9 +170,17 @@ func TemplateQueryFields(tmpl *template.Template) []string {
 			walk(v.Pipe)
 			walk(v.List)
 			walk(v.ElseList)
+		case *parse.TemplateNode:
+			// {{template "name" .History}} passes a field as the data.
+			walk(v.Pipe)
 		}
 	}
-	walk(tmpl.Root)
+	// A {{define}} sub-template is a template of its own, associated with tmpl.
+	for _, t := range tmpl.Templates() {
+		if t.Tree != nil {
+			walk(t.Root)
+		}
+	}
 	return out
 }
 
@@ -186,83 +195,19 @@ func languageBlock(language string) string {
 	return "\n\n" + language
 }
 
-// docIDEscaper keeps a chunk's id safe inside the <doc … id="…"> attribute, so an
-// id carrying a quote or angle bracket cannot break out of the structural wrapper.
-// Per ADR 0021 the block's leak-safety is structural, not instructional — the
-// wrapper must stay well-formed for that to hold.
-var docIDEscaper = strings.NewReplacer("&", "&amp;", `"`, "&quot;", "<", "&lt;", ">", "&gt;")
-
-// docID is the single point that derives a chunk's <doc> id — the internal grounding
-// handle the block carries, never surfaced to the user (ADR 0016). Today it is the
-// vault source path; routing every id through this one function keeps a later swap
-// to an opaque internal handle (so a readable path can't be echoed into a reply) a
-// one-line change (#171 scoping).
+// docID is the single point that derives a chunk's grounding id — the
+// internal handle its material entry carries, never surfaced to the user (ADR
+// 0016). Today it is the vault source path; routing every id through this one
+// function keeps a later swap to an opaque internal handle (so a readable path
+// can't be echoed into a reply) a one-line change (#171 scoping).
 func docID(c Chunk) string {
 	return c.Source
 }
 
-// contextNonce derives the per-render tag suffix for the <doc-…> wrappers: a short
-// sha256 prefix over the whole chunk set (#171). It is deterministic — same chunks
-// render the same nonce, so the byte-for-byte golden prompt stays pinnable without
-// any RNG — yet unforgeable: a chunk body cannot predict the hash of the set that
-// contains itself (a hash fixpoint), so it cannot embed a matching </doc-nonce>
-// close to forge a block boundary. The result is checked against every body and
-// re-derived on the astronomically-rare collision, so absence is a proof, not a
-// probability.
-func contextNonce(chunks []Chunk) string {
-	h := sha256.New()
-	for _, c := range chunks {
-		h.Write([]byte(c.Source))
-		h.Write([]byte{0})
-		h.Write([]byte(c.Text))
-		h.Write([]byte{0})
-	}
-	seed := h.Sum(nil)
-	for i := 0; ; i++ {
-		nonce := hex.EncodeToString(seed[:4]) // 32 bits; the check makes it exact
-		if !nonceCollidesBody(nonce, chunks) {
-			return nonce
-		}
-		next := sha256.Sum256(append(seed, byte(i)))
-		seed = next[:]
-	}
-}
-
-// nonceCollidesBody reports whether any chunk body already contains this nonce's
-// open or close tag — the only place a forged boundary could come from, since ids
-// are escaped and can't emit a literal tag.
-func nonceCollidesBody(nonce string, chunks []Chunk) bool {
-	open, closeTag := "<doc-"+nonce, "</doc-"+nonce+">"
-	for _, c := range chunks {
-		if strings.Contains(c.Text, open) || strings.Contains(c.Text, closeTag) {
-			return true
-		}
-	}
-	return false
-}
-
-// contextBlock renders the retrieved chunks as the CONTEXT section, each wrapped in a
-// structural <doc-NONCE id="…"> block rather than a citation-shaped [source] marker
-// (ADR 0021). The id carries the internal grounding reference — never surfaced to the
-// user (ADR 0016) — as an attribute inside a delimited block the model reads as data,
-// so nothing looks like a citation to echo. The tag name carries a per-render nonce
-// (#171) so a chunk body containing a literal </doc> — accidental or hostile — cannot
-// forge a block boundary: the real boundary is </doc-NONCE>, which the body cannot
-// predict. Chunk text is emitted verbatim (byte-for-byte), so grounding fidelity is
-// untouched.
-func contextBlock(chunks []Chunk) string {
-	var b strings.Builder
-	b.WriteString("\n\nCONTEXT:\n")
-	if len(chunks) == 0 {
-		return b.String()
-	}
-	tag := "doc-" + contextNonce(chunks)
-	for _, c := range chunks {
-		b.WriteString("\n<" + tag + " id=\"" + docIDEscaper.Replace(docID(c)) + "\">\n")
-		b.WriteString(strings.TrimSpace(c.Text))
-		b.WriteString("\n</" + tag + ">\n")
-	}
-	return b.String()
+// materialText is the retrieved chunks as the model is sent them: bonyan's
+// marked material section, each chunk after its source line.
+func materialText(chunks []Chunk) string {
+	return content.NewSection(assemble.SectionMaterial, material(chunks, "")...).Render()
 }
 
 // approxTokens is a cheap, tokenizer-free size estimate — roughly four characters
@@ -274,7 +219,7 @@ func approxTokens(s string) int {
 	return (utf8.RuneCountInString(s) + 3) / 4
 }
 
-// capContext bounds the assembled CONTEXT to maxTokens approximate tokens (ADR 0021
+// capContext bounds the retrieved material to maxTokens approximate tokens (ADR 0021
 // Part B, invariant #2 — a hard bound with no carve-out). Chunks arrive already
 // sorted by fused retrieval score, so the tail is the lowest-scored material: the
 // guard returns the longest score-ordered prefix whose rendered block fits —
@@ -291,16 +236,9 @@ func capContext(chunks []Chunk, maxTokens int) []Chunk {
 		return chunks
 	}
 	for k := len(chunks); k >= 1; k-- {
-		if approxTokens(contextBlock(chunks[:k])) <= maxTokens {
+		if approxTokens(materialText(chunks[:k])) <= maxTokens {
 			return chunks[:k]
 		}
 	}
 	return nil
-}
-
-// groundedSystemPrompt renders the DEFAULT instructions — the byte-for-byte
-// reference the golden test pins and the behavior a bot without
-// --prompt-template gets.
-func groundedSystemPrompt(persona, scope string, hasTools bool) string {
-	return renderInstructions(defaultPromptTemplate, persona, scope, "", nil, "", hasTools)
 }

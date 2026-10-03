@@ -26,7 +26,7 @@ nothing concrete:
 ```
 cmd/yaad-grove/               thin CLI (Kong): parse config, wire collaborators, run
 internal/core/                the engine — Answer(), domain types, collaborator interfaces
-internal/model/               OpenAI-compatible model client (implements core.Model)
+internal/model/               native tool-call recovery around a bonyan chat model
 internal/retrieval/           full-text vault retriever (implements core.Retriever)
 internal/tools/               MCP client / tool registry (implements core.Tools)
 internal/transport/           platform-neutral transport interface + capabilities

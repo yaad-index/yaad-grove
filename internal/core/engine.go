@@ -4,10 +4,10 @@
 //
 // Nothing in this package knows about any transport (Telegram, Discord, ...),
 // any concrete model provider, or any specific tool. Those all arrive as
-// interfaces (Model, Retriever, Tools) and are wired in cmd/yaad-grove. This is
-// the boundary that makes the engine generic from day one (ADR 0001): a bot is
-// just (vault + tools + scope + transport), and only this package defines what
-// "answer" means.
+// interfaces (a bonyan chat model, Retriever, Tools) and are wired in
+// cmd/yaad-grove. This is the boundary that makes the engine generic from day
+// one (ADR 0001): a bot is just (vault + tools + scope + transport), and only
+// this package defines what "answer" means.
 package core
 
 import (
@@ -144,46 +144,6 @@ type Action struct {
 	Label string
 }
 
-// Usage is the token accounting for a model call — what the global spend meter
-// (ADR 0006) records. An OpenAI-compatible response reports these in its `usage`
-// field.
-type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-}
-
-// Completion is a model call's result. It is either a final answer (Text) or a
-// request to run one or more tools (ToolCalls) — never both meaningfully; the
-// engine loops, running the tools and calling again, until the model returns
-// text (ADR 0011). Usage travels with it so the model-call path can Record actual
-// spend against the ceiling (ADR 0006).
-type Completion struct {
-	Text      string
-	ToolCalls []ToolCall
-	Usage     Usage
-}
-
-// Role is a conversation turn's author in the model exchange.
-type Role string
-
-const (
-	RoleSystem    Role = "system"
-	RoleUser      Role = "user"
-	RoleAssistant Role = "assistant"
-	RoleTool      Role = "tool"
-)
-
-// Message is one turn in the model conversation. Assistant turns may carry
-// ToolCalls (the model's tool requests); tool turns carry a ToolCallID naming the
-// request they answer — the two must correlate (ADR 0011).
-type Message struct {
-	Role       Role
-	Content    string
-	ToolCalls  []ToolCall
-	ToolCallID string
-}
-
 // ToolDef is a callable tool advertised to the model: its name, a description,
 // and the JSON Schema for its arguments. The schema is passed through to the
 // model as-is; the MCP server validates arguments on its end (no client-side
@@ -200,21 +160,6 @@ type ToolCall struct {
 	Name      string
 	Arguments map[string]any
 }
-
-// Model is an OpenAI-compatible chat model. The engine depends only on this
-// interface; the concrete client lives in internal/model. Complete runs one
-// round of the conversation with the available tools and returns either a final
-// text answer or the tools the model wants to call, plus the call's usage.
-type Model interface {
-	Complete(ctx context.Context, messages []Message, tools []ToolDef) (Completion, error)
-}
-
-// ErrToolUnavailable marks a tool *call* that failed at the transport level (a
-// dead MCP session, a broken RPC) rather than a tool that ran and reported an
-// error. The engine aborts the loop on it — it is infrastructure the model can't
-// reason its way around — whereas a tool-reported failure is fed back as content
-// so the model can adapt (ADR 0011).
-var ErrToolUnavailable = errors.New("core: tool call unavailable")
 
 // Chunk is a retrieved piece of the curated vault, with its source for
 // attribution in the answer.
@@ -237,15 +182,14 @@ type Retriever interface {
 type Tools interface {
 	// Defs returns the callable tool definitions to advertise to the model.
 	Defs() []ToolDef
-	// Call invokes a named tool with arguments and returns its text result. A
-	// transport-level failure (dead session) wraps ErrToolUnavailable; a
-	// tool-reported failure is an ordinary error.
+	// Call invokes a named tool with arguments and returns its text result, or
+	// the error the call failed with.
 	Call(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
 // Engine answers queries grounded on a Retriever's chunks and Tools' results,
-// driven by a Model, and refuses out-of-scope input. It is the only place that
-// defines answering; everything else adapts into or out of it.
+// driven by a chat model, and refuses out-of-scope input. It is the only place
+// that defines answering; everything else adapts into or out of it.
 type Engine struct {
 	// chat is the model the agent run answers with, under the name modelName.
 	chat      bmodel.Chat
@@ -272,7 +216,7 @@ type Engine struct {
 	// Empty = the base language, which adds nothing — the engine knows no specific
 	// language, it just injects whatever the pack provides.
 	language string
-	// contextTokens is the hard cap on the assembled CONTEXT, in approximate tokens
+	// contextTokens is the hard cap on the retrieved material, in approximate tokens
 	// (ADR 0021 Part B). Zero means no cap — the knob's requiredness is enforced at
 	// startup by the CLI, so an in-process engine built without it behaves as before.
 	contextTokens int
@@ -303,7 +247,7 @@ func WithLanguage(prompt string) Option {
 	return func(e *Engine) { e.language = prompt }
 }
 
-// WithContextTokens sets the hard cap on the assembled CONTEXT, in approximate
+// WithContextTokens sets the hard cap on the retrieved material, in approximate
 // tokens (ADR 0021 Part B). Zero or negative is a no-op (no cap): the requiredness
 // is enforced at startup by the CLI, not here, so existing callers and tests that
 // build an engine without a cap keep working.
@@ -395,7 +339,7 @@ const maxToolIterations = 5
 // is in scope. The refusal sentinel fires the same as ever.
 //
 // The engine depends only on its interfaces (ADR 0001): the spend ceiling is a
-// metered Model decorator (ADR 0006/0008) and the consent gate runs ahead of
+// metered chat-model decorator (ADR 0006/0008) and the consent gate runs ahead of
 // Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	chunks, err := e.retriever.Retrieve(ctx, q.Text)
@@ -403,7 +347,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		return Reply{}, err
 	}
 	// Hard context-size guard (ADR 0021 Part B): chunks arrive score-sorted, so cap
-	// the assembled CONTEXT by dropping whole chunks from the lowest-scored tail
+	// the retrieved material by dropping whole chunks from the lowest-scored tail
 	// until the rendered block fits the configured token budget — never mid-chunk.
 	// The guard runs before the grounding trace and the empty-retrieval short-circuit
 	// so both reflect the chunks that actually ground the answer.
@@ -455,7 +399,10 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 			MaxSteps: maxToolIterations,
 			Deadline: answerDeadline,
 			// The spend ceiling is the engine's own meter around the model (ADR
-			// 0006); the run's budget only has to be positive.
+			// 0006), so the run's budget must never trip first. bonyan requires
+			// both bounds positive; the model's price is zero, so bonyan's meter
+			// costs every call at 0 and the cost bound of 1 is never reached,
+			// and runTokens sits far above any real answer.
 			Budget: agent.Budget{MaxTokens: runTokens, MaxCostMicros: 1},
 		},
 		// The engine's context guard (ADR 0021) bounds what is sent; bonyan's
@@ -510,14 +457,18 @@ const (
 
 // askerLabel prefixes the input with who asks, when known: a label on the
 // untrusted input, never in the instructions (#99, ADR 0023). Whitespace runs
-// collapse so a name cannot start a line of its own.
+// collapse so a name cannot start a line of its own, and its square brackets
+// become parentheses so it cannot close the label early and open another.
 func askerLabel(display string) string {
-	name := strings.Join(strings.Fields(display), " ")
+	name := labelBrackets.Replace(strings.Join(strings.Fields(display), " "))
 	if name == "" {
 		return ""
 	}
 	return "[" + name + "] "
 }
+
+// labelBrackets keeps a name inside its label.
+var labelBrackets = strings.NewReplacer("[", "(", "]", ")")
 
 // material is the run's untrusted material: each retrieved chunk under its
 // grounding id, then the message the query replies to.
