@@ -53,7 +53,7 @@ Extracting facts is the memory backend's job, not bonyan's or the engine's (bony
 
 ### 4. Trust: memory personalises, it never grounds
 
-- Recalled records are untrusted: each comes back as memory whose source is the kind of the turns it was derived from, inside a marked section. No record is ever trusted, whatever it says (bonyan ADR 0001 §4).
+- Recalled records are untrusted: each comes back as memory whose source is the kind of the turns it was derived from, classified under that kind and as model output, since the service's model wrote it, inside a marked section. No record is ever trusted, whatever it says (bonyan ADR 0001 §4).
 - The grounding boundary of ADR 0008 and 0011 holds. Memory may shape an answer to the person asking (their language, what they said before, what they prefer). It cannot answer an in-scope question in place of retrieval, and it cannot widen the scope: a question the vault cannot ground is still refused, whatever memory holds.
 
 ### 5. Consent and deletion
@@ -70,12 +70,17 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 | bonyan backend | the service |
 |---|---|
 | a subject | one workspace, named by the namespace and the user's ID, escaped, holding the user's peer and the bot's peer |
-| an event | a message in a session, from the user's peer or the bot's |
-| a long-term record | a conclusion the deriver formed about the user's peer |
-| recall | a semantic query over the user's conclusions; whether the user's representation also comes back, as a record, is settled in the backend's increment |
+| an event | a message in a session, from the user's peer or the bot's, carrying bonyan's fields for the record (layer, source, server, decision) in its metadata, and the record's time as its creation time |
+| a fact a program remembers | a message in a reserved facts session, carrying its fields the same way, with the deriver turned off for it |
+| a fact the service derives | a conclusion the deriver formed about the user's peer, read as an untrusted record whose time is the conclusion's creation time |
+| recall | a semantic search of the facts session, and a semantic query over the user's conclusions; whether the user's representation also comes back, as a record, is settled in the backend's increment |
 | history | the session's messages |
 | `DeleteSubject` | deactivate the subject's sessions, then delete the workspace |
-| `DeleteBefore` | delete each conclusion older than the cut, and each session that ended before it |
+| `DeleteBefore` | delete each conclusion older than the cut and each session wholly before it, and rewrite a session that straddles the cut (below) |
+
+**Why records are messages.** A conclusion has no field to carry a record's source, server and decision, and the service sets its creation time itself, so a record written as a conclusion could not come back as written, which bonyan's conformance suite requires. A message carries metadata and takes its creation time from the writer, so every record bonyan writes is a message, and only what the deriver forms is read from conclusions.
+
+**Rewriting a session that straddles the cut.** The service deletes messages only a whole session at a time, so a session holding records on both sides of the cut is rewritten: its newer messages are written to a new generation of the session, tagged with a generation ID in their metadata and re-added with the deriver turned off so it does not derive from them twice, and only then is the old generation deleted. A purge interrupted between the two steps leaves both generations, and the next purge finds the half-done rewrite, finishes it and removes the old one: a crash may leave a duplicate until the next purge, and never loses a newer record. The generation ID is part of the session's name. Sessions keyed by their retention window (§2) make a rewrite rare.
 
 **Namespaces.** The service's workspaces do not nest, so the namespace is part of each workspace's name. The backend refuses to read or delete a workspace outside its namespace, so one instance's withdrawal or retention purge can never touch another instance's users.
 
