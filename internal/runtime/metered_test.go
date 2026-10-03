@@ -9,20 +9,21 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	bmodel "github.com/yaad-index/bonyan/model"
+
 	"github.com/yaad-index/yaad-grove/internal/budget"
-	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 )
 
 type spyModel struct {
 	calls int
-	usage int
+	usage int64
 	err   error
 }
 
-func (s *spyModel) Complete(context.Context, []core.Message, []core.ToolDef) (core.Completion, error) {
+func (s *spyModel) Chat(context.Context, bmodel.ChatRequest) (bmodel.ChatResponse, error) {
 	s.calls++
-	return core.Completion{Text: "ok", Usage: core.Usage{TotalTokens: s.usage}}, s.err
+	return bmodel.ChatResponse{Content: "ok", Usage: &bmodel.Usage{InputTokens: s.usage - s.usage/3, OutputTokens: s.usage / 3}}, s.err
 }
 
 func newMeter(t *testing.T, ceiling int64) *budget.Meter {
@@ -32,15 +33,15 @@ func newMeter(t *testing.T, ceiling int64) *budget.Meter {
 	return m
 }
 
-// A successful completion records its TotalTokens against the meter.
+// A successful call records its input and output tokens against the meter.
 func TestMeteredRecordsUsage(t *testing.T) {
 	meter := newMeter(t, 100)
 	spy := &spyModel{usage: 30}
-	m := runtime.MeterModel(meter, spy)
+	m := runtime.MeterChat(meter, spy)
 
-	c, err := m.Complete(context.Background(), nil, nil)
+	c, err := m.Chat(context.Background(), bmodel.ChatRequest{})
 	require.NoError(t, err)
-	assert.Equal(t, "ok", c.Text)
+	assert.Equal(t, "ok", c.Content)
 	assert.Equal(t, 1, spy.calls)
 	assert.Equal(t, int64(70), meter.Remaining(), "usage recorded against the meter")
 }
@@ -50,9 +51,9 @@ func TestMeteredBlocksOverBudget(t *testing.T) {
 	meter := newMeter(t, 10)
 	require.NoError(t, meter.Record(10)) // exhaust the ceiling
 	spy := &spyModel{usage: 5}
-	m := runtime.MeterModel(meter, spy)
+	m := runtime.MeterChat(meter, spy)
 
-	_, err := m.Complete(context.Background(), nil, nil)
+	_, err := m.Chat(context.Background(), bmodel.ChatRequest{})
 	require.ErrorIs(t, err, budget.ErrOverBudget)
 	assert.Equal(t, 0, spy.calls, "no underlying call when over budget")
 }
@@ -61,9 +62,9 @@ func TestMeteredBlocksOverBudget(t *testing.T) {
 func TestMeteredPropagatesInnerError(t *testing.T) {
 	meter := newMeter(t, 100)
 	spy := &spyModel{err: errors.New("boom")}
-	m := runtime.MeterModel(meter, spy)
+	m := runtime.MeterChat(meter, spy)
 
-	_, err := m.Complete(context.Background(), nil, nil)
+	_, err := m.Chat(context.Background(), bmodel.ChatRequest{})
 	assert.Error(t, err)
 	assert.Equal(t, int64(100), meter.Remaining(), "a failed call records no spend")
 }
