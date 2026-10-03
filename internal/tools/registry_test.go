@@ -230,3 +230,19 @@ func TestCallInvalidArgsFeedsBackNotUnavailable(t *testing.T) {
 		"a rejected call (invalid params) feeds back to the model, it does not abort the turn")
 	assert.Contains(t, err.Error(), "get_things")
 }
+
+// The registry names the server each tool is served by, as configured, and
+// no server for a tool it does not hold.
+func TestRegistryNamesEachToolsServer(t *testing.T) {
+	r := New(nil, "test")
+	connectTo(t, r, referenceServer(), ServerConfig{Name: "docs"})
+	s2 := mcp.NewServer(&mcp.Implementation{Name: "second", Version: "v1"}, nil)
+	mcp.AddTool(s2, &mcp.Tool{Name: "ping", Description: "returns pong"},
+		func(_ context.Context, _ *mcp.CallToolRequest, _ map[string]any) (*mcp.CallToolResult, any, error) {
+			return &mcp.CallToolResult{Content: []mcp.Content{&mcp.TextContent{Text: "pong"}}}, nil, nil
+		})
+	connectTo(t, r, s2, ServerConfig{Name: "net"})
+	assert.Equal(t, "docs", r.Server("echo"))
+	assert.Equal(t, "net", r.Server("ping"))
+	assert.Equal(t, "", r.Server("nothing"))
+}
