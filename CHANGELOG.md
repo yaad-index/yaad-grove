@@ -1,5 +1,18 @@
 # Changelog
 
+## [0.20.0](https://github.com/yaad-index/yaad-grove/compare/v0.19.0...v0.20.0) (2026-10-03)
+
+
+### Features
+
+* adapt the engine's tools and model to bonyan ([#189](https://github.com/yaad-index/yaad-grove/issues/189)) ([88cc0a5](https://github.com/yaad-index/yaad-grove/commit/88cc0a5385c01e3c838505074e469ce2e035def3))
+* answer through a bonyan agent run ([#190](https://github.com/yaad-index/yaad-grove/issues/190)) ([e7c9f6e](https://github.com/yaad-index/yaad-grove/commit/e7c9f6e3f6f21e3a8e068a648573515a690f5ce8))
+
+
+### Bug Fixes
+
+* stamp the release version into images and test the tag before publishing ([#185](https://github.com/yaad-index/yaad-grove/issues/185)) ([b65b460](https://github.com/yaad-index/yaad-grove/commit/b65b4606fc86904adfd100f9298233a8640828c1))
+
 ## [0.19.0](https://github.com/yaad-index/yaad-grove/compare/v0.18.1...v0.19.0) (2026-09-08)
 
 
