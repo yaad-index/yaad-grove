@@ -9,6 +9,9 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/yaad-index/bonyan/content"
+	bmodel "github.com/yaad-index/bonyan/model"
+
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/memory"
@@ -16,19 +19,43 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
-// capModel records the system prompt of each call — to inspect the assembled
-// prompt end to end through the handler + real engine.
+// capModel records each request — to inspect the assembled request end to end
+// through the handler + real engine.
 type capModel struct {
-	lastSystem string
-	calls      int
+	last  bmodel.ChatRequest
+	calls int
 }
 
-func (m *capModel) Complete(_ context.Context, msgs []core.Message, _ []core.ToolDef) (core.Completion, error) {
+func (m *capModel) Chat(_ context.Context, req bmodel.ChatRequest) (bmodel.ChatResponse, error) {
 	m.calls++
-	if len(msgs) > 0 {
-		m.lastSystem = msgs[0].Content
+	m.last = req
+	return bmodel.ChatResponse{Content: "The widget calibrates via the blue dial.", StopReason: bmodel.StopEnd, Usage: &bmodel.Usage{InputTokens: 1, OutputTokens: 1}}, nil
+}
+
+// text is the request as the model reads it: system, then every turn.
+func (m *capModel) text() (system, rest string) {
+	var b strings.Builder
+	for i, msg := range m.last.Messages {
+		for _, p := range msg.Parts {
+			var t string
+			switch v := p.(type) {
+			case content.Trusted:
+				t = v.String()
+			case content.Section:
+				t = v.Render()
+			case content.Marked:
+				t = v.Text()
+			case content.Untrusted:
+				t = v.Raw()
+			}
+			if i == 0 {
+				system += t
+			} else {
+				b.WriteString(t)
+			}
+		}
 	}
-	return core.Completion{Text: "The widget calibrates via the blue dial."}, nil
+	return system, b.String()
 }
 
 // condRetriever grounds a normal question but returns nothing for a meta query,
@@ -42,11 +69,6 @@ func (condRetriever) Retrieve(_ context.Context, q string) ([]core.Chunk, error)
 	return []core.Chunk{{Source: "a.md", Text: "widget info"}}, nil
 }
 
-type noTools struct{}
-
-func (noTools) Defs() []core.ToolDef                                         { return nil }
-func (noTools) Call(context.Context, string, map[string]any) (string, error) { return "", nil }
-
 // End-to-end (the live 0.3.0 "tldr" reproduce, DM path): an admin asks a question,
 // then "tldr". The follow-up reaches the model with the bot's prior answer in the
 // RECENT CONVERSATION block — empty retrieval for the meta query no longer
@@ -54,7 +76,7 @@ func (noTools) Call(context.Context, string, map[string]any) (string, error) { r
 func TestHandlerDMTldrReachesModelWithHistory(t *testing.T) {
 	buf := memory.New(20)
 	model := &capModel{}
-	engine := core.New(model, condRetriever{}, noTools{}, "You answer about the widget.")
+	engine := core.New(model, "test-model", condRetriever{}, nil, "You answer about the widget.")
 	policy := runtime.Policy{Admins: runtime.NewAdminSet([]string{"admin1"}), Memory: buf, Inject: 15, FollowupWindow: time.Hour}
 	consent := &mockConsenter{consent: acl.ConsentGranted}
 	h := runtime.NewHandler(&mockGate{}, engine, nil, nil, nil, nil, consent, policy)
@@ -73,10 +95,12 @@ func TestHandlerDMTldrReachesModelWithHistory(t *testing.T) {
 	_, err = h(context.Background(), dm("tldr", "m2"))
 	require.NoError(t, err)
 	assert.Greater(t, model.calls, callsAfterQ1, "the meta follow-up reaches the model, not an early refuse")
-	assert.Contains(t, model.lastSystem, "RECENT CONVERSATION")
-	assert.Contains(t, model.lastSystem, "The widget calibrates via the blue dial.",
-		"the bot's prior answer is in the assembled prompt")
-	assert.Contains(t, model.lastSystem, "MAY summarize", "the block permits meta-operations")
+	system, rest := model.text()
+	assert.Contains(t, system, "RECENT CONVERSATION")
+	assert.Contains(t, system, "MAY summarize", "the framing permits meta-operations")
+	assert.Contains(t, rest, "The widget calibrates via the blue dial.",
+		"the bot's prior answer is in the request, as history")
+	assert.NotContains(t, system, "The widget calibrates via the blue dial.", "never in the instructions")
 }
 
 func groupMsg(id, text, msgID string, replyToBot bool) transport.Inbound {

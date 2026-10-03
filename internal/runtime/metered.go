@@ -9,43 +9,48 @@ import (
 	"context"
 	"log/slog"
 
+	bmodel "github.com/yaad-index/bonyan/model"
+
 	"github.com/yaad-index/yaad-grove/internal/budget"
-	"github.com/yaad-index/yaad-grove/internal/core"
 )
 
-// meteredModel puts the global spend ceiling on the model-call path (ADR
-// 0006/0008): it checks the meter before each completion and records the actual
-// token usage after. It is a core.Model, injected as the engine's model, so the
-// engine stays free of budget.
-type meteredModel struct {
-	inner core.Model
+// meteredChat puts the global spend ceiling on the model-call path (ADR
+// 0006/0008): it checks the meter before each call and records the actual
+// token usage after. It wraps the chat model the engine's agent run answers
+// with, so the engine stays free of budget.
+type meteredChat struct {
+	inner bmodel.Chat
 	meter *budget.Meter
 }
 
-// MeterModel wraps inner so every completion is gated and accounted against the
+// MeterChat wraps inner so every call is gated and accounted against the
 // spend meter. Over budget, it returns budget.ErrOverBudget without calling
-// inner; on success it records the response's TotalTokens.
-func MeterModel(meter *budget.Meter, inner core.Model) core.Model {
-	return &meteredModel{inner: inner, meter: meter}
+// inner; on success it records the reply's input and output tokens.
+func MeterChat(meter *budget.Meter, inner bmodel.Chat) bmodel.Chat {
+	return &meteredChat{inner: inner, meter: meter}
 }
 
-// Complete refuses when the spend ceiling is reached (no underlying call), else
-// completes and records the usage. It gates every round of the tool-call loop
-// (ADR 0011), so a multi-call answer is naturally bounded by the ceiling.
-func (m *meteredModel) Complete(ctx context.Context, messages []core.Message, tools []core.ToolDef) (core.Completion, error) {
+// Chat refuses when the spend ceiling is reached (no underlying call), else
+// calls and records the usage. It gates every step of the run, tool calls
+// included (ADR 0011), so a multi-call answer is bounded by the ceiling.
+func (m *meteredChat) Chat(ctx context.Context, req bmodel.ChatRequest) (bmodel.ChatResponse, error) {
 	if !m.meter.Allow() {
-		return core.Completion{}, budget.ErrOverBudget
+		return bmodel.ChatResponse{}, budget.ErrOverBudget
 	}
-	completion, err := m.inner.Complete(ctx, messages, tools)
+	resp, err := m.inner.Chat(ctx, req)
 	if err != nil {
-		return core.Completion{}, err
+		return bmodel.ChatResponse{}, err
 	}
 	// Record after a successful (already-paid) call. A record failure is a
 	// persistence lag, not an in-memory undercount (the meter incremented before
 	// the store write), so log it and still return the answer rather than discard a
-	// paid completion (ADR 0008).
-	if rerr := m.meter.Record(int64(completion.Usage.TotalTokens)); rerr != nil {
+	// paid reply (ADR 0008).
+	var used int64
+	if resp.Usage != nil {
+		used = resp.Usage.InputTokens + resp.Usage.OutputTokens
+	}
+	if rerr := m.meter.Record(used); rerr != nil {
 		slog.Warn("spend record failed after a successful completion", "err", rerr)
 	}
-	return completion, nil
+	return resp, nil
 }

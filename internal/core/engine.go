@@ -4,20 +4,27 @@
 //
 // Nothing in this package knows about any transport (Telegram, Discord, ...),
 // any concrete model provider, or any specific tool. Those all arrive as
-// interfaces (Model, Retriever, Tools) and are wired in cmd/yaad-grove. This is
-// the boundary that makes the engine generic from day one (ADR 0001): a bot is
-// just (vault + tools + scope + transport), and only this package defines what
-// "answer" means.
+// interfaces (a bonyan chat model, Retriever, Tools) and are wired in
+// cmd/yaad-grove. This is the boundary that makes the engine generic from day
+// one (ADR 0001): a bot is just (vault + tools + scope + transport), and only
+// this package defines what "answer" means.
 package core
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"text/template"
 	"time"
+
+	"github.com/yaad-index/bonyan/agent"
+	"github.com/yaad-index/bonyan/assemble"
+	"github.com/yaad-index/bonyan/budget"
+	"github.com/yaad-index/bonyan/content"
+	bmodel "github.com/yaad-index/bonyan/model"
 )
 
 // ErrNotImplemented marks scaffold stubs that have structure but no behavior
@@ -137,46 +144,6 @@ type Action struct {
 	Label string
 }
 
-// Usage is the token accounting for a model call — what the global spend meter
-// (ADR 0006) records. An OpenAI-compatible response reports these in its `usage`
-// field.
-type Usage struct {
-	PromptTokens     int
-	CompletionTokens int
-	TotalTokens      int
-}
-
-// Completion is a model call's result. It is either a final answer (Text) or a
-// request to run one or more tools (ToolCalls) — never both meaningfully; the
-// engine loops, running the tools and calling again, until the model returns
-// text (ADR 0011). Usage travels with it so the model-call path can Record actual
-// spend against the ceiling (ADR 0006).
-type Completion struct {
-	Text      string
-	ToolCalls []ToolCall
-	Usage     Usage
-}
-
-// Role is a conversation turn's author in the model exchange.
-type Role string
-
-const (
-	RoleSystem    Role = "system"
-	RoleUser      Role = "user"
-	RoleAssistant Role = "assistant"
-	RoleTool      Role = "tool"
-)
-
-// Message is one turn in the model conversation. Assistant turns may carry
-// ToolCalls (the model's tool requests); tool turns carry a ToolCallID naming the
-// request they answer — the two must correlate (ADR 0011).
-type Message struct {
-	Role       Role
-	Content    string
-	ToolCalls  []ToolCall
-	ToolCallID string
-}
-
 // ToolDef is a callable tool advertised to the model: its name, a description,
 // and the JSON Schema for its arguments. The schema is passed through to the
 // model as-is; the MCP server validates arguments on its end (no client-side
@@ -193,21 +160,6 @@ type ToolCall struct {
 	Name      string
 	Arguments map[string]any
 }
-
-// Model is an OpenAI-compatible chat model. The engine depends only on this
-// interface; the concrete client lives in internal/model. Complete runs one
-// round of the conversation with the available tools and returns either a final
-// text answer or the tools the model wants to call, plus the call's usage.
-type Model interface {
-	Complete(ctx context.Context, messages []Message, tools []ToolDef) (Completion, error)
-}
-
-// ErrToolUnavailable marks a tool *call* that failed at the transport level (a
-// dead MCP session, a broken RPC) rather than a tool that ran and reported an
-// error. The engine aborts the loop on it — it is infrastructure the model can't
-// reason its way around — whereas a tool-reported failure is fed back as content
-// so the model can adapt (ADR 0011).
-var ErrToolUnavailable = errors.New("core: tool call unavailable")
 
 // Chunk is a retrieved piece of the curated vault, with its source for
 // attribution in the answer.
@@ -230,19 +182,23 @@ type Retriever interface {
 type Tools interface {
 	// Defs returns the callable tool definitions to advertise to the model.
 	Defs() []ToolDef
-	// Call invokes a named tool with arguments and returns its text result. A
-	// transport-level failure (dead session) wraps ErrToolUnavailable; a
-	// tool-reported failure is an ordinary error.
+	// Call invokes a named tool with arguments and returns its text result, or
+	// the error the call failed with.
 	Call(ctx context.Context, name string, args map[string]any) (string, error)
 }
 
 // Engine answers queries grounded on a Retriever's chunks and Tools' results,
-// driven by a Model, and refuses out-of-scope input. It is the only place that
-// defines answering; everything else adapts into or out of it.
+// driven by a chat model, and refuses out-of-scope input. It is the only place
+// that defines answering; everything else adapts into or out of it.
 type Engine struct {
-	model     Model
+	// chat is the model the agent run answers with, under the name modelName.
+	chat      bmodel.Chat
+	modelName string
 	retriever Retriever
-	tools     Tools
+	// tools are the run's tools; nil is none.
+	tools agent.Tools
+	// maxOutputTokens caps each model reply (bonyan requires a cap).
+	maxOutputTokens int
 	// scope is the instance's system prompt / scope statement that bounds the
 	// bot and drives refusal. Loaded from config.
 	scope string
@@ -260,7 +216,7 @@ type Engine struct {
 	// Empty = the base language, which adds nothing — the engine knows no specific
 	// language, it just injects whatever the pack provides.
 	language string
-	// contextTokens is the hard cap on the assembled CONTEXT, in approximate tokens
+	// contextTokens is the hard cap on the retrieved material, in approximate tokens
 	// (ADR 0021 Part B). Zero means no cap — the knob's requiredness is enforced at
 	// startup by the CLI, so an in-process engine built without it behaves as before.
 	contextTokens int
@@ -291,7 +247,7 @@ func WithLanguage(prompt string) Option {
 	return func(e *Engine) { e.language = prompt }
 }
 
-// WithContextTokens sets the hard cap on the assembled CONTEXT, in approximate
+// WithContextTokens sets the hard cap on the retrieved material, in approximate
 // tokens (ADR 0021 Part B). Zero or negative is a no-op (no cap): the requiredness
 // is enforced at startup by the CLI, not here, so existing callers and tests that
 // build an engine without a cap keep working.
@@ -299,10 +255,26 @@ func WithContextTokens(n int) Option {
 	return func(e *Engine) { e.contextTokens = n }
 }
 
-// New wires an engine from its collaborators. All are interfaces so the core
-// carries zero transport, provider, or tool dependencies.
-func New(model Model, retriever Retriever, tools Tools, scope string, opts ...Option) *Engine {
-	e := &Engine{model: model, retriever: retriever, tools: tools, scope: scope}
+// WithMaxOutputTokens caps each model reply, in tokens. Zero or negative keeps
+// DefaultMaxOutputTokens.
+func WithMaxOutputTokens(n int) Option {
+	return func(e *Engine) {
+		if n > 0 {
+			e.maxOutputTokens = n
+		}
+	}
+}
+
+// DefaultMaxOutputTokens caps a model reply when no cap is configured. bonyan
+// requires one; this one is wide enough not to cut a normal answer.
+const DefaultMaxOutputTokens = 4096
+
+// New wires an engine from its collaborators: the chat model, under the name
+// modelName, that a bonyan agent run answers with (ADR 0023), the retriever and
+// the run's tools, nil for none. The core depends on interfaces and bonyan, not
+// on a transport or a provider.
+func New(chat bmodel.Chat, modelName string, retriever Retriever, tools agent.Tools, scope string, opts ...Option) *Engine {
+	e := &Engine{chat: chat, modelName: modelName, retriever: retriever, tools: tools, scope: scope, maxOutputTokens: DefaultMaxOutputTokens}
 	for _, opt := range opts {
 		opt(e)
 	}
@@ -367,7 +339,7 @@ const maxToolIterations = 5
 // is in scope. The refusal sentinel fires the same as ever.
 //
 // The engine depends only on its interfaces (ADR 0001): the spend ceiling is a
-// metered Model decorator (ADR 0006/0008) and the consent gate runs ahead of
+// metered chat-model decorator (ADR 0006/0008) and the consent gate runs ahead of
 // Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	chunks, err := e.retriever.Retrieve(ctx, q.Text)
@@ -375,7 +347,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		return Reply{}, err
 	}
 	// Hard context-size guard (ADR 0021 Part B): chunks arrive score-sorted, so cap
-	// the assembled CONTEXT by dropping whole chunks from the lowest-scored tail
+	// the retrieved material by dropping whole chunks from the lowest-scored tail
 	// until the rendered block fits the configured token budget — never mid-chunk.
 	// The guard runs before the grounding trace and the empty-retrieval short-circuit
 	// so both reflect the chunks that actually ground the answer.
@@ -400,7 +372,10 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	if len(chunks) > 0 {
 		slog.Info("grounding sources", "count", len(chunks), "sources", chunkSources(chunks))
 	}
-	tools := e.tools.Defs()
+	var tools []bmodel.ToolDef
+	if e.tools != nil {
+		tools = e.tools.Definitions()
+	}
 	// Nothing to ground on, no tool that could, AND no conversation to meta-operate
 	// on: refuse without a model call. History AND a reply-context are exceptions — a
 	// meta follow-up like "tldr", or a reply asking about an inlined earlier message,
@@ -411,56 +386,113 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		return Reply{Text: outOfScopeReply, Refused: true}, nil
 	}
 
-	messages := []Message{
-		{Role: RoleSystem, Content: renderPrompt(e.prompt, q.Text, q.User.Display, e.persona, e.scope, e.language, q.History, q.ReplyContext, chunks, len(tools) > 0)},
-		{Role: RoleUser, Content: q.Text},
+	// One bonyan agent run (ADR 0023): the operator's instructions are the
+	// trusted part; the vault chunks, the replied-to message and the recent
+	// conversation reach the model as untrusted material and history, each in
+	// a marked place, and the asker's name only as a label on the input.
+	a := agent.Agent{
+		Name:            "grove",
+		Models:          []agent.Model{{Name: e.modelName, Chat: e.chat}},
+		Prices:          budget.PriceTable{e.modelName: {}},
+		MaxOutputTokens: e.maxOutputTokens,
+		Limits: agent.Limits{
+			MaxSteps: maxToolIterations,
+			Deadline: answerDeadline,
+			// The spend ceiling is the engine's own meter around the model (ADR
+			// 0006), so the run's budget must never trip first. bonyan requires
+			// both bounds positive; the model's price is zero, so bonyan's meter
+			// costs every call at 0 and the cost bound of 1 is never reached,
+			// and runTokens sits far above any real answer.
+			Budget: agent.Budget{MaxTokens: runTokens, MaxCostMicros: 1},
+		},
+		// The engine's context guard (ADR 0021) bounds what is sent; bonyan's
+		// own budgets are set wide so they never trim it further.
+		Context:       assemble.Budgets{Instructions: wide, Memory: wide, Material: wide, History: wide, Tools: wide},
+		LoopThreshold: -1, // the step cap bounds a repeating model, as before
+		Instructions:  content.Instruction(renderInstructions(e.prompt, e.persona, e.scope, e.language, q.History, q.ReplyContext, len(tools) > 0)),
+		Material:      material(chunks, q.ReplyContext),
+		History:       historyMessages(q.History),
 	}
-
-	for i := 0; i < maxToolIterations; i++ {
-		completion, err := e.model.Complete(ctx, messages, tools)
-		if err != nil {
-			return Reply{}, err
-		}
-		if len(completion.ToolCalls) == 0 {
-			// Final answer. The scope prompt has the model lead an out-of-domain (or
-			// ungroundable) reply with the sentinel, then a brief in-persona note of
-			// what it can help with (ADR 0013): parseRefusal strips the marker and
-			// surfaces that note as the persona-shaped decline.
-			text, refused := parseRefusal(completion.Text)
-			return Reply{Text: text, Refused: refused}, nil
-		}
-
-		// The model wants tools: record its request, run each, and append the
-		// results as scoped tool context for the next round.
-		messages = append(messages, Message{Role: RoleAssistant, ToolCalls: completion.ToolCalls})
-		for _, tc := range completion.ToolCalls {
-			result, err := e.tools.Call(ctx, tc.Name, tc.Arguments)
-			if err != nil {
-				if errors.Is(err, ErrToolUnavailable) {
-					// A transport failure is not something the model can reason around.
-					return Reply{}, err
-				}
-				// A tool that ran and failed feeds its failure back so the model adapts.
-				result = "tool error: " + err.Error()
-			}
-			messages = append(messages, Message{Role: RoleTool, ToolCallID: tc.ID, Content: result})
+	if e.tools != nil {
+		a.Tools = e.tools
+	}
+	out, rep, err := agent.Run(ctx, a, content.From(content.Provenance{Kind: content.KindUser}, askerLabel(q.User.Display)+q.Text))
+	if err != nil {
+		return Reply{}, err
+	}
+	if answer, ok := out.Answer(); ok {
+		// Final answer. The scope prompt has the model lead an out-of-domain (or
+		// ungroundable) reply with the sentinel, then a brief in-persona note of
+		// what it can help with (ADR 0013): parseRefusal strips the marker and
+		// surfaces that note as the persona-shaped decline.
+		text, refused := parseRefusal(answer)
+		return Reply{Text: text, Refused: refused}, nil
+	}
+	switch out.Reason() {
+	case agent.ReasonStepLimit:
+		// The loop hit its cap without a final answer — refuse rather than hang.
+		return Reply{Text: outOfScopeReply, Refused: true}, nil
+	case agent.ReasonDeadline:
+		if ctx.Err() != nil {
+			return Reply{}, ctx.Err()
 		}
 	}
-
-	// The loop hit its cap without a final answer — refuse rather than hang.
-	return Reply{Text: outOfScopeReply, Refused: true}, nil
+	if rep.Err != nil {
+		return Reply{}, rep.Err
+	}
+	return Reply{}, fmt.Errorf("core: the answer run ended %s", out)
 }
 
-// conversationBlock renders the injected recent-conversation turns (ADR 0014) as
-// a labelled, threaded, chronological block. It is framed as partial context,
-// never a fact source: only consented participants appear, so a gap — or a reply
-// to "a message not shown" — means not-shown / not-consented, not silence. Each
-// line is timestamped and speaker-attributed; a reply-to whose target is in the
-// injected set names that speaker, else renders "a message not shown". Empty
-// history renders nothing (a standalone question or a disabled buffer).
-func conversationBlock(history []HistoryTurn) string {
-	if len(history) == 0 {
+// The run's bounds that are not the engine's own settings.
+const (
+	// answerDeadline bounds one answer, every model and tool call included.
+	answerDeadline = 3 * time.Minute
+	// runTokens is the per-run token bound bonyan requires; the spend ceiling
+	// is the engine's meter, so this one is set far above any real answer.
+	runTokens = 10_000_000
+	// wide is a context budget, in bytes, that the engine's own guard keeps
+	// every request under.
+	wide = 1 << 22
+)
+
+// askerLabel prefixes the input with who asks, when known: a label on the
+// untrusted input, never in the instructions (#99, ADR 0023). Whitespace runs
+// collapse so a name cannot start a line of its own, and its square brackets
+// become parentheses so it cannot close the label early and open another.
+func askerLabel(display string) string {
+	name := labelBrackets.Replace(strings.Join(strings.Fields(display), " "))
+	if name == "" {
 		return ""
+	}
+	return "[" + name + "] "
+}
+
+// labelBrackets keeps a name inside its label.
+var labelBrackets = strings.NewReplacer("[", "(", "]", ")")
+
+// material is the run's untrusted material: each retrieved chunk under its
+// grounding id, then the message the query replies to.
+func material(chunks []Chunk, replyContext string) []content.Untrusted {
+	out := make([]content.Untrusted, 0, len(chunks)+1)
+	for _, c := range chunks {
+		out = append(out, content.From(content.Provenance{Kind: content.KindFetched, ID: docID(c)}, strings.TrimSpace(c.Text)))
+	}
+	if r := strings.TrimSpace(replyContext); r != "" {
+		out = append(out, content.From(content.Provenance{Kind: content.KindUser, ID: replyID}, r))
+	}
+	return out
+}
+
+// replyID labels the replied-to message among the material.
+const replyID = "replied-to message"
+
+// historyMessages are the recent conversation's turns as the run's history,
+// oldest first: a person's turn is a user message carrying its time, speaker
+// and reply-to in its text, the bot's own is an assistant message. Every turn
+// is untrusted.
+func historyMessages(history []HistoryTurn) []bmodel.Message {
+	if len(history) == 0 {
+		return nil
 	}
 	label := make(map[string]string, len(history)) // message id -> speaker, for reply-to threading
 	for _, t := range history {
@@ -468,13 +500,10 @@ func conversationBlock(history []HistoryTurn) string {
 			label[t.MessageID] = speakerLabel(t)
 		}
 	}
-	var b strings.Builder
-	b.WriteString("\n\nRECENT CONVERSATION — the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no grounding citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the CONTEXT below. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke.\n")
+	out := make([]bmodel.Message, 0, len(history))
 	for _, t := range history {
-		b.WriteString("\n[")
-		b.WriteString(t.Time.Format("15:04"))
-		b.WriteString("] ")
-		b.WriteString(speakerLabel(t))
+		var b strings.Builder
+		b.WriteString("[" + t.Time.Format("15:04") + "] " + speakerLabel(t))
 		if t.ReplyTo != "" {
 			target := label[t.ReplyTo]
 			if target == "" {
@@ -482,10 +511,14 @@ func conversationBlock(history []HistoryTurn) string {
 			}
 			b.WriteString(" (reply to " + target + ")")
 		}
-		b.WriteString(": ")
-		b.WriteString(strings.TrimSpace(t.Text))
+		b.WriteString(": " + strings.TrimSpace(t.Text))
+		if t.Bot {
+			out = append(out, bmodel.Message{Role: bmodel.RoleAssistant, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindModel, ID: t.MessageID}, b.String())}})
+			continue
+		}
+		out = append(out, bmodel.Message{Role: bmodel.RoleUser, Parts: []content.Text{content.From(content.Provenance{Kind: content.KindUser, ID: t.MessageID}, b.String())}})
 	}
-	return b.String()
+	return out
 }
 
 // speakerLabel renders a turn's author: the human display label, or the assistant

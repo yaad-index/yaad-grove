@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
@@ -24,6 +25,8 @@ import (
 
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
+	"github.com/yaad-index/bonyan/model/chatcompat"
+	"github.com/yaad-index/bonyan/secret"
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
@@ -45,6 +48,9 @@ import (
 
 // version is the build version, overridden at link time via -ldflags.
 var version = "dev"
+
+// modelKeyEnv names the environment variable holding the model API key.
+const modelKeyEnv = "YAADGROVE_MODEL_API_KEY"
 
 // CLI is the yaad-grove command surface. Every config value resolves through
 // file < env < flag.
@@ -82,6 +88,8 @@ type ServeCmd struct {
 
 	ModelBaseURL string `name:"model-base-url" default:"https://api.openai.com/v1" help:"OpenAI-compatible API base URL."`
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
+	// MaxOutputTokens caps each model reply (ADR 0023: the agent run requires a cap).
+	MaxOutputTokens int `name:"max-output-tokens" default:"4096" help:"Cap on each model reply, in tokens."`
 
 	// Semantic retrieval (ADR 0017): setting the embedding base-url + model pair
 	// (both together) switches retrieval from keyword to embedding-based, with
@@ -202,13 +210,13 @@ type ServeCmd struct {
 	MemoryTurns  int `name:"memory-turns" default:"100" help:"Recent conversation turns retained per chat for follow-ups (0 disables)."`
 	MemoryInject int `name:"memory-inject" default:"15" help:"How many retained turns may enter a prompt (the injected slice)."`
 
-	// ContextSize (ADR 0021 Part B) is the REQUIRED hard cap on the assembled CONTEXT
+	// ContextSize (ADR 0021 Part B) is the REQUIRED hard cap on the retrieved material
 	// block, in approximate tokens. It has no default: the right cap depends on the
 	// chosen model's window, so it must be set deliberately alongside the model —
 	// unset is startup-fatal, like an unreadable prompt template (ADR 0016). Retrieval
 	// is already score-sorted, so the guard drops whole chunks from the lowest-scored
 	// tail until the rendered block fits; it never truncates mid-chunk.
-	ContextSize int `name:"context-size" help:"REQUIRED. Hard cap on the assembled CONTEXT, in approximate tokens; the lowest-scored chunks are dropped whole from the tail until it fits (never mid-chunk). No default — set it for the chosen model's window (e.g. 8000). Unset is startup-fatal."`
+	ContextSize int `name:"context-size" help:"REQUIRED. Hard cap on the retrieved material sent to the model, in approximate tokens; the lowest-scored chunks are dropped whole from the tail until it fits (never mid-chunk). No default — set it for the chosen model's window (e.g. 8000). Unset is startup-fatal."`
 
 	// FollowupWindow gates non-reply follow-ups by a language-neutral recency signal
 	// (ADR 0018): a non-reply is treated as a follow-up only if its sender already
@@ -225,7 +233,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// inherit a number that is wrong for the model (startup-fatal, like an unreadable
 	// prompt template — ADR 0016).
 	if c.ContextSize <= 0 {
-		return fmt.Errorf("--context-size is required: set the CONTEXT token cap for the chosen model's window (e.g. 8000); there is no default because the right cap depends on the model")
+		return fmt.Errorf("--context-size is required: set the retrieved-material token cap for the chosen model's window (e.g. 8000); there is no default because the right cap depends on the model")
 	}
 
 	// The spend ceiling is built first: cost-safety must exist before any
@@ -243,14 +251,20 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 
-	// The model is wrapped with the spend meter (ADR 0006/0008): the engine sees a
-	// metered core.Model, so the ceiling is enforced on the model-call path while
-	// core stays free of budget.
-	m := runtime.MeterModel(meter, model.New(model.Config{
-		BaseURL: c.ModelBaseURL,
-		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
-		Model:   c.ModelName,
-	}))
+	// The model is bonyan's OpenAI-compatible client (ADR 0023), with the native
+	// tool-call fallback (#88), wrapped with the spend meter (ADR 0006/0008) so the
+	// ceiling is enforced on the model-call path while core stays free of budget.
+	// The key is read from the environment on every call; none is sent when the
+	// variable is unset.
+	chatOpts := chatcompat.Options{BaseURL: c.ModelBaseURL, Model: c.ModelName, HTTPClient: &http.Client{Timeout: 60 * time.Second}}
+	if os.Getenv(modelKeyEnv) != "" {
+		chatOpts.Secrets, chatOpts.KeyName = secret.NewResolver(secret.Env{}).Scope(modelKeyEnv), modelKeyEnv
+	}
+	chat, err := chatcompat.New(chatOpts)
+	if err != nil {
+		return err
+	}
+	m := runtime.MeterChat(meter, model.NativeToolCalls(chat))
 	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
 	// endpoint is configured, with keyword as the query-time fallback. Building the
 	// semantic index embeds the whole vault, so a failure here fails startup.
@@ -293,6 +307,11 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	if stale := core.TemplateQueryFields(promptTmpl); len(stale) > 0 {
+		// ADR 0023: these fields render empty, since a query's content no longer
+		// sits in the trusted instructions. A template written for them loses it.
+		log.Warn("the prompt template names fields that are always empty; the content they carried now reaches the model outside the instructions — update the template", "path", c.PromptTemplate, "fields", stale)
+	}
 	// The language pack (ADR 0018): its prompt guidance is layered into the system
 	// prompt. Loaded before the engine so an unknown/malformed pack fails startup
 	// rather than serving without it. The base "en" adds nothing.
@@ -300,9 +319,9 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	engine := core.New(m, retriever, toolset, c.Scope,
+	engine := core.New(m, c.ModelName, retriever, tools.ForAgent(toolset, registry), c.Scope,
 		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
-		core.WithContextTokens(c.ContextSize))
+		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.

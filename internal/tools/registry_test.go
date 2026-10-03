@@ -2,14 +2,11 @@ package tools
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/modelcontextprotocol/go-sdk/mcp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/yaad-index/yaad-grove/internal/core"
 )
 
 // referenceServer builds an MCP server using the official SDK — the conformance
@@ -217,18 +214,17 @@ func strictServer() *mcp.Server {
 }
 
 // A call the server REJECTS via schema validation (JSON-RPC invalid params) is
-// something the model can retry with valid args — it must surface as an ordinary
-// error that feeds back, NOT ErrToolUnavailable (which aborts the whole turn).
-// Regression for #147: a null id where an integer is required dead-ended the turn.
+// something the model can retry with valid args — it surfaces as a rejection,
+// not a transport failure. Regression for #147: a null id where an integer is
+// required dead-ended the turn.
 func TestCallInvalidArgsFeedsBackNotUnavailable(t *testing.T) {
 	r := New(nil, "test")
 	connectTo(t, r, strictServer())
 
 	_, err := r.Call(context.Background(), "get_things", map[string]any{"ids": []any{nil}})
 	require.Error(t, err)
-	assert.False(t, errors.Is(err, core.ErrToolUnavailable),
-		"a rejected call (invalid params) feeds back to the model, it does not abort the turn")
-	assert.Contains(t, err.Error(), "get_things")
+	assert.Contains(t, err.Error(), `"get_things"`)
+	assert.NotContains(t, err.Error(), `call "get_things": `, "a rejected call, not a transport failure")
 }
 
 // The registry names the server each tool is served by, as configured, and

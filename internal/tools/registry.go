@@ -207,31 +207,28 @@ func (r *Registry) Defs() []core.ToolDef {
 }
 
 // Call routes a tool call to the server advertising it and returns the tool's
-// text output. A tool that ran and reported an error (result.IsError) is an
-// ordinary error the engine feeds back to the model; a transport-level failure
-// (dead session / broken RPC) wraps core.ErrToolUnavailable so the engine aborts
-// the loop instead (ADR 0011).
+// text output. A tool that ran and reported an error (result.IsError), a call
+// the server rejected and a transport-level failure (dead session / broken RPC)
+// are each an error naming what failed.
 func (r *Registry) Call(ctx context.Context, name string, args map[string]any) (string, error) {
 	r.mu.RLock()
 	ref, ok := r.tools[name]
 	r.mu.RUnlock()
 	if !ok {
-		// A name the model invented — feed it back so the model can correct, don't
-		// abort: an ordinary error, not ErrToolUnavailable.
+		// A name the model invented.
 		return "", fmt.Errorf("tools: unknown tool %q", name)
 	}
 	res, err := ref.session.CallTool(ctx, &mcp.CallToolParams{Name: name, Arguments: args})
 	if err != nil {
 		// A JSON-RPC error *response* (invalid params, method-not-found, a
-		// tool-internal error) means the session is alive and rejected the call —
-		// something the model can reason around, so feed it back as an ordinary
-		// error, don't abort. Only a genuine transport failure (no response: dead
-		// session, broken pipe, ctx error) is ErrToolUnavailable.
+		// tool-internal error) means the session is alive and rejected the call;
+		// no response at all (dead session, broken pipe, ctx error) is a
+		// transport failure.
 		var rpcErr *jsonrpc.Error
 		if errors.As(err, &rpcErr) {
 			return "", fmt.Errorf("tools: call %q rejected: %w", name, err)
 		}
-		return "", fmt.Errorf("tools: call %q: %w: %w", name, core.ErrToolUnavailable, err)
+		return "", fmt.Errorf("tools: call %q: %w", name, err)
 	}
 	text := flattenContent(res.Content)
 	if res.IsError {
