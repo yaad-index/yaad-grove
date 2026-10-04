@@ -447,9 +447,9 @@ func writeSide(b *strings.Builder, name string, a *replayAnswer) {
 }
 
 // configLoader reads the YAML configuration file with kong-yaml, and lets
-// `replay run` take its values from serve's section, since a replay answers as
-// the bot configured there does. A replay section of the file's own is used
-// instead when there is one.
+// `replay run` and `memory erase` take their values from serve's section, since
+// both work on the bot configured there. A section of the file's own for either
+// command is used instead when there is one.
 func configLoader(r io.Reader) (kong.Resolver, error) {
 	b, err := io.ReadAll(r)
 	if err != nil {
@@ -460,8 +460,10 @@ func configLoader(r io.Reader) (kong.Resolver, error) {
 		return nil, fmt.Errorf("YAML config decode error: %w", err)
 	}
 	if serve, ok := config["serve"]; ok {
-		if _, own := config["replay"]; !own {
-			config["replay"] = map[string]any{"run": serve}
+		for cmd, sub := range map[string]string{"replay": "run", "memory": "erase"} {
+			if _, own := config[cmd]; !own {
+				config[cmd] = map[string]any{sub: serve}
+			}
 		}
 	}
 	out, err := yaml.Marshal(config)

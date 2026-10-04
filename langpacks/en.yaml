@@ -16,10 +16,14 @@ strings:
     • In the group, I'll answer you when you reply to me or @mention me.
     • Your group messages are added to the community knowledge base I answer from.
   consent_transcript_line: "\n• Your messages are also kept in a lasting conversation record. Withdrawing stops new entries, but earlier ones stay."
+  consent_memory_line: "\n• What you ask me in the group, and my answers, are also kept in a long-term memory so I can remember you across conversations. Withdrawing erases it."
+  consent_memory_derive_line: "\n• The memory service also draws conclusions about you from those messages; they are erased with the rest."
   consent_disclosure_tap: "\nTap the button below (or send `/consent`) to opt in. You can withdraw anytime with `/consent remove`."
   consent_granted: "You're opted in — thanks. You can withdraw anytime with `/consent remove`."
   consent_already: "You're already opted in. Send `/consent remove` to withdraw."
   consent_removed: "You're opted out — I no longer log your messages or answer you. Send `/consent` to opt back in anytime."
+  consent_removed_erased: "You're opted out — I no longer log your messages or answer you, and your long-term memory is erased. Send `/consent` to opt back in anytime."
+  consent_erase_failed: "You're opted out — I no longer log your messages or answer you. But I could not erase all of your long-term memory yet; send `/consent remove` again to retry."
   consent_error: "Something went wrong — please try again."
   consent_opt_in_label: "Opt in"
   nudge: "To chat with me here, opt in first: DM me and tap the opt-in button (or send `/consent`)."

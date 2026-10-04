@@ -97,3 +97,25 @@ func (s *BoltStore) Update(ctx context.Context, userID string, mutate func(*Reco
 	}
 	return nil
 }
+
+// Unconsented lists every user with a record whose consent is not granted: each
+// user who withdrew, and each seen but never consented. It reads one snapshot.
+func (s *BoltStore) Unconsented(ctx context.Context) ([]string, error) {
+	var out []string
+	err := s.db.View(func(tx *bbolt.Tx) error {
+		return tx.Bucket(aclBucket).ForEach(func(k, v []byte) error {
+			var rec Record
+			if err := json.Unmarshal(v, &rec); err != nil {
+				return fmt.Errorf("acl: unmarshal record %q: %w", k, err)
+			}
+			if rec.Consent != ConsentGranted {
+				out = append(out, string(k))
+			}
+			return nil
+		})
+	})
+	if err != nil {
+		return nil, fmt.Errorf("acl: list unconsented: %w", err)
+	}
+	return out, nil
+}

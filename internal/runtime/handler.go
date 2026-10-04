@@ -76,11 +76,18 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
 				// An admin's DM is answered without long-term memory: an admin need not
 				// have consented, and only consented turns reach it (ADR 0023 §5).
-				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, false)
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, false, 0)
 			}
-			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, policy.Strings, in), nil
+			return dmConsentFlow(ctx, consent, policy, in), nil
 		}
 
+		// The user's withdrawal count, read before the gate reads consent: a
+		// withdrawal turns consent off and then counts, so either the gate sees it,
+		// or the count changes and the turn is not kept in long-term memory.
+		var withdrawals uint64
+		if policy.Erase != nil {
+			withdrawals = policy.Erase.Withdrawals(in.User.ID)
+		}
 		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})
 		if err != nil {
 			// Fail closed: never serve on an unknown gate state.
@@ -111,7 +118,8 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			// A consented, directed group turn is the only turn long-term memory
 			// keeps, with its answer (ADR 0023 §5). A DM reaches here only on a bot
 			// with no consent surface, and is not kept.
-			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, in.Surface == core.SurfaceGroup)
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, in.Surface == core.SurfaceGroup, withdrawals)
+			purgeIfWithdrawn(ctx, consent, policy.Memory, in.User.ID)
 			// The bot's serve-path response — an answer OR a refusal — is the bot's real
 			// reply to the query, so the transcript records it (ADR 0015). This is
 			// deliberately unlike the memory buffer, which drops refusals as useless
@@ -126,6 +134,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			// (ADR 0014), no reply. Not a directed message, so no bot answer is expected
 			// and its human-only transcript entry is not a gap — no marker.
 			rememberUser(policy.Memory, in)
+			purgeIfWithdrawn(ctx, consent, policy.Memory, in.User.ID)
 			return core.Reply{Silent: true}, nil
 		case acl.DecideNudge:
 			return nudgeReply(policy.Nudge, policy.Strings), nil
@@ -136,6 +145,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			// gap. Emit a system marker so the transcript self-explains the silence
 			// rather than reading like a bug (ADR 0015).
 			rememberUser(policy.Memory, in)
+			purgeIfWithdrawn(ctx, consent, policy.Memory, in.User.ID)
 			logTranscriptSystem(ctx, policy.Transcript, in, transcript.EventRateLimited)
 			return core.Reply{Text: policy.Strings.Get(StrRateLimited)}, nil
 		case acl.DecideSilent:
@@ -155,7 +165,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
 // a capacity notice rather than crashing; any other error propagates. remember
 // lets the run use long-term memory (ADR 0023).
-func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings, remember bool) (core.Reply, error) {
+func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings, remember bool, withdrawals uint64) (core.Reply, error) {
 	reply, err := engine.Answer(ctx, core.Query{
 		User:         in.User,
 		Surface:      in.Surface,
@@ -164,6 +174,7 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 		ReplyContext: replyContextOf(in),
 		Chat:         in.ReplyTo,
 		Remember:     remember,
+		Withdrawals:  withdrawals,
 	})
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
@@ -180,11 +191,12 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 // current message never appears in its own injected context. A refusal is not
 // buffered (a canned out-of-scope line is not useful follow-up context); a
 // nil/disabled buffer makes the whole thing a plain answer. remember is passed
-// on to the engine for long-term memory (ADR 0023).
-func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings, remember bool) (core.Reply, error) {
+// on to the engine for long-term memory (ADR 0023), with the user's withdrawal
+// count read before the gate.
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings, remember bool, withdrawals uint64) (core.Reply, error) {
 	history := selectHistory(buf, in, injectN, window)
 	rememberUser(buf, in)
-	reply, err := answer(ctx, engine, in, history, strs, remember)
+	reply, err := answer(ctx, engine, in, history, strs, remember, withdrawals)
 	if err == nil && !reply.Refused {
 		rememberBot(buf, in.ReplyTo, reply.Text)
 	}
@@ -371,4 +383,19 @@ func executeAction(ctx context.Context, registry *Registry, authz authorizer, su
 		return core.Reply{Notice: strs.Get(StrCallbackFailed)}
 	}
 	return core.Reply{Notice: strs.Get(StrCallbackDone), Text: statusLine}
+}
+
+// purgeIfWithdrawn purges user's turns from the conversation buffer when they
+// have withdrawn since the gate admitted the turn just buffered (ADR 0014).
+// Withdrawal turns consent off and then purges, and this checks consent after
+// buffering, so a turn buffered on either side of that purge is gone. A failed
+// read leaves the buffer as it is; the gate fails closed on the next turn. No
+// consenter is no consent surface, and nothing to check.
+func purgeIfWithdrawn(ctx context.Context, consent consenter, buf *memory.Buffer, user string) {
+	if consent == nil {
+		return
+	}
+	if c, err := consent.ConsentOf(ctx, user); err == nil && c != acl.ConsentGranted {
+		buf.PurgeUser(user)
+	}
 }

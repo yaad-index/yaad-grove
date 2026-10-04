@@ -1,7 +1,10 @@
 package runtime_test
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"log/slog"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -214,4 +217,95 @@ func TestConsentGrantViaButton(t *testing.T) {
 	c, err := gate.ConsentOf(ctx, "u1")
 	require.NoError(t, err)
 	assert.Equal(t, acl.ConsentGranted, c, "the button grants the clicker's own consent")
+}
+
+// fakeEraser records whom it erases, and the consent each had at the time.
+type fakeEraser struct {
+	consent   *mockConsenter
+	erased    []string
+	consentAt []acl.Consent
+	results   []runtime.EraseResult
+}
+
+func (f *fakeEraser) Withdrawals(string) uint64 { return 0 }
+
+func (f *fakeEraser) Erase(_ context.Context, user string) []runtime.EraseResult {
+	f.erased = append(f.erased, user)
+	f.consentAt = append(f.consentAt, f.consent.consent)
+	return f.results
+}
+
+func withdrawWith(t *testing.T, policy runtime.Policy, consent *mockConsenter) core.Reply {
+	t.Helper()
+	h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{}, nil, nil, nil, nil, consent, policy)
+	reply, err := h(context.Background(), dmInbound("/consent remove"))
+	require.NoError(t, err)
+	return reply
+}
+
+// With long-term memory, /consent remove erases the user's memory once their
+// consent is off, logs the withdrawal with the user, and says the memory is
+// erased; if any namespace was not erased it says so, and how to retry.
+func TestDMConsentRemoveErasesMemory(t *testing.T) {
+	log := captureLog(t)
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	eraser := &fakeEraser{consent: consent, results: []runtime.EraseResult{{Namespace: "inst-a"}, {Namespace: "club"}}}
+	reply := withdrawWith(t, runtime.Policy{Erase: eraser}, consent)
+	assert.Equal(t, []string{"u1"}, eraser.erased)
+	assert.Equal(t, []acl.Consent{acl.ConsentUnknown}, eraser.consentAt, "consent is off before anything is erased")
+	assert.Contains(t, reply.Text, "opted out")
+	assert.Contains(t, reply.Text, "long-term memory is erased")
+	assert.Contains(t, log.String(), `msg="consent withdrawn" user=u1`)
+
+	consent = &mockConsenter{consent: acl.ConsentGranted}
+	eraser = &fakeEraser{consent: consent, results: []runtime.EraseResult{{Namespace: "inst-a"}, {Namespace: "club", Err: errors.New("down")}}}
+	reply = withdrawWith(t, runtime.Policy{Erase: eraser}, consent)
+	assert.Contains(t, reply.Text, "opted out")
+	assert.Contains(t, reply.Text, "could not erase all of your long-term memory")
+	assert.Contains(t, reply.Text, "send `/consent remove` again")
+	assert.NotContains(t, reply.Text, "is erased", "a partial erase is never reported as done")
+	assert.Equal(t, acl.ConsentUnknown, consent.consent, "the withdrawal itself stands")
+}
+
+// Without long-term memory, /consent remove says nothing about it.
+func TestDMConsentRemoveWithoutMemory(t *testing.T) {
+	reply := withdrawWith(t, runtime.Policy{}, &mockConsenter{consent: acl.ConsentGranted})
+	assert.Equal(t, "You're opted out — I no longer log your messages or answer you. Send `/consent` to opt back in anytime.", reply.Text)
+}
+
+// With long-term memory the disclosure says that memory is kept and erased on
+// withdrawal, and, when the service derives, that conclusions are drawn; the
+// tap instruction still reads last. Without it, neither line appears.
+func TestDMConsentDisclosureMemoryLines(t *testing.T) {
+	disclose := func(p runtime.Policy) string {
+		h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{}, nil, nil, nil, nil, &mockConsenter{consent: acl.ConsentUnknown}, p)
+		reply, err := h(context.Background(), dmInbound("/start"))
+		require.NoError(t, err)
+		return reply.Text
+	}
+	base := disclose(runtime.Policy{})
+	assert.NotContains(t, base, "long-term memory")
+	assert.NotContains(t, base, "conclusions")
+
+	mem := disclose(runtime.Policy{Erase: &fakeEraser{}})
+	assert.Contains(t, mem, "kept in a long-term memory")
+	assert.Contains(t, mem, "Withdrawing erases it")
+	assert.NotContains(t, mem, "conclusions")
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(mem), "`/consent remove`."), "tap instruction stays last")
+
+	derive := disclose(runtime.Policy{Erase: &fakeEraser{}, MemoryDerive: true})
+	assert.Contains(t, derive, "draws conclusions about you")
+	assert.Less(t, strings.Index(derive, "long-term memory"), strings.Index(derive, "draws conclusions"))
+	assert.True(t, strings.HasSuffix(strings.TrimSpace(derive), "`/consent remove`."))
+	assert.NotContains(t, disclose(runtime.Policy{MemoryDerive: true}), "conclusions", "the derive line needs memory on")
+}
+
+// captureLog sends the default logger to a buffer for the test.
+func captureLog(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var buf bytes.Buffer
+	prev := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(prev) })
+	return &buf
 }

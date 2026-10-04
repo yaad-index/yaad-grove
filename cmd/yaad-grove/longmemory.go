@@ -37,10 +37,22 @@ const defaultDeriverInstructions = "Form conclusions only about the person speak
 var processSecrets = []string{modelKeyEnv, "YAADGROVE_EMBEDDING_API_KEY", "YAADGROVE_TELEGRAM_TOKEN", longMemoryTokenEnv}
 
 // longMemory is long-term memory as serve runs it: the engine's memory, and a
-// purger for every namespace in the record, configured or dropped.
+// purger for every namespace in the record, configured or dropped, and the
+// eraser that withdrawal erases through in all of them.
 type longMemory struct {
 	memory  *core.Memory
 	purgers []runtime.Purger
+	eraser  *runtime.Eraser
+}
+
+// withdrawal gives policy the eraser withdrawal erases through, and says
+// whether the service derives, so the disclosure tells the user both. A nil
+// long-term memory leaves policy without either.
+func (lm *longMemory) withdrawal(policy *runtime.Policy, derive bool) {
+	if lm == nil {
+		return
+	}
+	policy.Erase, policy.MemoryDerive = lm.eraser, derive
 }
 
 // buildLongMemory builds long-term memory from c (ADR 0023): bonyan's memory
@@ -51,14 +63,12 @@ type longMemory struct {
 // when memory is set up only in part.
 func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*longMemory, error) {
 	if c.LongMemoryURL == "" {
-		if c.LongMemoryNamespace != "" || len(c.LongMemoryGroupNamespaces) > 0 || c.LongMemoryRetention != 0 || c.LongMemoryDerive || c.LongMemoryInstructions != "" || c.LongMemoryWithoutErase {
+		if c.LongMemoryNamespace != "" || len(c.LongMemoryGroupNamespaces) > 0 || c.LongMemoryRetention != 0 || c.LongMemoryDerive || c.LongMemoryInstructions != "" {
 			return nil, errors.New("long-term memory options are set without --long-memory-url: set the URL to turn it on, or remove them")
 		}
 		return nil, nil
 	}
 	switch {
-	case !c.LongMemoryWithoutErase:
-		return nil, errors.New("--long-memory-url needs --long-memory-without-erase: consent withdrawal does not erase a user's long-term memory, so turning it on must be acknowledged")
 	case c.LongMemoryNamespace == "":
 		return nil, errors.New("--long-memory-namespace is required with --long-memory-url: set this instance's own namespace; there is no default")
 	case c.LongMemoryWindow < minLongMemoryWindow:
@@ -174,11 +184,13 @@ func newLongMemory(set *storeSet, record *namespaces.Record, namespace string, g
 	if err := record.Configured(names...); err != nil {
 		return nil, err
 	}
-	lm := &longMemory{memory: m}
+	lm := &longMemory{memory: m, eraser: &runtime.Eraser{Memory: m, Record: record, Stores: map[string]runtime.SubjectDeleter{}}}
 	for _, ns := range record.Namespaces() {
-		if _, err := set.get(ns); err != nil {
+		st, err := set.get(ns)
+		if err != nil {
 			return nil, err
 		}
+		lm.eraser.Stores[ns] = st
 		var dropped time.Time
 		if !configured[ns] {
 			if dropped, err = record.Dropped(ns, now); err != nil {

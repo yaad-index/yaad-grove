@@ -81,6 +81,11 @@ type Query struct {
 	// turn the consent gate admitted (ADR 0023 §5); an engine with no memory
 	// ignores it.
 	Remember bool
+	// Withdrawals is the asker's withdrawal count (Memory.Withdrawals), read
+	// before the consent gate admitted the turn. The turn is kept only if the
+	// count is unchanged when it is answered, so a withdrawal at any point after
+	// the gate read consent keeps it out (ADR 0023 §5).
+	Withdrawals uint64
 }
 
 // HistoryTurn is one prior conversation turn injected into the answer prompt as

@@ -7,7 +7,6 @@ import (
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/core"
-	"github.com/yaad-index/yaad-grove/internal/memory"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 )
 
@@ -47,11 +46,14 @@ func isConsentCommand(text string) bool {
 // withdraw hint when they already have. A bare non-command DM is an implicit
 // `/start`, so the surface never falls through to silence. `/consent remove`
 // withdraws and, per ADR 0014, purges the user's turns from the conversation
-// buffer everywhere (an actively-read buffer must stop shaping answers at once).
-// The transcript (ADR 0015) is prospective and never read, so withdrawal just
-// stops new entries — no purge here; transcriptActive only adds the durable-record
-// line to the opt-in disclosure so consent is informed.
-func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, transcriptActive bool, strs Strings, in transport.Inbound) core.Reply {
+// buffer everywhere (an actively-read buffer must stop shaping answers at once),
+// then erases their long-term memory (ADR 0023 §5) and says whether all of it
+// went. The transcript (ADR 0015) is prospective and never read, so withdrawal
+// just stops new entries — no purge here; an active transcript only adds the
+// durable-record line to the opt-in disclosure so consent is informed, as long-
+// term memory adds its own.
+func dmConsentFlow(ctx context.Context, consent consenter, policy Policy, in transport.Inbound) core.Reply {
+	strs := policy.Strings
 	switch strings.TrimSpace(in.Text) {
 	case "/consent":
 		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentGranted); err != nil {
@@ -66,10 +68,17 @@ func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, t
 			slog.Warn("consent removal failed", "err", err)
 			return core.Reply{Text: strs.Get(StrConsentError)}
 		}
+		slog.Info("consent withdrawn", "user", in.User.ID)
 		// Purge their buffered turns everywhere (ADR 0014): the buffer is read into
 		// prompts, so a withdrawn user's turns must stop shaping answers immediately.
-		buf.PurgeUser(in.User.ID)
-		return core.Reply{Text: strs.Get(StrConsentRemoved)}
+		policy.Memory.PurgeUser(in.User.ID)
+		if policy.Erase == nil {
+			return core.Reply{Text: strs.Get(StrConsentRemoved)}
+		}
+		if !Erased(policy.Erase.Erase(ctx, in.User.ID)) {
+			return core.Reply{Text: strs.Get(StrConsentEraseFailed)}
+		}
+		return core.Reply{Text: strs.Get(StrConsentRemovedErased)}
 	}
 
 	c, err := consent.ConsentOf(ctx, in.User.ID)
@@ -83,8 +92,14 @@ func dmConsentFlow(ctx context.Context, consent consenter, buf *memory.Buffer, t
 	// Assemble intro → (transcript line, if active) → tap so the tap instruction
 	// reads last (ADR 0015).
 	disclosure := strs.Get(StrConsentDisclosureIntro)
-	if transcriptActive {
+	if policy.Transcript != nil {
 		disclosure += strs.Get(StrConsentTranscriptLine)
+	}
+	if policy.Erase != nil {
+		disclosure += strs.Get(StrConsentMemoryLine)
+		if policy.MemoryDerive {
+			disclosure += strs.Get(StrConsentMemoryDeriveLine)
+		}
 	}
 	disclosure += strs.Get(StrConsentDisclosureTap)
 	return core.Reply{

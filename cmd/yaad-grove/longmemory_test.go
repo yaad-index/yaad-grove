@@ -24,17 +24,17 @@ import (
 // memoryCmd is a serve command with long-term memory fully configured.
 func memoryCmd(t *testing.T) *ServeCmd {
 	return &ServeCmd{
-		LongMemoryRecord:       filepath.Join(t.TempDir(), "namespaces.json"),
-		LongMemoryURL:          "http://memory.invalid:8000",
-		LongMemoryNamespace:    "inst-a",
-		LongMemoryRetention:    90 * 24 * time.Hour,
-		LongMemoryWindow:       24 * time.Hour,
-		LongMemoryWithoutErase: true,
+		LongMemoryRecord:    filepath.Join(t.TempDir(), "namespaces.json"),
+		LongMemoryURL:       "http://memory.invalid:8000",
+		LongMemoryNamespace: "inst-a",
+		LongMemoryRetention: 90 * 24 * time.Hour,
+		LongMemoryWindow:    24 * time.Hour,
 	}
 }
 
-// Long-term memory is off unless its URL is set; set only in part, or without
-// the acknowledgement that withdrawal does not erase it yet, it fails startup.
+// Long-term memory is off unless its URL is set; set only in part, it fails
+// startup. The old acknowledgement that withdrawal does not erase is no longer
+// needed, and is still accepted, with or without the URL.
 func TestBuildLongMemoryConfig(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -42,7 +42,7 @@ func TestBuildLongMemoryConfig(t *testing.T) {
 		wantErr string
 	}{
 		{"configured", func(*ServeCmd) {}, ""},
-		{"no acknowledgement", func(c *ServeCmd) { c.LongMemoryWithoutErase = false }, "--long-memory-without-erase"},
+		{"old acknowledgement still accepted", func(c *ServeCmd) { c.LongMemoryWithoutErase = true }, ""},
 		{"no namespace", func(c *ServeCmd) { c.LongMemoryNamespace = "" }, "--long-memory-namespace is required"},
 		{"no retention", func(c *ServeCmd) { c.LongMemoryRetention = 0 }, "--long-memory-retention is required"},
 		{"no window", func(c *ServeCmd) { c.LongMemoryWindow = 0 }, "--long-memory-window must be at least"},
@@ -75,6 +75,9 @@ func TestBuildLongMemoryConfig(t *testing.T) {
 	// Nothing set: memory is off and the engine answers as before.
 	lm, err := buildLongMemory(&ServeCmd{LongMemoryWindow: 24 * time.Hour}, secret.NewResolver(secret.Env{}), time.Now())
 	require.NoError(t, err)
+	assert.Nil(t, lm)
+	lm, err = buildLongMemory(&ServeCmd{LongMemoryWindow: 24 * time.Hour, LongMemoryWithoutErase: true}, secret.NewResolver(secret.Env{}), time.Now())
+	require.NoError(t, err, "the ignored acknowledgement alone turns nothing on and is no error")
 	assert.Nil(t, lm)
 }
 

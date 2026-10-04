@@ -54,6 +54,7 @@ type CLI struct {
 
 	Serve   ServeCmd   `cmd:"" help:"Run the bot: connect the transport and answer queries."`
 	Replay  ReplayCmd  `cmd:"" help:"Answer a file of questions with the configured engine, or compare two such runs."`
+	Memory  MemoryCmd  `cmd:"" help:"Manage long-term memory outside the running bot."`
 	Version VersionCmd `cmd:"" help:"Print the build version and exit."`
 }
 
@@ -223,10 +224,10 @@ type ServeCmd struct {
 	// Long-term memory (ADR 0023): what each consented user said in directed
 	// group turns, and the answers, kept per user in the memory service through
 	// bonyan's memory/honcho backend. Off unless the URL is set, so a deployment
-	// without the service answers exactly as before. Withdrawal does not erase it,
-	// so turning it on needs LongMemoryWithoutErase. The service's token
-	// comes from YAADGROVE_LONG_MEMORY_TOKEN.
-	LongMemoryURL       string `name:"long-memory-url" help:"Base URL of the memory service; setting it turns long-term memory on. Off by default. Consent withdrawal does NOT erase long-term memory (needs --long-memory-without-erase)."`
+	// without the service answers exactly as before. Consent withdrawal erases a
+	// user's memory in every namespace (ADR 0023 §5). The service's token comes
+	// from YAADGROVE_LONG_MEMORY_TOKEN.
+	LongMemoryURL       string `name:"long-memory-url" help:"Base URL of the memory service; setting it turns long-term memory on. Off by default. Consent withdrawal erases a user's long-term memory."`
 	LongMemoryNamespace string `name:"long-memory-namespace" help:"This instance's memory namespace. Required with --long-memory-url; no default. Instances sharing one memory service never see each other's records."`
 	// LongMemoryGroupNamespaces gives group chats namespaces of their own
 	// (ADR 0023 §2), each spec "chatid=namespace". sep:"none" keeps a spec whole,
@@ -237,7 +238,9 @@ type ServeCmd struct {
 	LongMemoryDerive          bool          `name:"long-memory-derive" help:"Let the memory service derive conclusions about users from their turns, on the model the service is configured with. Off by default."`
 	LongMemoryInstructions    string        `name:"long-memory-instructions" help:"Instructions steering the memory service's deriver. Empty uses a default that asks for conclusions about the speaker only."`
 	LongMemoryRecord          string        `name:"long-memory-record" help:"File recording every memory namespace this instance has kept memory in, so a namespace dropped from the configuration is still purged. Required with --long-memory-url; put it on persistent storage, the same path at every start." type:"path"`
-	LongMemoryWithoutErase    bool          `name:"long-memory-without-erase" help:"Acknowledge that consent withdrawal does not erase a user's long-term memory. Required with --long-memory-url."`
+	// LongMemoryWithoutErase is kept so configurations that set it still load;
+	// withdrawal erases, so it acknowledges nothing any more.
+	LongMemoryWithoutErase bool `name:"long-memory-without-erase" help:"No longer needed and ignored: consent withdrawal erases long-term memory."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -395,6 +398,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		Strings:        strs,
 		Transcript:     tlog,
 	}
+	longMemory.withdrawal(&policy, c.LongMemoryDerive)
 
 	// The action registry maps admin verbs to ACL-tier-gated executors (ADR
 	// 0009/0010); the gate is the tier source, the re-authorizer, and the tier

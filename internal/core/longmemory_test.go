@@ -12,6 +12,7 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
+	bmodel "github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
 
@@ -300,4 +301,122 @@ func TestMemoryNeverGrounds(t *testing.T) {
 	got, err := store.History(ctx, "u1", session)
 	require.NoError(t, err)
 	assert.Empty(t, got)
+}
+
+// hookModel answers like m, running hook on every call first.
+type hookModel struct {
+	*mockModel
+	hook func()
+}
+
+func (h hookModel) Chat(ctx context.Context, req bmodel.ChatRequest) (bmodel.ChatResponse, error) {
+	if h.hook != nil {
+		h.hook()
+	}
+	return h.mockModel.Chat(ctx, req)
+}
+
+// A user who withdraws while their turn is being answered has that turn kept
+// nowhere; a turn they start after withdrawing, having consented again, is
+// kept as usual. Another user's turn is unaffected.
+func TestWithdrawDuringAnAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, inmem.NewStorage(), "inst-a", nil)
+	mem := &core.Memory{Store: store, Window: memWindow, Now: func() time.Time { return memNow }}
+	withdrawing := hookModel{mockModel: textModel("answer"), hook: func() { mem.Withdraw("u1") }}
+	_, err := core.New(withdrawing, modelName, grounded, nil, "scope", core.WithMemory(mem)).Answer(ctx, remembered("started before"))
+	require.NoError(t, err)
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got, "a turn under way when its user withdrew is not kept")
+
+	engine := newEngine(textModel("answer"), grounded, nil, "scope", core.WithMemory(mem))
+	after := remembered("started after")
+	after.Withdrawals = mem.Withdrawals("u1")
+	_, err = engine.Answer(ctx, after)
+	require.NoError(t, err)
+	got, err = store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"[Ada] started after", "answer"}, texts(got), "a turn started after the withdrawal is kept")
+
+	other := core.Query{Text: "mine", User: core.User{ID: "u2"}, Chat: "chat-1", Remember: true}
+	_, err = core.New(hookModel{mockModel: textModel("yours"), hook: func() { mem.Withdraw("u1") }}, modelName, grounded, nil, "scope", core.WithMemory(mem)).Answer(ctx, other)
+	require.NoError(t, err)
+	got, err = store.History(ctx, "u2", core.Session("chat-1", "u2", core.WindowStart(memNow, memWindow)))
+	require.NoError(t, err)
+	assert.Equal(t, []string{"mine", "yours"}, texts(got), "another user's withdrawal does not touch this turn")
+}
+
+// blockingWrites is a backend whose writes wait for release.
+type blockingWrites struct {
+	memory.Backend
+	started chan struct{}
+	release chan struct{}
+}
+
+func (b *blockingWrites) Write(ctx context.Context, r memory.Record) (string, error) {
+	select {
+	case b.started <- struct{}{}:
+	default:
+	}
+	<-b.release
+	return b.Backend.Write(ctx, r)
+}
+
+// Withdraw returns only once a keep already writing has finished, so an erase
+// that follows it deletes what that keep wrote.
+func TestWithdrawWaitsForAKeepUnderWay(t *testing.T) {
+	ctx := context.Background()
+	backend := &blockingWrites{Backend: inmem.NewStorage().Open("inst-a"), started: make(chan struct{}, 1), release: make(chan struct{})}
+	store, err := memory.NewStore(backend, memory.Options{Namespace: "inst-a", Policy: registry.GuardPolicy(nil, nil), Retention: 30 * memWindow, Now: func() time.Time { return memNow }})
+	require.NoError(t, err)
+	mem := &core.Memory{Store: store, Window: memWindow, Now: func() time.Time { return memNow }}
+	answered := make(chan struct{})
+	go func() {
+		_, _ = newEngine(textModel("answer"), grounded, nil, "scope", core.WithMemory(mem)).Answer(ctx, remembered("q"))
+		close(answered)
+	}()
+	<-backend.started
+
+	withdrawn := make(chan struct{})
+	go func() {
+		mem.Withdraw("u1")
+		close(withdrawn)
+	}()
+	select {
+	case <-withdrawn:
+		t.Fatal("Withdraw returned while a keep was still writing")
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(backend.release)
+	<-answered
+	<-withdrawn
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Len(t, got, 2, "the keep that was writing finished before Withdraw returned")
+}
+
+// A withdrawal after the gate read the count, before the engine took the
+// turn up, keeps the turn out too: the count travels on the query from the gate.
+func TestWithdrawBetweenTheGateAndTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, inmem.NewStorage(), "inst-a", nil)
+	mem := &core.Memory{Store: store, Window: memWindow, Now: func() time.Time { return memNow }}
+	q := remembered("admitted, then withdrawn")
+	q.Withdrawals = mem.Withdrawals("u1") // read at the gate
+	mem.Withdraw("u1")                    // the withdrawal lands before the engine runs
+	_, err := newEngine(textModel("answer"), grounded, nil, "scope", core.WithMemory(mem)).Answer(ctx, q)
+	require.NoError(t, err)
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, uint64(1), mem.Withdrawals("u1"))
+	assert.Equal(t, uint64(0), mem.Withdrawals("u2"))
+}
+
+// Withdraw on no memory does nothing.
+func TestWithdrawWithoutMemory(t *testing.T) {
+	var mem *core.Memory
+	assert.NotPanics(t, func() { mem.Withdraw("u1") })
+	assert.Equal(t, uint64(0), mem.Withdrawals("u1"))
 }

@@ -10,34 +10,39 @@ import (
 // catalog for the bot's user-facing operational messages. en.yaml is the source of
 // truth for their English text; other packs override per key.
 const (
-	StrConsentDisclosureIntro = "consent_disclosure_intro"
-	StrConsentTranscriptLine  = "consent_transcript_line"
-	StrConsentDisclosureTap   = "consent_disclosure_tap"
-	StrConsentGranted         = "consent_granted"
-	StrConsentAlready         = "consent_already"
-	StrConsentRemoved         = "consent_removed"
-	StrConsentError           = "consent_error"
-	StrConsentOptInLabel      = "consent_opt_in_label"
-	StrNudge                  = "nudge"
-	StrRefuse                 = "refuse"
-	StrRateLimited            = "rate_limited"
-	StrAtCapacity             = "at_capacity"
-	StrCallbackDone           = "callback_done"
-	StrCallbackExpired        = "callback_expired"
-	StrCallbackExpiredEdit    = "callback_expired_edit"
-	StrCallbackConsumed       = "callback_consumed"
-	StrCallbackConsumedEdit   = "callback_consumed_edit"
-	StrCallbackError          = "callback_error"
-	StrCallbackDenied         = "callback_denied"
-	StrCallbackUnknownVerb    = "callback_unknown_verb"
-	StrCallbackInvalid        = "callback_invalid"
-	StrCallbackFailed         = "callback_failed"
+	StrConsentDisclosureIntro  = "consent_disclosure_intro"
+	StrConsentTranscriptLine   = "consent_transcript_line"
+	StrConsentDisclosureTap    = "consent_disclosure_tap"
+	StrConsentGranted          = "consent_granted"
+	StrConsentAlready          = "consent_already"
+	StrConsentRemoved          = "consent_removed"
+	StrConsentMemoryLine       = "consent_memory_line"
+	StrConsentMemoryDeriveLine = "consent_memory_derive_line"
+	StrConsentRemovedErased    = "consent_removed_erased"
+	StrConsentEraseFailed      = "consent_erase_failed"
+	StrConsentError            = "consent_error"
+	StrConsentOptInLabel       = "consent_opt_in_label"
+	StrNudge                   = "nudge"
+	StrRefuse                  = "refuse"
+	StrRateLimited             = "rate_limited"
+	StrAtCapacity              = "at_capacity"
+	StrCallbackDone            = "callback_done"
+	StrCallbackExpired         = "callback_expired"
+	StrCallbackExpiredEdit     = "callback_expired_edit"
+	StrCallbackConsumed        = "callback_consumed"
+	StrCallbackConsumedEdit    = "callback_consumed_edit"
+	StrCallbackError           = "callback_error"
+	StrCallbackDenied          = "callback_denied"
+	StrCallbackUnknownVerb     = "callback_unknown_verb"
+	StrCallbackInvalid         = "callback_invalid"
+	StrCallbackFailed          = "callback_failed"
 )
 
 // stringKeys is every key the runtime looks up — used to validate en completeness.
 var stringKeys = []string{
 	StrConsentDisclosureIntro, StrConsentTranscriptLine, StrConsentDisclosureTap,
 	StrConsentGranted, StrConsentAlready, StrConsentRemoved, StrConsentError, StrConsentOptInLabel,
+	StrConsentMemoryLine, StrConsentMemoryDeriveLine, StrConsentRemovedErased, StrConsentEraseFailed,
 	StrNudge, StrRefuse, StrRateLimited, StrAtCapacity,
 	StrCallbackDone, StrCallbackExpired, StrCallbackExpiredEdit,
 	StrCallbackConsumed, StrCallbackConsumedEdit, StrCallbackError,
