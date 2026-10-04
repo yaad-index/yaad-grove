@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.21.0](https://github.com/yaad-index/yaad-grove/compare/v0.20.0...v0.21.0) (2026-10-04)
+
+
+### Features
+
+* consent withdrawal erases long-term memory in every recorded namespace ([#195](https://github.com/yaad-index/yaad-grove/issues/195)) ([db63e68](https://github.com/yaad-index/yaad-grove/commit/db63e68f15b6b418adb7ca07e3412cddee916e02))
+
 ## [0.20.0](https://github.com/yaad-index/yaad-grove/compare/v0.19.0...v0.20.0) (2026-10-04)
 
 
