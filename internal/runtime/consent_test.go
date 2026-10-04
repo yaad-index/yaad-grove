@@ -227,6 +227,8 @@ type fakeEraser struct {
 	results   []runtime.EraseResult
 }
 
+func (f *fakeEraser) Withdrawals(string) uint64 { return 0 }
+
 func (f *fakeEraser) Erase(_ context.Context, user string) []runtime.EraseResult {
 	f.erased = append(f.erased, user)
 	f.consentAt = append(f.consentAt, f.consent.consent)

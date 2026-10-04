@@ -37,8 +37,19 @@ type Memory struct {
 	// under way and every later keep sees it.
 	mu sync.RWMutex
 	// withdrawn counts each user's withdrawals. A turn keeps only if the count
-	// is the one it read when it started.
+	// is the one read before the gate admitted it (Query.Withdrawals).
 	withdrawn map[string]uint64
+}
+
+// Withdrawals is user's withdrawal count: the caller reads it before the
+// consent gate decides, and sets it on the Query. No memory counts none.
+func (m *Memory) Withdrawals(user string) uint64 {
+	if m == nil {
+		return 0
+	}
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.withdrawn[user]
 }
 
 // Withdraw stops every turn of user already under way from keeping anything,
@@ -76,7 +87,7 @@ type turn struct {
 	session  string
 	scrubber *secret.Scrubber
 	mem      *Memory
-	// withdrawn is the subject's withdrawal count when the turn started.
+	// withdrawn is the subject's withdrawal count read before the gate.
 	withdrawn uint64
 }
 
@@ -94,16 +105,13 @@ func (m *Memory) use(a *agent.Agent, q Query) *turn {
 	if m.Now != nil {
 		now = m.Now
 	}
-	m.mu.RLock()
-	withdrawn := m.withdrawn[q.User.ID]
-	m.mu.RUnlock()
 	t := &turn{
 		store:     m.storeFor(q.Chat),
 		subject:   q.User.ID,
 		session:   Session(q.Chat, q.User.ID, WindowStart(now(), m.Window)),
 		scrubber:  m.Scrubber,
 		mem:       m,
-		withdrawn: withdrawn,
+		withdrawn: q.Withdrawals,
 	}
 	a.Memory = t.store
 	a.Subject = t.subject

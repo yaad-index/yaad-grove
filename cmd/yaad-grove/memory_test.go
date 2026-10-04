@@ -65,6 +65,7 @@ func keys[V any](m map[string]V) []string {
 type fakeEraser map[string][]runtime.EraseResult
 
 func (f fakeEraser) Erase(_ context.Context, user string) []runtime.EraseResult { return f[user] }
+func (f fakeEraser) Withdrawals(string) uint64                                  { return 0 }
 
 // The catch-up prints one line per user and namespace and a total, and fails
 // when any erase failed.

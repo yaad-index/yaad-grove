@@ -18,14 +18,15 @@ import (
 
 // MemoryCmd manages long-term memory outside the running bot.
 type MemoryCmd struct {
-	Erase MemoryEraseCmd `cmd:"" help:"Erase users' long-term memory in every recorded namespace, as consent withdrawal does."`
+	Erase MemoryEraseCmd `cmd:"" help:"Erase users' long-term memory in every recorded namespace, as consent withdrawal does. Run it with the bot stopped and serve's configuration; like serve at start, it updates --long-memory-record."`
 }
 
 // MemoryEraseCmd erases users' long-term memory the way withdrawal does (ADR
 // 0023 §5), for users who withdrew while the bot could not erase. It takes
 // serve's flags and reads serve's section of the configuration file. It runs
 // with the bot stopped: --unconsented reads the access-control store, which the
-// running bot holds open.
+// running bot holds open. Like serve at start, it writes the record of
+// namespaces: the configured ones, and any no longer configured as dropped.
 type MemoryEraseCmd struct {
 	ServeCmd `embed:""`
 

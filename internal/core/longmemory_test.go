@@ -331,7 +331,9 @@ func TestWithdrawDuringAnAnswer(t *testing.T) {
 	assert.Empty(t, got, "a turn under way when its user withdrew is not kept")
 
 	engine := newEngine(textModel("answer"), grounded, nil, "scope", core.WithMemory(mem))
-	_, err = engine.Answer(ctx, remembered("started after"))
+	after := remembered("started after")
+	after.Withdrawals = mem.Withdrawals("u1")
+	_, err = engine.Answer(ctx, after)
 	require.NoError(t, err)
 	got, err = store.History(ctx, "u1", session)
 	require.NoError(t, err)
@@ -394,8 +396,27 @@ func TestWithdrawWaitsForAKeepUnderWay(t *testing.T) {
 	assert.Len(t, got, 2, "the keep that was writing finished before Withdraw returned")
 }
 
+// A withdrawal after the gate read the count, before the engine took the
+// turn up, keeps the turn out too: the count travels on the query from the gate.
+func TestWithdrawBetweenTheGateAndTheAnswer(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, inmem.NewStorage(), "inst-a", nil)
+	mem := &core.Memory{Store: store, Window: memWindow, Now: func() time.Time { return memNow }}
+	q := remembered("admitted, then withdrawn")
+	q.Withdrawals = mem.Withdrawals("u1") // read at the gate
+	mem.Withdraw("u1")                    // the withdrawal lands before the engine runs
+	_, err := newEngine(textModel("answer"), grounded, nil, "scope", core.WithMemory(mem)).Answer(ctx, q)
+	require.NoError(t, err)
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, uint64(1), mem.Withdrawals("u1"))
+	assert.Equal(t, uint64(0), mem.Withdrawals("u2"))
+}
+
 // Withdraw on no memory does nothing.
 func TestWithdrawWithoutMemory(t *testing.T) {
 	var mem *core.Memory
 	assert.NotPanics(t, func() { mem.Withdraw("u1") })
+	assert.Equal(t, uint64(0), mem.Withdrawals("u1"))
 }

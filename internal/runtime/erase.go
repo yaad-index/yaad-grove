@@ -31,10 +31,15 @@ func Erased(results []EraseResult) bool {
 	return true
 }
 
-// MemoryEraser erases a user's long-term memory; *Eraser is one.
+// MemoryEraser erases a user's long-term memory, and counts the user's
+// withdrawals so a turn admitted before one is not kept; *Eraser is one.
 type MemoryEraser interface {
 	Erase(ctx context.Context, user string) []EraseResult
+	Withdrawals(user string) uint64
 }
+
+// Withdrawals is user's withdrawal count, read before the consent gate.
+func (e *Eraser) Withdrawals(user string) uint64 { return e.Memory.Withdrawals(user) }
 
 // Eraser erases a user's long-term memory in every namespace the instance has
 // kept memory in, configured or dropped (ADR 0023 §5).
