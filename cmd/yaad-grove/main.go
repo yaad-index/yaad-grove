@@ -23,14 +23,12 @@ import (
 	"time"
 
 	"github.com/alecthomas/kong"
-	kongyaml "github.com/alecthomas/kong-yaml"
 
 	"github.com/yaad-index/yaad-grove/internal/acl"
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/embed"
 	"github.com/yaad-index/yaad-grove/internal/memory"
-	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
@@ -40,7 +38,6 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/transcript"
 	"github.com/yaad-index/yaad-grove/internal/transport"
 	"github.com/yaad-index/yaad-grove/internal/transport/telegram"
-	"github.com/yaad-index/yaad-grove/langpacks"
 )
 
 // version is the build version, overridden at link time via -ldflags.
@@ -52,6 +49,7 @@ type CLI struct {
 	LogLevel string `name:"log-level" default:"info" enum:"debug,info,warn,error" help:"Log verbosity."`
 
 	Serve   ServeCmd   `cmd:"" help:"Run the bot: connect the transport and answer queries."`
+	Replay  ReplayCmd  `cmd:"" help:"Answer a file of questions with the configured engine, or compare two such runs."`
 	Version VersionCmd `cmd:"" help:"Print the build version and exit."`
 }
 
@@ -243,66 +241,11 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 
-	// The model is wrapped with the spend meter (ADR 0006/0008): the engine sees a
-	// metered core.Model, so the ceiling is enforced on the model-call path while
-	// core stays free of budget.
-	m := runtime.MeterModel(meter, model.New(model.Config{
-		BaseURL: c.ModelBaseURL,
-		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
-		Model:   c.ModelName,
-	}))
-	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
-	// endpoint is configured, with keyword as the query-time fallback. Building the
-	// semantic index embeds the whole vault, so a failure here fails startup.
-	retriever, kbStore, err := buildRetriever(c, log)
+	a, err := c.buildAnswering(log, meter)
 	if err != nil {
 		return err
 	}
-
-	// The tool registry connects the configured MCP servers; their tools become
-	// this instance's tools (ADR 0001). Zero configured leaves a retrieval-only
-	// bot. Connected before the transport starts and closed on shutdown.
-	servers, err := parseMCPServers(c.MCPServers)
-	if err != nil {
-		return err
-	}
-	// Scope each server's exposed tools per --mcp-allow / --mcp-deny (issue #87), so
-	// a read-only bot never advertises or can call a server's write/identity tools.
-	servers, err = applyToolLists(servers, c.MCPAllow, c.MCPDeny)
-	if err != nil {
-		return err
-	}
-	registry := tools.New(servers, version)
-	// The instance's tool set is the MCP registry plus, when structured dimensions
-	// are declared, the built-in kb_enumerate structured-lookup tool over the store
-	// (ADR 0019/0022). With neither dimensions nor orderable fields, WithEnumerate
-	// returns the registry unchanged.
-	toolset := tools.WithEnumerate(registry, kbStore, c.StoreDimensions, c.StoreOrderable)
-
-	// The optional persona layer (ADR 0013): operator-authored behavior prepended
-	// to the system prompt ahead of scope/grounding. Load before the engine so a
-	// misconfigured persona fails startup rather than serving without it.
-	persona, err := loadPersona(c.PersonaFile)
-	if err != nil {
-		return err
-	}
-	// The optional grounding-prompt template (ADR 0016): empty uses the embedded
-	// default (byte-for-byte the built-in prompt); a set-but-unreadable/unparseable
-	// path fails startup rather than serving a broken prompt.
-	promptTmpl, err := loadPromptTemplate(c.PromptTemplate)
-	if err != nil {
-		return err
-	}
-	// The language pack (ADR 0018): its prompt guidance is layered into the system
-	// prompt. Loaded before the engine so an unknown/malformed pack fails startup
-	// rather than serving without it. The base "en" adds nothing.
-	pack, err := langpacks.Load(c.Language, c.LangpacksDir)
-	if err != nil {
-		return err
-	}
-	engine := core.New(m, retriever, toolset, c.Scope,
-		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
-		core.WithContextTokens(c.ContextSize))
+	engine, registry, kbStore, toolset, persona, pack, servers := a.engine, a.registry, a.kbStore, a.toolset, a.persona, a.pack, a.servers
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
@@ -818,7 +761,7 @@ func main() {
 	parser := kong.Must(&cli,
 		kong.Name("yaad-grove"),
 		kong.Description("A config-driven community knowledge-base bot: grounded answers, bounded scope."),
-		kong.Configuration(kongyaml.Loader, "/etc/yaad-grove/config.yaml", "config.yaml"),
+		kong.Configuration(configLoader, "/etc/yaad-grove/config.yaml", "config.yaml"),
 		kong.UsageOnError(),
 	)
 
