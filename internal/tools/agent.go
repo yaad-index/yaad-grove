@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"slices"
 
 	"github.com/yaad-index/bonyan/agent"
@@ -56,7 +57,12 @@ func (a *AgentTools) Definitions() []bmodel.ToolDef {
 
 // Call runs one tool call. A name no tool is advertised under is
 // tool.ErrUnknown, and arguments that are not a JSON object are
-// tool.ErrInvalidArguments; the tool's own errors are returned as they are.
+// tool.ErrInvalidArguments. A failure of the engine's own tool, such as
+// kb_enumerate, is its result: the error's text, written by this program to
+// tell the model what to change, so the model can correct the call. A server's
+// tool's error is returned as it is, and bonyan reports it to the model by
+// kind only, since its text is the server's. Every failure is logged, with
+// the error's text only for the engine's own tool.
 func (a *AgentTools) Call(ctx context.Context, call bmodel.ToolCall) (string, error) {
 	if a.t == nil || !slices.ContainsFunc(a.t.Defs(), func(d core.ToolDef) bool { return d.Name == call.Name }) {
 		return "", fmt.Errorf("%w: %q", tool.ErrUnknown, call.Name)
@@ -67,7 +73,19 @@ func (a *AgentTools) Call(ctx context.Context, call bmodel.ToolCall) (string, er
 			return "", fmt.Errorf("%w: the arguments are not a JSON object", tool.ErrInvalidArguments)
 		}
 	}
-	return a.t.Call(ctx, call.Name, args)
+	out, err := a.t.Call(ctx, call.Name, args)
+	if err == nil {
+		return out, nil
+	}
+	if server := a.Server(call.Name); server != "" {
+		slog.Warn("tool call failed", "tool", call.Name, "server", server)
+		return "", err
+	}
+	slog.Warn("tool call failed", "tool", call.Name, "err", err)
+	if ctx.Err() != nil {
+		return "", err
+	}
+	return "error: " + err.Error(), nil
 }
 
 // Source is the kind the trust policy classifies the named tool's results

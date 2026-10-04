@@ -19,6 +19,7 @@ import (
 	bmodel "github.com/yaad-index/bonyan/model"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/tools"
 )
 
 const modelName = "test-model"
@@ -485,6 +486,46 @@ func TestAToolFailureIsReportedByKindAndTheRunGoesOn(t *testing.T) {
 			results := toolResults(mdl)
 			assert.NotEmpty(t, results)
 			assert.NotContains(t, results, "7c1", "no error text reaches the model")
+		})
+	}
+}
+
+// ownTools are the engine's own tool beside a server's, failing as told.
+type ownTools struct{ errs map[string]error }
+
+func (o ownTools) Defs() []core.ToolDef {
+	return []core.ToolDef{{Name: "kb_enumerate", Description: "lists"}, {Name: "search", Description: "searches"}}
+}
+
+func (o ownTools) Call(_ context.Context, name string, _ map[string]any) (string, error) {
+	return "", o.errs[name]
+}
+
+type oneServer struct{}
+
+func (oneServer) Server(name string) string {
+	if name == "search" {
+		return "docs"
+	}
+	return ""
+}
+
+// Through the real adapter: the engine's own tool's error text reaches the
+// model, so it can correct the call, while a server's tool's error text never
+// does (ADR 0023).
+func TestOwnToolErrorReachesTheModel(t *testing.T) {
+	tl := tools.ForAgent(ownTools{errs: map[string]error{
+		"kb_enumerate": errors.New(`kb_enumerate: unknown dimension "solo" (declared: games, hosts)`),
+		"search":       errors.New("SERVER-TEXT-9d2"),
+	}}, oneServer{})
+	for name, want := range map[string]string{"kb_enumerate": `unknown dimension "solo" (declared: games, hosts)`, "search": "error: the tool failed"} {
+		t.Run(name, func(t *testing.T) {
+			mdl := &mockModel{replies: []bmodel.ChatResponse{{ToolCalls: toolCall("c1", name)}, {Content: "done"}}}
+			_, err := newEngine(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tl, "scope").Answer(context.Background(), core.Query{Text: "q"})
+			require.NoError(t, err)
+			results := toolResults(mdl)
+			assert.Contains(t, results, want)
+			assert.NotContains(t, results, "9d2")
 		})
 	}
 }
