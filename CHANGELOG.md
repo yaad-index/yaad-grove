@@ -1,5 +1,21 @@
 # Changelog
 
+## [0.20.0](https://github.com/yaad-index/yaad-grove/compare/v0.19.0...v0.20.0) (2026-10-04)
+
+
+### Features
+
+* adapt the engine's tools and model to bonyan ([#189](https://github.com/yaad-index/yaad-grove/issues/189)) ([88cc0a5](https://github.com/yaad-index/yaad-grove/commit/88cc0a5385c01e3c838505074e469ce2e035def3))
+* answer through a bonyan agent run ([#190](https://github.com/yaad-index/yaad-grove/issues/190)) ([e7c9f6e](https://github.com/yaad-index/yaad-grove/commit/e7c9f6e3f6f21e3a8e068a648573515a690f5ce8))
+* long-term memory per user on the memory service ([#192](https://github.com/yaad-index/yaad-grove/issues/192)) ([7343359](https://github.com/yaad-index/yaad-grove/commit/7343359a2757e4e61a32f5146c282fdc7b13bf26))
+* replay subcommand to answer a question file and compare runs ([#193](https://github.com/yaad-index/yaad-grove/issues/193)) ([07015c6](https://github.com/yaad-index/yaad-grove/commit/07015c67b3bbdd62f59f9fafd7d8c1e1342e318c))
+
+
+### Bug Fixes
+
+* stamp the release version into images and test the tag before publishing ([#185](https://github.com/yaad-index/yaad-grove/issues/185)) ([b65b460](https://github.com/yaad-index/yaad-grove/commit/b65b4606fc86904adfd100f9298233a8640828c1))
+* the engine's own tool errors reach the model as its result ([#194](https://github.com/yaad-index/yaad-grove/issues/194)) ([b1d9d88](https://github.com/yaad-index/yaad-grove/commit/b1d9d88dc97676957d764d5daf882400fa7beed0))
+
 ## [0.19.0](https://github.com/yaad-index/yaad-grove/compare/v0.18.1...v0.19.0) (2026-09-08)
 
 
