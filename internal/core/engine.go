@@ -73,6 +73,14 @@ type Query struct {
 	// though it was never buffered. Empty when the query isn't a reply. Like History
 	// it is context, not a fact source — grounding still governs factual claims.
 	ReplyContext string
+	// Chat is the chat the query came from: with User.ID it names the query's
+	// long-term memory session (ADR 0023 §2).
+	Chat string
+	// Remember lets the run use long-term memory: recall what is known about
+	// the user and keep this turn and its answer. The runtime sets it only for a
+	// turn the consent gate admitted (ADR 0023 §5); an engine with no memory
+	// ignores it.
+	Remember bool
 }
 
 // HistoryTurn is one prior conversation turn injected into the answer prompt as
@@ -220,6 +228,8 @@ type Engine struct {
 	// (ADR 0021 Part B). Zero means no cap — the knob's requiredness is enforced at
 	// startup by the CLI, so an in-process engine built without it behaves as before.
 	contextTokens int
+	// memory is the long-term memory (ADR 0023); nil is none.
+	memory *Memory
 }
 
 // Option configures an Engine at construction. Options keep New's required
@@ -416,7 +426,9 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	if e.tools != nil {
 		a.Tools = e.tools
 	}
-	out, rep, err := agent.Run(ctx, a, content.From(content.Provenance{Kind: content.KindUser}, askerLabel(q.User.Display)+q.Text))
+	memTurn := e.memory.use(&a, q)
+	input := askerLabel(q.User.Display) + q.Text
+	out, rep, err := agent.Run(ctx, a, content.From(content.Provenance{Kind: content.KindUser}, input))
 	if err != nil {
 		return Reply{}, err
 	}
@@ -426,6 +438,9 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		// what it can help with (ADR 0013): parseRefusal strips the marker and
 		// surfaces that note as the persona-shaped decline.
 		text, refused := parseRefusal(answer)
+		if !refused {
+			memTurn.keep(ctx, input, text)
+		}
 		return Reply{Text: text, Refused: refused}, nil
 	}
 	switch out.Reason() {

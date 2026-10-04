@@ -9,7 +9,8 @@ require (
 	github.com/go-telegram/bot v1.27.0
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/stretchr/testify v1.12.1
-	github.com/yaad-index/bonyan v0.0.0-20261003124252-3af80014e6b4
+	github.com/yaad-index/bonyan v0.1.0
+	github.com/yaad-index/bonyan/memory/honcho v0.1.0
 	github.com/yuin/goldmark v1.8.6
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/text v0.42.0
