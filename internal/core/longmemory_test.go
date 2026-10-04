@@ -2,6 +2,7 @@ package core_test
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -85,9 +86,42 @@ func TestMemoryKeepsTheTurnAndItsAnswer(t *testing.T) {
 	got, err := store.History(context.Background(), "u1", session)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"[Ada] how do I install it?", "Run the install script."}, texts(got))
+	var origins []content.Kind
 	for _, tx := range got {
-		assert.False(t, tx.Trusted(), "nothing read back from memory is trusted")
+		u, ok := tx.(content.Untrusted)
+		require.True(t, ok, "nothing read back from memory is trusted")
+		origins = append(origins, u.Provenance().Origin)
 	}
+	assert.Equal(t, []content.Kind{content.KindUser, content.KindModel}, origins, "the answer is kept as model output")
+}
+
+// failFirst is a backend whose first write fails.
+type failFirst struct {
+	memory.Backend
+	writes int
+}
+
+func (b *failFirst) Write(ctx context.Context, r memory.Record) (string, error) {
+	b.writes++
+	if b.writes == 1 {
+		return "", errors.New("service down")
+	}
+	return b.Backend.Write(ctx, r)
+}
+
+// When the question cannot be kept, the answer is not kept without it.
+func TestMemoryKeepsNoAnswerWithoutItsQuestion(t *testing.T) {
+	ctx := context.Background()
+	backend := &failFirst{Backend: inmem.NewStorage().Open("inst-a")}
+	store, err := memory.NewStore(backend, memory.Options{Namespace: "inst-a", Retention: 30 * memWindow, Now: func() time.Time { return memNow }})
+	require.NoError(t, err)
+	reply, err := newEngine(textModel("answer"), grounded, nil, "scope", withMemory(store, nil)).Answer(ctx, remembered("question"))
+	require.NoError(t, err)
+	assert.Equal(t, "answer", reply.Text, "a memory failure never costs the user the answer")
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+	assert.Equal(t, 1, backend.writes)
 }
 
 // A query the runtime did not mark, or one missing its user or chat, keeps
@@ -237,4 +271,33 @@ func TestMemoryGroupNamespaces(t *testing.T) {
 	got, err = inst.History(ctx, "u1", session)
 	require.NoError(t, err)
 	assert.Equal(t, []string{"[Ada] which widget do I like?", "red"}, texts(got))
+}
+
+// A refused turn is not kept: neither the question nor the decline.
+func TestMemoryKeepsNoRefusal(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, inmem.NewStorage(), "inst-a", nil)
+	reply, err := newEngine(textModel(core.RefusalToken+" I can help with the widget."), grounded, nil, "scope", withMemory(store, nil)).Answer(ctx, remembered("what's the weather?"))
+	require.NoError(t, err)
+	require.True(t, reply.Refused)
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got, "a refused turn is not kept")
+}
+
+// A question the vault cannot ground is refused even when memory holds its
+// answer: memory personalises and never grounds (ADR 0023 §4). Nothing is
+// asked of the model and nothing is kept.
+func TestMemoryNeverGrounds(t *testing.T) {
+	ctx := context.Background()
+	store := openStore(t, inmem.NewStorage(), "inst-a", nil)
+	require.NoError(t, store.Remember(ctx, "u1", content.Provenance{Kind: content.KindUser}, "the widget's launch date is 12 May"))
+	m := textModel("12 May")
+	reply, err := newEngine(m, mockRetriever{}, nil, "scope", withMemory(store, nil)).Answer(ctx, remembered("when is the widget's launch date?"))
+	require.NoError(t, err)
+	assert.True(t, reply.Refused)
+	assert.Zero(t, m.calls, "memory does not stand in for retrieval")
+	got, err := store.History(ctx, "u1", session)
+	require.NoError(t, err)
+	assert.Empty(t, got)
 }

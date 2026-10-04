@@ -1,10 +1,13 @@
 package core
 
 import (
+	"context"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/yaad-index/bonyan/agent"
+	"github.com/yaad-index/bonyan/content"
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/secret"
 )
@@ -39,22 +42,59 @@ func WithMemory(m *Memory) Option {
 	}
 }
 
-// use makes a's run use the memory for q: the user is the subject and the
+// turn is one query's place in long-term memory: the store of its chat's
+// namespace, the asker as subject, and the session.
+type turn struct {
+	store    *memory.Store
+	subject  string
+	session  string
+	scrubber *secret.Scrubber
+}
+
+// use makes a's run recall what is known about q's asker, and returns where
+// the turn is kept once it is answered. The user is the subject and the
 // session is the user's turns in q's chat within the current window (ADR 0023
-// §2). A query the runtime did not mark, or one missing its user or chat, runs
-// without memory.
-func (m *Memory) use(a *agent.Agent, q Query) {
+// §2). The run itself keeps nothing, so a refused turn is never kept. A query
+// the runtime did not mark, or one missing its user or chat, runs without
+// memory and returns nil.
+func (m *Memory) use(a *agent.Agent, q Query) *turn {
 	if m == nil || !q.Remember || q.User.ID == "" || q.Chat == "" {
-		return
+		return nil
 	}
 	now := time.Now
 	if m.Now != nil {
 		now = m.Now
 	}
-	a.Memory = m.storeFor(q.Chat)
-	a.Subject = q.User.ID
-	a.Session = Session(q.Chat, q.User.ID, WindowStart(now(), m.Window))
-	a.Scrubber = m.Scrubber
+	t := &turn{
+		store:    m.storeFor(q.Chat),
+		subject:  q.User.ID,
+		session:  Session(q.Chat, q.User.ID, WindowStart(now(), m.Window)),
+		scrubber: m.Scrubber,
+	}
+	a.Memory = t.store
+	a.Subject = t.subject
+	return t
+}
+
+// keep keeps an answered turn: the asker's message, as the run received it,
+// and the answer, as model output (ADR 0023 §3, §5), each scrubbed of resolved
+// secrets before it leaves the engine. A failure is logged; the answer is
+// still the user's.
+func (t *turn) keep(ctx context.Context, message, answer string) {
+	if t == nil {
+		return
+	}
+	scrub := func(s string) string { return s }
+	if t.scrubber != nil {
+		scrub = t.scrubber.Scrub
+	}
+	if err := t.store.Append(ctx, t.subject, t.session, content.Provenance{Kind: content.KindUser}, scrub(message)); err != nil {
+		slog.Warn("long-term memory: keeping the turn failed", "err", err)
+		return
+	}
+	if err := t.store.Append(ctx, t.subject, t.session, content.Provenance{Kind: content.KindModel}, scrub(answer)); err != nil {
+		slog.Warn("long-term memory: keeping the answer failed", "err", err)
+	}
 }
 
 // storeFor is the store of chat's namespace.

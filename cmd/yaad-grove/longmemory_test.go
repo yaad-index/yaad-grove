@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"testing"
 	"time"
@@ -14,6 +15,7 @@ import (
 	"github.com/yaad-index/bonyan/memory"
 	"github.com/yaad-index/bonyan/memory/inmem"
 	"github.com/yaad-index/bonyan/secret"
+	"github.com/yaad-index/bonyan/trust"
 
 	"github.com/yaad-index/yaad-grove/internal/namespaces"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
@@ -43,7 +45,8 @@ func TestBuildLongMemoryConfig(t *testing.T) {
 		{"no acknowledgement", func(c *ServeCmd) { c.LongMemoryWithoutErase = false }, "--long-memory-without-erase"},
 		{"no namespace", func(c *ServeCmd) { c.LongMemoryNamespace = "" }, "--long-memory-namespace is required"},
 		{"no retention", func(c *ServeCmd) { c.LongMemoryRetention = 0 }, "--long-memory-retention is required"},
-		{"no window", func(c *ServeCmd) { c.LongMemoryWindow = 0 }, "--long-memory-window must be positive"},
+		{"no window", func(c *ServeCmd) { c.LongMemoryWindow = 0 }, "--long-memory-window must be at least"},
+		{"window too short", func(c *ServeCmd) { c.LongMemoryWindow, c.LongMemoryRetention = 30*time.Minute, time.Hour }, "--long-memory-window must be at least 1h"},
 		{"retention not whole windows", func(c *ServeCmd) { c.LongMemoryRetention = 36 * time.Hour }, "whole number of --long-memory-window"},
 		{"options without the URL", func(c *ServeCmd) { c.LongMemoryURL = "" }, "without --long-memory-url"},
 		{"group namespaces without the URL", func(c *ServeCmd) {
@@ -158,19 +161,33 @@ func TestNewLongMemoryRecordsNamespaces(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"club", "inst-a"}, reread.Namespaces(), "the configured namespaces are on disk")
 
-	// The group's mapping is removed; the next start still purges its namespace.
-	lm, err := newLongMemory(newSet(newOpener(), nil), reread, "inst-a", nil, time.Hour, start.Add(time.Hour))
+	// The group's mapping is removed; the next start still purges its
+	// namespace, as dropped at that start.
+	restart := start.Add(time.Hour)
+	lm, err := newLongMemory(newSet(newOpener(), nil), reread, "inst-a", nil, time.Hour, restart)
 	require.NoError(t, err)
 	require.Len(t, lm.purgers, 2)
 	byName := map[string]runtime.NamespacePurge{}
 	for _, p := range lm.purgers {
 		np, ok := p.(runtime.NamespacePurge)
 		require.True(t, ok)
+		require.NotNil(t, np.Backend)
 		byName[np.Namespace] = np
 	}
-	assert.True(t, byName["inst-a"].Configured)
-	assert.False(t, byName["club"].Configured, "the dropped namespace is purged as dropped")
-	assert.Equal(t, 2*time.Hour, byName["club"].Keep, "kept for the retention period and one window")
+	assert.True(t, byName["inst-a"].Dropped.IsZero(), "the configured namespace is not dropped")
+	assert.Equal(t, restart, byName["club"].Dropped, "the dropped namespace is purged as dropped")
+	assert.Equal(t, time.Hour, byName["club"].Retention)
+
+	// A later start keeps the first drop time.
+	again, err := namespaces.Open(path)
+	require.NoError(t, err)
+	lm, err = newLongMemory(newSet(newOpener(), nil), again, "inst-a", nil, time.Hour, restart.Add(time.Hour))
+	require.NoError(t, err)
+	for _, p := range lm.purgers {
+		if np := p.(runtime.NamespacePurge); np.Namespace == "club" {
+			assert.True(t, np.Dropped.Equal(restart))
+		}
+	}
 }
 
 func TestParseGroupNamespaces(t *testing.T) {
@@ -204,4 +221,17 @@ func TestBuildLongMemorySendsTheToken(t *testing.T) {
 	_, err = lm.memory.Store.Recall(context.Background(), "u1", "anything", 5)
 	require.Error(t, err, "the fake service refuses")
 	assert.Equal(t, "Bearer memory-token-value", <-auth)
+}
+
+// Each record is stored under the default policy's name.
+func TestNewLongMemoryPolicyName(t *testing.T) {
+	ctx := context.Background()
+	set := newSet(newOpener(), nil)
+	store, err := set.get("inst-a")
+	require.NoError(t, err)
+	require.NoError(t, store.Append(ctx, "u1", "s1", content.Provenance{Kind: content.KindUser}, "hello"))
+	recs, err := set.backends["inst-a"].History(ctx, url.QueryEscape("inst-a")+"/"+url.QueryEscape("u1"), "s1", time.Time{})
+	require.NoError(t, err)
+	require.Len(t, recs, 1)
+	assert.Equal(t, trust.DefaultName, recs[0].Decision.Policy)
 }

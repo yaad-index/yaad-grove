@@ -11,11 +11,16 @@ import (
 	"github.com/yaad-index/bonyan/memory/honcho"
 	"github.com/yaad-index/bonyan/registry"
 	"github.com/yaad-index/bonyan/secret"
+	"github.com/yaad-index/bonyan/trust"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/namespaces"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 )
+
+// minLongMemoryWindow is the shortest session window: the purge runs a minute
+// after each boundary, so a window must be much longer than that.
+const minLongMemoryWindow = time.Hour
 
 // longMemoryTokenEnv names the environment variable holding the memory
 // service's token, when it requires one.
@@ -56,14 +61,14 @@ func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*lon
 		return nil, errors.New("--long-memory-url needs --long-memory-without-erase: consent withdrawal does not erase a user's long-term memory, so turning it on must be acknowledged")
 	case c.LongMemoryNamespace == "":
 		return nil, errors.New("--long-memory-namespace is required with --long-memory-url: set this instance's own namespace; there is no default")
-	case c.LongMemoryWindow <= 0:
-		return nil, errors.New("--long-memory-window must be positive")
+	case c.LongMemoryWindow < minLongMemoryWindow:
+		return nil, fmt.Errorf("--long-memory-window must be at least %s", minLongMemoryWindow)
 	case c.LongMemoryRetention <= 0:
 		return nil, errors.New("--long-memory-retention is required with --long-memory-url and must be positive")
 	case c.LongMemoryRetention%c.LongMemoryWindow != 0:
 		return nil, fmt.Errorf("--long-memory-retention (%s) must be a whole number of --long-memory-window (%s), so a purge deletes whole sessions", c.LongMemoryRetention, c.LongMemoryWindow)
 	case c.LongMemoryRecord == "":
-		return nil, errors.New("--long-memory-record is required with --long-memory-url")
+		return nil, errors.New("--long-memory-record is required with --long-memory-url: a file on persistent storage, the same at every start, recording every namespace memory was kept in")
 	}
 	groups, err := parseGroupNamespaces(c.LongMemoryGroupNamespaces)
 	if err != nil {
@@ -108,6 +113,7 @@ type storeSet struct {
 	retention time.Duration
 	scrubber  *secret.Scrubber
 	stores    map[string]*memory.Store
+	backends  map[string]memory.Backend
 }
 
 // get is ns's store. The trust policy is bonyan's default inside the
@@ -122,24 +128,26 @@ func (s *storeSet) get(ns string) (*memory.Store, error) {
 		return nil, err
 	}
 	st, err := memory.NewStore(backend, memory.Options{
-		Namespace: ns,
-		Policy:    registry.GuardPolicy(nil, nil),
-		Retention: s.retention,
-		Scrubber:  s.scrubber,
+		Namespace:  ns,
+		Policy:     registry.GuardPolicy(nil, nil),
+		PolicyName: trust.DefaultName,
+		Retention:  s.retention,
+		Scrubber:   s.scrubber,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("long-term memory namespace %q: %w", ns, err)
 	}
 	if s.stores == nil {
-		s.stores = map[string]*memory.Store{}
+		s.stores, s.backends = map[string]*memory.Store{}, map[string]memory.Backend{}
 	}
-	s.stores[ns] = st
+	s.stores[ns], s.backends[ns] = st, backend
 	return st, nil
 }
 
 // newLongMemory builds the engine's memory over namespace and the namespaces
-// groups gives group chats, records them as seen at now, and makes a purger
-// for every recorded namespace.
+// groups gives group chats, records them as configured, records every other
+// recorded namespace as dropped at now unless it already was, and makes a
+// purger for every recorded namespace.
 func newLongMemory(set *storeSet, record *namespaces.Record, namespace string, groups map[string]string, window time.Duration, now time.Time) (*longMemory, error) {
 	m := &core.Memory{Window: window, Scrubber: set.scrubber}
 	var err error
@@ -163,21 +171,27 @@ func newLongMemory(set *storeSet, record *namespaces.Record, namespace string, g
 		names = append(names, ns)
 	}
 	// On disk before the engine can keep anything in them.
-	if err := record.Seen(now, names...); err != nil {
+	if err := record.Configured(names...); err != nil {
 		return nil, err
 	}
 	lm := &longMemory{memory: m}
 	for _, ns := range record.Namespaces() {
-		s, err := set.get(ns)
-		if err != nil {
+		if _, err := set.get(ns); err != nil {
 			return nil, err
 		}
+		var dropped time.Time
+		if !configured[ns] {
+			if dropped, err = record.Dropped(ns, now); err != nil {
+				return nil, err
+			}
+		}
 		lm.purgers = append(lm.purgers, runtime.NamespacePurge{
-			Namespace:  ns,
-			Store:      s,
-			Record:     record,
-			Configured: configured[ns],
-			Keep:       set.retention + window,
+			Namespace: ns,
+			Backend:   set.backends[ns],
+			Record:    record,
+			Retention: set.retention,
+			Window:    window,
+			Dropped:   dropped,
 		})
 	}
 	return lm, nil

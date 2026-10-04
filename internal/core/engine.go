@@ -426,8 +426,9 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	if e.tools != nil {
 		a.Tools = e.tools
 	}
-	e.memory.use(&a, q)
-	out, rep, err := agent.Run(ctx, a, content.From(content.Provenance{Kind: content.KindUser}, askerLabel(q.User.Display)+q.Text))
+	memTurn := e.memory.use(&a, q)
+	input := askerLabel(q.User.Display) + q.Text
+	out, rep, err := agent.Run(ctx, a, content.From(content.Provenance{Kind: content.KindUser}, input))
 	if err != nil {
 		return Reply{}, err
 	}
@@ -437,6 +438,9 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		// what it can help with (ADR 0013): parseRefusal strips the marker and
 		// surfaces that note as the persona-shaped decline.
 		text, refused := parseRefusal(answer)
+		if !refused {
+			memTurn.keep(ctx, input, text)
+		}
 		return Reply{Text: text, Refused: refused}, nil
 	}
 	switch out.Reason() {

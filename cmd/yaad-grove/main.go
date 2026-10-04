@@ -237,10 +237,10 @@ type ServeCmd struct {
 	// as for the MCP and topic maps.
 	LongMemoryGroupNamespaces []string      `name:"long-memory-group-namespace" sep:"none" help:"Give a group chat its own memory namespace, as 'chatid=namespace' (repeatable). A group not listed uses --long-memory-namespace; a user in groups with different namespaces has a separate memory in each."`
 	LongMemoryRetention       time.Duration `name:"long-memory-retention" help:"How long long-term memory keeps a record (e.g. 2160h). Required with --long-memory-url; a whole number of --long-memory-window."`
-	LongMemoryWindow          time.Duration `name:"long-memory-window" default:"24h" help:"Length of a memory session's window: one user's turns in one chat within one window form a session, and expired memory is purged at each window boundary."`
+	LongMemoryWindow          time.Duration `name:"long-memory-window" default:"24h" help:"Length (at least 1h) of a memory session's window: one user's turns in one chat within one window form a session, and expired memory is purged at each window boundary."`
 	LongMemoryDerive          bool          `name:"long-memory-derive" help:"Let the memory service derive conclusions about users from their turns, on the model the service is configured with. Off by default."`
 	LongMemoryInstructions    string        `name:"long-memory-instructions" help:"Instructions steering the memory service's deriver. Empty uses a default that asks for conclusions about the speaker only."`
-	LongMemoryRecord          string        `name:"long-memory-record" default:"./long-memory-namespaces.json" help:"File recording every memory namespace this instance has kept memory in, so a namespace dropped from the configuration is still purged." type:"path"`
+	LongMemoryRecord          string        `name:"long-memory-record" help:"File recording every memory namespace this instance has kept memory in, so a namespace dropped from the configuration is still purged. Required with --long-memory-url; put it on persistent storage, the same path at every start." type:"path"`
 	LongMemoryWithoutErase    bool          `name:"long-memory-without-erase" help:"Acknowledge that consent withdrawal does not erase a user's long-term memory. Required with --long-memory-url."`
 }
 

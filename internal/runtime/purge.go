@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -10,21 +11,18 @@ import (
 )
 
 // purgeDelay is how long after a window boundary the purge runs, so a clock
-// a little behind still cuts in the new window.
+// a little behind still finds itself in the new window.
 const purgeDelay = time.Minute
 
-// Purger deletes what retention expired; *memory.Store satisfies it.
+// Purger deletes what retention expired from one namespace.
 type Purger interface {
 	Purge(ctx context.Context) error
 }
 
-// RunPurge purges every one of ps, each a namespace's long-term memory, shortly
-// after every window boundary until ctx ends (ADR 0023 §5). With retention a whole number of windows, the cut
-// (now minus retention) then falls on a boundary too, so a session lies wholly
-// on one side of it and is deleted whole rather than rewritten. A failed purge
-// is logged and tried again at the next boundary, and does not stop the others;
-// what it missed is still never read, since reads skip records older than
-// retention.
+// RunPurge runs every one of ps at once and then shortly after every window
+// boundary, until ctx ends (ADR 0023 §5). A failed purge is logged and tried
+// again at the next boundary, and does not stop the others; what it missed is
+// still never read, since reads skip records older than retention.
 func RunPurge(ctx context.Context, ps []Purger, window time.Duration, now func() time.Time, after func(time.Duration) <-chan time.Time) {
 	if now == nil {
 		now = time.Now
@@ -33,18 +31,18 @@ func RunPurge(ctx context.Context, ps []Purger, window time.Duration, now func()
 		after = time.After
 	}
 	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-after(untilPurge(now(), window)):
-		}
-		for i, p := range ps {
+		for _, p := range ps {
 			if err := p.Purge(ctx); err != nil {
 				if ctx.Err() != nil {
 					return
 				}
-				slog.Warn("long-term memory purge failed; retrying at the next window", "store", i, "err", err)
+				slog.Warn("long-term memory purge failed; retrying at the next window", "err", err)
 			}
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-after(untilPurge(now(), window)):
 		}
 	}
 }
@@ -56,20 +54,34 @@ func untilPurge(t time.Time, window time.Duration) time.Duration {
 	return core.WindowStart(t.Add(-purgeDelay), window).Add(window + purgeDelay).Sub(t)
 }
 
-// NamespacePurge purges one namespace's long-term memory and keeps the record
-// of namespaces current (ADR 0023 §5). A configured namespace is recorded as
-// seen at every purge, whether the purge succeeds or not, since it may be
-// written to until the next. One dropped from the configuration is still
-// purged, and forgotten once a purge in it succeeds after everything it can
-// hold has expired.
+// PurgeCut is where a purge at now cuts: retention before the start of the
+// current window. With retention a whole number of windows the cut is a window
+// boundary, so every session lies wholly on one side of it and is deleted
+// whole, never rewritten, whenever the purge runs. A record is deleted at most
+// one window after it expires, and is never read once it has.
+func PurgeCut(now time.Time, window, retention time.Duration) time.Time {
+	return core.WindowStart(now, window).Add(-retention)
+}
+
+// Deleter deletes a namespace's records older than a cut; a bonyan memory
+// backend is one.
+type Deleter interface {
+	DeleteBefore(ctx context.Context, t time.Time) error
+}
+
+// NamespacePurge purges one namespace's long-term memory at PurgeCut, and
+// keeps the record of namespaces current (ADR 0023 §5). A namespace dropped
+// from the configuration is still purged, and forgotten once a purge's cut
+// has passed the moment it was dropped, since nothing was kept in it after.
 type NamespacePurge struct {
-	Namespace  string
-	Store      Purger
-	Record     *namespaces.Record
-	Configured bool
-	// Keep is how long after a namespace was last configured it can still hold
-	// a record: the retention period and one window.
-	Keep time.Duration
+	Namespace string
+	Backend   Deleter
+	Record    *namespaces.Record
+	Retention time.Duration
+	Window    time.Duration
+	// Dropped is when the namespace was first found missing from the
+	// configuration; the zero time is a configured one.
+	Dropped time.Time
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
 }
@@ -80,20 +92,16 @@ func (p NamespacePurge) Purge(ctx context.Context) error {
 	if p.Now != nil {
 		now = p.Now
 	}
-	if p.Configured {
-		if err := p.Record.Seen(now(), p.Namespace); err != nil {
-			return err
-		}
+	cut := PurgeCut(now(), p.Window, p.Retention)
+	if err := p.Backend.DeleteBefore(ctx, cut); err != nil {
+		return fmt.Errorf("namespace %q: %w", p.Namespace, err)
 	}
-	if err := p.Store.Purge(ctx); err != nil {
-		return err
-	}
-	if p.Configured {
+	if p.Dropped.IsZero() || cut.Before(p.Dropped) {
 		return nil
 	}
-	forgot, err := p.Record.Forget(p.Namespace, now(), p.Keep)
-	if forgot {
-		slog.Info("long-term memory namespace forgotten: dropped from the configuration and fully expired", "namespace", p.Namespace)
+	if err := p.Record.Forget(p.Namespace); err != nil {
+		return fmt.Errorf("namespace %q: %w", p.Namespace, err)
 	}
-	return err
+	slog.Info("long-term memory namespace forgotten: dropped from the configuration and fully purged", "namespace", p.Namespace)
+	return nil
 }
