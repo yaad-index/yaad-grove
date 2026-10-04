@@ -103,6 +103,25 @@ go run ./cmd/yaad-grove serve      # needs config.yaml + the env secrets
 
 Requires Go 1.26+.
 
+### Replaying questions
+
+`replay run` answers a file of questions with the engine `serve` would build,
+from the same flags and the `serve` section of `config.yaml`, and writes one
+JSON line per answer. Each question is asked once and on its own: no history,
+no consent gate, no long-term memory, and a spend meter of its own in memory.
+`replay compare` prints two such runs side by side and flags changed
+refusals, errors and empty answers, so two builds can be read against each
+other on the same questions.
+
+```sh
+yaad-grove replay run --questions questions.jsonl --out old.jsonl   # build A
+yaad-grove replay run --questions questions.jsonl --out new.jsonl   # build B
+yaad-grove replay compare old.jsonl new.jsonl
+```
+
+A question line is `{"id": "q1", "query": "…"}`; an optional `query_en` is
+asked too, as `q1@en`. Other fields are ignored.
+
 ## Releases
 
 Versioned with [release-please](https://github.com/googleapis/release-please)
