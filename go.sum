@@ -59,8 +59,10 @@ github.com/shopspring/decimal v1.4.0 h1:bxl37RwXBklmTi0C79JfXCEBD1cqqHt0bbgBAGFp
 github.com/shopspring/decimal v1.4.0/go.mod h1:gawqmDU56v4yIKSwfBSFip1HdCCXN8/+DMd9qYNcwME=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=
 github.com/stretchr/testify v1.12.1/go.mod h1:MDEgiDPPsNp5cuIrHPPCyornHKgEVbtFUmoNlxoYthg=
-github.com/yaad-index/bonyan v0.0.0-20261003124252-3af80014e6b4 h1:/AI7r5Zh2/KD7qffNaCPBcyLKAwi3464cgg6aj2/2t4=
-github.com/yaad-index/bonyan v0.0.0-20261003124252-3af80014e6b4/go.mod h1:aMfKzIh/Kh80C6GneHETRYO64iDjcyezozDiVpPTddo=
+github.com/yaad-index/bonyan v0.1.0 h1:HNhmYBWJ9lz1pd7LAZoqH8HK6NEEdcf5o9jNgZmx1HA=
+github.com/yaad-index/bonyan v0.1.0/go.mod h1:aMfKzIh/Kh80C6GneHETRYO64iDjcyezozDiVpPTddo=
+github.com/yaad-index/bonyan/memory/honcho v0.1.0 h1:h+Bp8r1xP4s+P8dlAT9ER/xejwfko6hffx/sglrsHrs=
+github.com/yaad-index/bonyan/memory/honcho v0.1.0/go.mod h1:M5U0qKpXsP//kpfZEnnMP83qWMs8k8P1w/xWVetlZCQ=
 github.com/yosida95/uritemplate/v3 v3.0.2 h1:Ed3Oyj9yrmi9087+NczuL5BwkIc4wvTb5zIM+UJPGz4=
 github.com/yosida95/uritemplate/v3 v3.0.2/go.mod h1:ILOh0sOhIJR3+L/8afwt/kE++YT040gmv5BQTMR2HP4=
 github.com/yuin/goldmark v1.8.6 h1:d0VcaP1sx9GkFVkoW+KtggpGi2KZ965i14b0+bDQST4=

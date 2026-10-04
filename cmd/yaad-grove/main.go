@@ -223,6 +223,25 @@ type ServeCmd struct {
 	// has a turn in the chat within this window. A reply is always a follow-up. Zero
 	// means replies-only.
 	FollowupWindow time.Duration `name:"followup-window" default:"30m" help:"How far back to look for a sender's prior turn when deciding if a non-reply is a follow-up. 0 = replies only."`
+
+	// Long-term memory (ADR 0023): what each consented user said in directed
+	// group turns, and the answers, kept per user in the memory service through
+	// bonyan's memory/honcho backend. Off unless the URL is set, so a deployment
+	// without the service answers exactly as before. Withdrawal does not erase it,
+	// so turning it on needs LongMemoryWithoutErase. The service's token
+	// comes from YAADGROVE_LONG_MEMORY_TOKEN.
+	LongMemoryURL       string `name:"long-memory-url" help:"Base URL of the memory service; setting it turns long-term memory on. Off by default. Consent withdrawal does NOT erase long-term memory (needs --long-memory-without-erase)."`
+	LongMemoryNamespace string `name:"long-memory-namespace" help:"This instance's memory namespace. Required with --long-memory-url; no default. Instances sharing one memory service never see each other's records."`
+	// LongMemoryGroupNamespaces gives group chats namespaces of their own
+	// (ADR 0023 §2), each spec "chatid=namespace". sep:"none" keeps a spec whole,
+	// as for the MCP and topic maps.
+	LongMemoryGroupNamespaces []string      `name:"long-memory-group-namespace" sep:"none" help:"Give a group chat its own memory namespace, as 'chatid=namespace' (repeatable). A group not listed uses --long-memory-namespace; a user in groups with different namespaces has a separate memory in each."`
+	LongMemoryRetention       time.Duration `name:"long-memory-retention" help:"How long long-term memory keeps a record (e.g. 2160h). Required with --long-memory-url; a whole number of --long-memory-window."`
+	LongMemoryWindow          time.Duration `name:"long-memory-window" default:"24h" help:"Length of a memory session's window: one user's turns in one chat within one window form a session, and expired memory is purged at each window boundary."`
+	LongMemoryDerive          bool          `name:"long-memory-derive" help:"Let the memory service derive conclusions about users from their turns, on the model the service is configured with. Off by default."`
+	LongMemoryInstructions    string        `name:"long-memory-instructions" help:"Instructions steering the memory service's deriver. Empty uses a default that asks for conclusions about the speaker only."`
+	LongMemoryRecord          string        `name:"long-memory-record" default:"./long-memory-namespaces.json" help:"File recording every memory namespace this instance has kept memory in, so a namespace dropped from the configuration is still purged." type:"path"`
+	LongMemoryWithoutErase    bool          `name:"long-memory-without-erase" help:"Acknowledge that consent withdrawal does not erase a user's long-term memory. Required with --long-memory-url."`
 }
 
 // Run wires and starts the bot. Scaffold: assembles the pieces and reports that
@@ -256,9 +275,13 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// ceiling is enforced on the model-call path while core stays free of budget.
 	// The key is read from the environment on every call; none is sent when the
 	// variable is unset.
+	// One resolver holds the process's secrets, so its scrubber knows every value
+	// resolved through it, the model key included, and long-term memory scrubs
+	// with it (ADR 0023 §5).
+	secrets := secret.NewResolver(secret.Env{})
 	chatOpts := chatcompat.Options{BaseURL: c.ModelBaseURL, Model: c.ModelName, HTTPClient: &http.Client{Timeout: 60 * time.Second}}
 	if os.Getenv(modelKeyEnv) != "" {
-		chatOpts.Secrets, chatOpts.KeyName = secret.NewResolver(secret.Env{}).Scope(modelKeyEnv), modelKeyEnv
+		chatOpts.Secrets, chatOpts.KeyName = secrets.Scope(modelKeyEnv), modelKeyEnv
 	}
 	chat, err := chatcompat.New(chatOpts)
 	if err != nil {
@@ -319,9 +342,20 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
+	// Long-term memory (ADR 0023): nil when not configured, and the engine then
+	// answers without it.
+	longMemory, err := buildLongMemory(c, secrets, time.Now())
+	if err != nil {
+		return err
+	}
+	var engineMemory *core.Memory
+	if longMemory != nil {
+		engineMemory = longMemory.memory
+	}
 	engine := core.New(m, c.ModelName, retriever, tools.ForAgent(toolset, registry), c.Scope,
 		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
-		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens))
+		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens),
+		core.WithMemory(engineMemory))
 
 	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
@@ -383,6 +417,12 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = registry.Close() }()
+
+	// Retention (ADR 0023 §5): expired long-term memory is purged after every
+	// window boundary for as long as the bot runs.
+	if longMemory != nil {
+		go runtime.RunPurge(ctx, longMemory.purgers, c.LongMemoryWindow, nil, nil)
+	}
 
 	allowedTopics, err := parseTopicAllowList(c.TelegramAllowedTopics)
 	if err != nil {
@@ -459,6 +499,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		"language", pack.Code,
 		"memory_turns", c.MemoryTurns,
 		"memory_inject", c.MemoryInject,
+		"long_memory", longMemory != nil,
 		"admins", len(policy.Admins),
 		"nudge_mode", c.NudgeMode,
 		"mcp_servers", len(servers),

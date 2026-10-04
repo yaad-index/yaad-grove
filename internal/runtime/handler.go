@@ -74,7 +74,9 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 		// dropped.
 		if in.Surface == core.SurfaceDM && consent != nil {
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
-				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings)
+				// An admin's DM is answered without long-term memory: an admin need not
+				// have consented, and only consented turns reach it (ADR 0023 §5).
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, false)
 			}
 			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, policy.Strings, in), nil
 		}
@@ -106,7 +108,10 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 		switch decision {
 		case acl.DecideServe:
-			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings)
+			// A consented, directed group turn is the only turn long-term memory
+			// keeps, with its answer (ADR 0023 §5). A DM reaches here only on a bot
+			// with no consent surface, and is not kept.
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, in.Surface == core.SurfaceGroup)
 			// The bot's serve-path response — an answer OR a refusal — is the bot's real
 			// reply to the query, so the transcript records it (ADR 0015). This is
 			// deliberately unlike the memory buffer, which drops refusals as useless
@@ -148,14 +153,17 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 
 // answer runs the engine with the selected recent-conversation context (ADR 0014)
 // and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
-// a capacity notice rather than crashing; any other error propagates.
-func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings) (core.Reply, error) {
+// a capacity notice rather than crashing; any other error propagates. remember
+// lets the run use long-term memory (ADR 0023).
+func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings, remember bool) (core.Reply, error) {
 	reply, err := engine.Answer(ctx, core.Query{
 		User:         in.User,
 		Surface:      in.Surface,
 		Text:         in.Text,
 		History:      history,
 		ReplyContext: replyContextOf(in),
+		Chat:         in.ReplyTo,
+		Remember:     remember,
 	})
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
@@ -171,11 +179,12 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 // the bot's answer. Select runs BEFORE the sender's turn is appended, so the
 // current message never appears in its own injected context. A refusal is not
 // buffered (a canned out-of-scope line is not useful follow-up context); a
-// nil/disabled buffer makes the whole thing a plain answer.
-func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings) (core.Reply, error) {
+// nil/disabled buffer makes the whole thing a plain answer. remember is passed
+// on to the engine for long-term memory (ADR 0023).
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings, remember bool) (core.Reply, error) {
 	history := selectHistory(buf, in, injectN, window)
 	rememberUser(buf, in)
-	reply, err := answer(ctx, engine, in, history, strs)
+	reply, err := answer(ctx, engine, in, history, strs, remember)
 	if err == nil && !reply.Refused {
 		rememberBot(buf, in.ReplyTo, reply.Text)
 	}

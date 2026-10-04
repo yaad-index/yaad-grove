@@ -35,6 +35,7 @@ internal/acl/                 consent + access gate + persistent per-user store
 internal/pending/             callback token store for interactive actions
 internal/quarantine/          consent-gated community-message log, isolated from answering
 internal/budget/              persisted spend meter for the global ceiling
+internal/namespaces/          durable record of the long-term memory namespaces kept memory in
 internal/runtime/             request handler composing the gate, engine, and actions
 adr/                          architecture decision records
 ```
