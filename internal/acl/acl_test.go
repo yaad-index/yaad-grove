@@ -194,3 +194,23 @@ func TestBoltStore(t *testing.T) {
 	assert.Equal(t, acl.TierTrusted, got.Tier)
 	assert.Equal(t, 3, got.RateCount)
 }
+
+// Unconsented lists every user whose consent is not granted: one who withdrew
+// (back to unknown on their existing record), one who declined, and one seen
+// but never asked; never one who consented.
+func TestBoltStoreUnconsented(t *testing.T) {
+	ctx := context.Background()
+	s, err := acl.OpenBolt(filepath.Join(t.TempDir(), "acl.db"))
+	require.NoError(t, err)
+	defer func() { _ = s.Close() }()
+	g := acl.NewGate(s, acl.TierDefault)
+	require.NoError(t, g.SetConsent(ctx, "withdrew", acl.ConsentGranted))
+	require.NoError(t, g.SetConsent(ctx, "withdrew", acl.ConsentUnknown))
+	require.NoError(t, g.SetConsent(ctx, "consented", acl.ConsentGranted))
+	require.NoError(t, g.SetConsent(ctx, "declined", acl.ConsentDeclined))
+	require.NoError(t, s.Put(ctx, acl.Record{UserID: "seen", RateCount: 1}))
+
+	got, err := s.Unconsented(ctx)
+	require.NoError(t, err)
+	assert.ElementsMatch(t, []string{"withdrew", "declined", "seen"}, got)
+}

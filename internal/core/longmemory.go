@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/yaad-index/bonyan/agent"
@@ -30,6 +31,31 @@ type Memory struct {
 	Scrubber *secret.Scrubber
 	// Now is the clock; nil is time.Now.
 	Now func() time.Time
+
+	// mu guards withdrawn. keep holds it for reading while it appends, and
+	// Withdraw takes it for writing, so a withdrawal waits for appends already
+	// under way and every later keep sees it.
+	mu sync.RWMutex
+	// withdrawn counts each user's withdrawals. A turn keeps only if the count
+	// is the one it read when it started.
+	withdrawn map[string]uint64
+}
+
+// Withdraw stops every turn of user already under way from keeping anything,
+// and returns once no turn of user is still keeping. The caller then erases
+// user's memory (ADR 0023 §5), and nothing kept before the erase outlives it.
+// A turn that starts afterwards keeps as usual, so a user who consents again is
+// remembered again.
+func (m *Memory) Withdraw(user string) {
+	if m == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.withdrawn == nil {
+		m.withdrawn = map[string]uint64{}
+	}
+	m.withdrawn[user]++
 }
 
 // WithMemory gives the engine long-term memory (ADR 0023). A nil m, or one
@@ -49,6 +75,9 @@ type turn struct {
 	subject  string
 	session  string
 	scrubber *secret.Scrubber
+	mem      *Memory
+	// withdrawn is the subject's withdrawal count when the turn started.
+	withdrawn uint64
 }
 
 // use makes a's run recall what is known about q's asker, and returns where
@@ -65,11 +94,16 @@ func (m *Memory) use(a *agent.Agent, q Query) *turn {
 	if m.Now != nil {
 		now = m.Now
 	}
+	m.mu.RLock()
+	withdrawn := m.withdrawn[q.User.ID]
+	m.mu.RUnlock()
 	t := &turn{
-		store:    m.storeFor(q.Chat),
-		subject:  q.User.ID,
-		session:  Session(q.Chat, q.User.ID, WindowStart(now(), m.Window)),
-		scrubber: m.Scrubber,
+		store:     m.storeFor(q.Chat),
+		subject:   q.User.ID,
+		session:   Session(q.Chat, q.User.ID, WindowStart(now(), m.Window)),
+		scrubber:  m.Scrubber,
+		mem:       m,
+		withdrawn: withdrawn,
 	}
 	a.Memory = t.store
 	a.Subject = t.subject
@@ -78,10 +112,16 @@ func (m *Memory) use(a *agent.Agent, q Query) *turn {
 
 // keep keeps an answered turn: the asker's message, as the run received it,
 // and the answer, as model output (ADR 0023 §3, §5), each scrubbed of resolved
-// secrets before it leaves the engine. A failure is logged; the answer is
-// still the user's.
+// secrets before it leaves the engine. A turn whose user withdrew since it
+// started keeps nothing. A failure is logged; the answer is still the user's.
 func (t *turn) keep(ctx context.Context, message, answer string) {
 	if t == nil {
+		return
+	}
+	t.mem.mu.RLock()
+	defer t.mem.mu.RUnlock()
+	if t.mem.withdrawn[t.subject] != t.withdrawn {
+		slog.Info("long-term memory: the user withdrew during the answer; the turn is not kept")
 		return
 	}
 	scrub := func(s string) string { return s }

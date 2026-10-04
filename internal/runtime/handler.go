@@ -78,7 +78,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 				// have consented, and only consented turns reach it (ADR 0023 §5).
 				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, false)
 			}
-			return dmConsentFlow(ctx, consent, policy.Memory, policy.Transcript != nil, policy.Strings, in), nil
+			return dmConsentFlow(ctx, consent, policy, in), nil
 		}
 
 		decision, err := gate.Check(ctx, acl.GateInput{User: in.User, Surface: in.Surface, Directed: in.Directed})

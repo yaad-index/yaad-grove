@@ -3,10 +3,12 @@ package langpacks_test
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 
 	"github.com/yaad-index/yaad-grove/langpacks"
 )
@@ -72,4 +74,25 @@ func TestLoadMalformedErrors(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "fa.yaml"), []byte("code: fa\nprompt: [unterminated\n"), 0o600))
 	_, err := langpacks.Load("fa", dir)
 	assert.Error(t, err)
+}
+
+// fa has its own text for every string en has, so a Persian instance never
+// falls back to English for a message (ADR 0018): an en-only key here is a
+// message the fa bot would show in English.
+func TestFaHasEveryString(t *testing.T) {
+	var en, fa struct {
+		Strings map[string]string `yaml:"strings"`
+	}
+	for f, into := range map[string]any{"en.yaml": &en, "fa.yaml": &fa} {
+		data, err := os.ReadFile(f)
+		require.NoError(t, err)
+		require.NoError(t, yaml.Unmarshal(data, into))
+	}
+	require.NotEmpty(t, en.Strings)
+	persian := regexp.MustCompile(`\p{Arabic}`)
+	for key, text := range en.Strings {
+		assert.NotEmpty(t, fa.Strings[key], "fa.yaml has no %q", key)
+		assert.NotEqual(t, text, fa.Strings[key], "fa.yaml's %q is the English text", key)
+		assert.Regexp(t, persian, fa.Strings[key], "fa.yaml's %q has no Persian", key)
+	}
 }

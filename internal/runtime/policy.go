@@ -35,6 +35,13 @@ type Policy struct {
 	// means no transcript is written. When set, the consent disclosure also states
 	// that entries persist historically, so opt-in is informed.
 	Transcript transcript.Log
+	// Erase erases a withdrawing user's long-term memory (ADR 0023 §5); nil
+	// means the instance keeps none. When set, the consent disclosure says that
+	// memory is kept and erased on withdrawal.
+	Erase MemoryEraser
+	// MemoryDerive is whether the memory service derives conclusions about users
+	// from their turns; the disclosure says so when it does.
+	MemoryDerive bool
 }
 
 // AdminSet is the configured admin allowlist (ADR 0012): a user is an admin iff
