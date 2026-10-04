@@ -19,6 +19,7 @@ import (
 	"github.com/alecthomas/kong"
 	kongyaml "github.com/alecthomas/kong-yaml"
 	bmodel "github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/secret"
 	"gopkg.in/yaml.v3"
 
@@ -45,6 +46,7 @@ type ReplayRunCmd struct {
 	Out       string        `name:"out" required:"" type:"path" help:"File the answers are written to, one JSON line each. It must not exist yet."`
 	Timeout   time.Duration `name:"timeout" default:"3m" help:"Longest one question may take before it is recorded as an error."`
 	Label     string        `name:"label" help:"Which side of a comparison this run is (e.g. the build's commit), written on every line."`
+	RecordDir string        `name:"record-dir" help:"Write one recording per question here (every model request and response, tool results included, scrubbed of resolved secrets), and name it on the question's line. Off when empty. It keeps the question file's text: give it no real people's messages." type:"path"`
 }
 
 // replayUser is the user every replayed question is asked as.
@@ -69,6 +71,9 @@ type replayAnswer struct {
 	Calls    int64  `json:"calls"`
 	Error    string `json:"error,omitempty"`
 	MS       int64  `json:"ms"`
+	// Recording is the file the question's run was recorded to, with
+	// --record-dir.
+	Recording string `json:"recording,omitempty"`
 }
 
 // Why a question was refused, told apart from outside the engine, by the
@@ -108,6 +113,47 @@ type replayRun struct {
 	Timeout time.Duration
 	// Calls counts the model calls the engine makes; nil counts none.
 	Calls *atomic.Int64
+	// Record records each question's run to a file of its own; nil records
+	// none.
+	Record *replayRecorder
+}
+
+// replayRecorder gives each replayed question a recording of its own.
+type replayRecorder struct {
+	dir   string
+	scrub *secret.Scrubber
+	sink  *record.File
+	rec   *record.Recorder
+}
+
+// begin opens the next question's recording.
+func (r *replayRecorder) begin() error {
+	sink, err := record.OpenFile(record.FileOptions{Dir: r.dir})
+	if err != nil {
+		return err
+	}
+	rec, err := record.NewRecorder(sink, r.scrub)
+	if err != nil {
+		_ = sink.Close()
+		return err
+	}
+	r.sink, r.rec = sink, rec
+	return nil
+}
+
+// recorder is the open recording's recorder, for the engine's run.
+func (r *replayRecorder) recorder(core.Query) *record.Recorder { return r.rec }
+
+// end closes the open recording and returns its path; a recording that lost
+// an entry is an error, so a line never names an incomplete one as whole.
+func (r *replayRecorder) end() (string, error) {
+	path, fails := r.sink.Path(), r.rec.WriteFailures()
+	err := r.sink.Close()
+	r.sink, r.rec = nil, nil
+	if err == nil && fails > 0 {
+		err = fmt.Errorf("record: %d entries of %s were not written", fails, path)
+	}
+	return path, err
 }
 
 // countCalls counts every call made through chat.
@@ -162,7 +208,22 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 		c.RetrievalStore, c.StorePath = storeBackendMemory, ""
 	}
 	var calls atomic.Int64
-	a, err := c.buildAnswering(log, meter, secret.NewResolver(secret.Env{}), nil, &calls)
+	secrets := secret.NewResolver(secret.Env{})
+	var rec *replayRecorder
+	var opts []core.Option
+	if r.RecordDir != "" {
+		// Every secret the process holds is resolved before anything is
+		// recorded, so the recording is scrubbed of each from the first entry.
+		scoped := secrets.Scope(processSecrets...)
+		for _, name := range processSecrets {
+			if _, err := scoped.Resolve(context.Background(), name); err != nil && !errors.Is(err, secret.ErrNotFound) {
+				return fmt.Errorf("replay: resolve %s: %w", name, err)
+			}
+		}
+		rec = &replayRecorder{dir: r.RecordDir, scrub: secrets.Scrubber()}
+		opts = append(opts, core.WithRecording(rec.recorder))
+	}
+	a, err := c.buildAnswering(log, meter, secrets, nil, &calls, opts...)
 	if err != nil {
 		return err
 	}
@@ -175,7 +236,7 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 	defer func() { _ = a.registry.Close() }()
 
 	log.Info("replay: answering", "questions", len(questions), "model", c.ModelName, "label", r.Label, "out", r.Out)
-	run := replayRun{Label: r.Label, Model: c.ModelName, Timeout: r.Timeout, Calls: &calls}
+	run := replayRun{Label: r.Label, Model: c.ModelName, Timeout: r.Timeout, Calls: &calls, Record: rec}
 	if err := replay(ctx, a.engine, questions, out, run, log); err != nil {
 		return err
 	}
@@ -197,12 +258,25 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 		if run.Calls != nil {
 			before = run.Calls.Load()
 		}
+		if run.Record != nil {
+			if err := run.Record.begin(); err != nil {
+				return fmt.Errorf("replay: record %s: %w", q.ID, err)
+			}
+		}
 		qctx, cancel := context.WithTimeout(ctx, run.Timeout)
 		start := time.Now()
 		reply, err := e.Answer(qctx, core.Query{User: core.User{ID: replayUser}, Surface: core.SurfaceGroup, Text: q.Text})
 		elapsed := time.Since(start)
 		cancel()
-		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Question: q.Text, MS: elapsed.Milliseconds()}
+		var recording string
+		if run.Record != nil {
+			path, rerr := run.Record.end()
+			if rerr != nil {
+				return fmt.Errorf("replay: record %s: %w", q.ID, rerr)
+			}
+			recording = path
+		}
+		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Question: q.Text, MS: elapsed.Milliseconds(), Recording: recording}
 		if run.Calls != nil {
 			line.Calls = run.Calls.Load() - before
 		}

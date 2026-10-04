@@ -17,6 +17,8 @@ import (
 	"github.com/yaad-index/bonyan/agent"
 	"github.com/yaad-index/bonyan/content"
 	bmodel "github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/secret"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/tools"
@@ -602,4 +604,41 @@ func TestRequestGolden(t *testing.T) {
 	want, err := os.ReadFile(golden)
 	require.NoError(t, err, "missing golden — run with -update")
 	assert.Equal(t, string(want), got)
+}
+
+// memSink keeps recorded entries in memory.
+type memSink struct{ entries []record.Entry }
+
+func (s *memSink) Write(e record.Entry) error { s.entries = append(s.entries, e); return nil }
+func (s *memSink) Full() bool                 { return false }
+func (s *memSink) Subject() string            { return "" }
+func (s *memSink) Close() error               { return nil }
+
+// With recording, a run's model calls are recorded, the tool's result among
+// them, and the recorder is chosen for the run's own query.
+func TestWithRecordingRecordsTheRunsToolResults(t *testing.T) {
+	sink := &memSink{}
+	rec, err := record.NewRecorder(sink, secret.NewResolver(secret.Env{}).Scrubber())
+	require.NoError(t, err)
+	var asked []string
+	tools := toolRegistry()
+	tools.results = map[string]string{"search": "TOOL-RESULT-4b7"}
+	mdl := &mockModel{replies: []bmodel.ChatResponse{{ToolCalls: toolCall("c1", "search")}, {Content: "done"}}}
+	engine := newEngine(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, tools, "scope",
+		core.WithRecording(func(q core.Query) *record.Recorder { asked = append(asked, q.Text); return rec }))
+	_, err = engine.Answer(context.Background(), core.Query{Text: "q1"})
+	require.NoError(t, err)
+	assert.Equal(t, []string{"q1"}, asked)
+	var calls int
+	var all strings.Builder
+	for _, e := range sink.entries {
+		if e.Call != nil {
+			calls++
+		}
+		b, err := json.Marshal(e)
+		require.NoError(t, err)
+		all.Write(b)
+	}
+	assert.Equal(t, 2, calls, "both model calls are recorded")
+	assert.Contains(t, all.String(), "TOOL-RESULT-4b7", "the tool's result is in the recording")
 }
