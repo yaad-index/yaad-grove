@@ -125,6 +125,12 @@ A refusal's reason is `no-call` (nothing retrieved and no tools, so no model
 call), `model` (the model declined in its own words) or `fixed` (the engine's
 fixed decline after model calls: the step limit, or a decline with no words).
 
+With `--record-dir`, each question's run is also recorded to a file of its own
+(every model request and response, tool results included, scrubbed of the
+process's secrets), named on the question's line as `recording`. A recording
+keeps the question file's text, so give it no real people's messages. `serve`
+never records.
+
 A question line is `{"id": "q1", "query": "…"}`; an optional `query_en` is
 asked too, as `q1@en`. Other fields are ignored.
 

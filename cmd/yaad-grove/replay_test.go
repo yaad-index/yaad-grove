@@ -19,6 +19,8 @@ import (
 	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/secret"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
 )
@@ -300,4 +302,67 @@ func TestReplayRunEndToEnd(t *testing.T) {
 
 	require.ErrorContains(t, cmd.Run(discard), "exists", "an existing output is never overwritten")
 	assert.Equal(t, 1, requests)
+}
+
+// With --record-dir every question's run is recorded to a file of its own,
+// named on its line, holding the model's answer and scrubbed of every secret
+// the process holds, even one the question itself carries.
+func TestReplayRunRecords(t *testing.T) {
+	t.Setenv("YAADGROVE_EMBEDDING_API_KEY", "SEKRIT-9f1")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"the vault says hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer srv.Close()
+	dir := t.TempDir()
+	cmd := &ReplayRunCmd{
+		ServeCmd: ServeCmd{
+			VaultDir: tempVault(t), Scope: "notes", Language: "en", ModelBaseURL: srv.URL, ModelName: "m",
+			MaxOutputTokens: 100, SimilarityThreshold: 0.3, ContextSize: 8000, SpendCeiling: 1000, SpendPeriod: time.Hour,
+		},
+		Questions: writeFile(t, "q.jsonl", `{"id":"1","query":"hello world SEKRIT-9f1"}`+"\n"+`{"id":"2","query":"hello world again"}`),
+		Out:       filepath.Join(dir, "out.jsonl"),
+		Timeout:   time.Minute,
+		RecordDir: filepath.Join(dir, "rec"),
+	}
+	t.Chdir(dir)
+	require.NoError(t, cmd.Run(discard))
+
+	got, err := readAnswers(cmd.Out)
+	require.NoError(t, err)
+	require.Len(t, got, 2)
+	require.NotEmpty(t, got[0].Recording)
+	assert.NotEqual(t, got[0].Recording, got[1].Recording, "a recording per question")
+	for _, a := range got {
+		assert.Equal(t, filepath.Join(dir, "rec"), filepath.Dir(a.Recording))
+		b, err := os.ReadFile(a.Recording)
+		require.NoError(t, err)
+		assert.Contains(t, string(b), "the vault says hello")
+		assert.NotContains(t, string(b), "SEKRIT-9f1", "no secret the process holds is recorded")
+		_, runs, err := record.ReadRuns(bytes.NewReader(b))
+		require.NoError(t, err)
+		assert.Len(t, runs, 1)
+	}
+	b, err := os.ReadFile(got[0].Recording)
+	require.NoError(t, err)
+	assert.Contains(t, string(b), "hello world", "the question is in its recording")
+}
+
+// Without --record-dir nothing is recorded and lines name no recording.
+func TestReplayWithoutRecording(t *testing.T) {
+	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
+	var out bytes.Buffer
+	require.NoError(t, replay(context.Background(), e, []replayQuestion{{"1", "a"}}, &out, replayRun{Timeout: time.Minute}, discard))
+	assert.NotContains(t, out.String(), "recording")
+}
+
+// A recording that cannot be opened stops the run, rather than leaving a
+// question unrecorded.
+func TestReplayRecordingFails(t *testing.T) {
+	notADir := writeFile(t, "file", "x")
+	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
+	run := replayRun{Timeout: time.Minute, Record: &replayRecorder{dir: notADir, scrub: secret.NewResolver(secret.Env{}).Scrubber()}}
+	var out bytes.Buffer
+	require.ErrorContains(t, replay(context.Background(), e, []replayQuestion{{"1", "a"}}, &out, run, discard), "record 1")
+	assert.Empty(t, e.queries, "nothing is asked unrecorded")
 }

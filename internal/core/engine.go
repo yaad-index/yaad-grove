@@ -25,6 +25,7 @@ import (
 	"github.com/yaad-index/bonyan/budget"
 	"github.com/yaad-index/bonyan/content"
 	bmodel "github.com/yaad-index/bonyan/model"
+	"github.com/yaad-index/bonyan/record"
 )
 
 // ErrNotImplemented marks scaffold stubs that have structure but no behavior
@@ -235,6 +236,8 @@ type Engine struct {
 	contextTokens int
 	// memory is the long-term memory (ADR 0023); nil is none.
 	memory *Memory
+	// recording gives each run's recorder; nil records nothing.
+	recording func(Query) *record.Recorder
 }
 
 // Option configures an Engine at construction. Options keep New's required
@@ -268,6 +271,13 @@ func WithLanguage(prompt string) Option {
 // build an engine without a cap keep working.
 func WithContextTokens(n int) Option {
 	return func(e *Engine) { e.contextTokens = n }
+}
+
+// WithRecording records the engine's runs: recorder gives the recorder for each
+// query's run, nil recording none. Serve sets none, so live turns are never
+// recorded; the replay command records its own runs.
+func WithRecording(recorder func(Query) *record.Recorder) Option {
+	return func(e *Engine) { e.recording = recorder }
 }
 
 // WithMaxOutputTokens caps each model reply, in tokens. Zero or negative keeps
@@ -430,6 +440,9 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	}
 	if e.tools != nil {
 		a.Tools = e.tools
+	}
+	if e.recording != nil {
+		a.Recorder = e.recording(q)
 	}
 	memTurn := e.memory.use(&a, q)
 	input := askerLabel(q.User.Display) + q.Text
