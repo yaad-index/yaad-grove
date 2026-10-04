@@ -60,8 +60,9 @@ Extracting facts is the memory backend's job, not bonyan's or the engine's (bony
 
 - **Only consented turns reach long-term memory:** a directed group turn the consent gate serves, and the engine's answer to it. Ambient turns the gate only logs are not kept, and neither are the DMs the engine answers for an admin, who need not have consented. Nothing is derived from a turn that is not kept.
 - **Every event is scrubbed of resolved secrets before it reaches the service**, so the service's deriver never sees what bonyan would not store.
-- **Withdrawal (`/consent remove`) deletes the subject:** every event and every derived record about that user, in every chat and every namespace the instance is configured with, through bonyan's `DeleteSubject`. This is stronger than the buffer-only purge it replaces. The consent disclosure says that memory is kept and is erased on withdrawal. The quarantine log and the transcript keep their own rules (ADR 0004, 0015); their withdrawal stays prospective, as disclosed.
-- **Retention:** a retention period is required, and the engine runs bonyan's purge on a schedule, in every namespace.
+- **Withdrawal (`/consent remove`) deletes the subject:** every event and every derived record about that user, in every chat and every namespace the instance has kept memory in, through bonyan's `DeleteSubject`. This is stronger than the buffer-only purge it replaces. The consent disclosure says that memory is kept and is erased on withdrawal. The quarantine log and the transcript keep their own rules (ADR 0004, 0015); their withdrawal stays prospective, as disclosed.
+- **Retention:** a retention period is required, and the engine runs bonyan's purge on a schedule, in every namespace the instance has kept memory in.
+- **A namespace dropped from the configuration is not forgotten.** The engine keeps a durable record of every namespace it has kept memory in, and withdrawal and the retention purge cover every recorded namespace, configured or not. A namespace leaves the record only when a purge has run in it after everything it held has expired, so removing a group's mapping never leaves memory that withdrawal cannot reach or retention cannot delete.
 
 ### 6. The service as a bonyan memory backend
 
@@ -90,7 +91,7 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 
 - A turn from a user who has not consented never reaches the service.
 - Two namespaces never see each other's memory, and neither can delete the other's, whether they belong to two instances or to two groups of one.
-- After `/consent remove`, recall for that user returns nothing, in any chat and any of the instance's namespaces, and the service holds no workspace for them.
+- After `/consent remove`, recall for that user returns nothing, in any chat and any namespace the instance has kept memory in, configured or not, and the service holds no workspace for them.
 - Recalled memory never enters the request as trusted.
 - A question the vault cannot ground is refused whether or not memory holds an answer to it.
 - No text reaches the service before bonyan's scrubber has removed every resolved secret from it.
@@ -103,7 +104,7 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 - **The deriver's model calls are the service's, not bonyan's.** bonyan neither meters nor records them: their spend is outside the engine's spend ceiling, on the model the deployment configures for the service, and what the deriver concluded, and why, is outside bonyan's recordings and evaluation.
 - Opinions have no type of their own, so a policy or a prompt cannot treat them differently from other conclusions except by what their text says.
 - Keeping statements about other people out is steering, not a guarantee (§3).
-- A group given a namespace of its own keeps its members' memory apart from the instance's other groups. A user in both has two memories, and withdrawal has to erase every one of them.
+- A group given a namespace of its own keeps its members' memory apart from the instance's other groups. A user in both has two memories, and withdrawal has to erase every one of them, so the engine records every namespace it has kept memory in, including one whose mapping was later removed.
 - A deployment that uses long-term memory runs one more service, with its own database. Without it, the engine answers as before, with the ADR 0014 buffer only.
 
 ## Alternatives considered
