@@ -241,7 +241,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 
-	a, err := c.buildAnswering(log, meter)
+	a, err := c.buildAnswering(log, meter, nil)
 	if err != nil {
 		return err
 	}

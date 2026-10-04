@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -41,6 +42,7 @@ type ReplayRunCmd struct {
 	Questions string        `name:"questions" required:"" type:"existingfile" help:"Questions as JSON lines, each with an id and a query; a query_en, when present, is asked too, as <id>@en."`
 	Out       string        `name:"out" required:"" type:"path" help:"File the answers are written to, one JSON line each. It must not exist yet."`
 	Timeout   time.Duration `name:"timeout" default:"3m" help:"Longest one question may take before it is recorded as an error."`
+	Label     string        `name:"label" help:"Which side of a comparison this run is (e.g. the build's commit), written on every line."`
 }
 
 // replayUser is the user every replayed question is asked as.
@@ -52,14 +54,73 @@ type replayQuestion struct {
 	Text string
 }
 
-// replayAnswer is one line of a run's output.
+// replayAnswer is one line of a run's output. Reason says how a refusal came
+// about, and Calls is how many model calls the question took.
 type replayAnswer struct {
 	ID       string `json:"id"`
+	Label    string `json:"label,omitempty"`
+	Model    string `json:"model,omitempty"`
 	Question string `json:"question"`
 	Answer   string `json:"answer"`
 	Refused  bool   `json:"refused"`
+	Reason   string `json:"reason,omitempty"`
+	Calls    int64  `json:"calls"`
 	Error    string `json:"error,omitempty"`
 	MS       int64  `json:"ms"`
+}
+
+// Why a question was refused, told apart from outside the engine, by the
+// model calls it took and the reply's text.
+const (
+	// reasonNoCall: refused without a model call. Nothing was retrieved and
+	// there are no tools, so there was nothing to answer from.
+	reasonNoCall = "no-call"
+	// reasonModel: the model declined, in its own words: out of scope, or
+	// nothing to ground an answer on.
+	reasonModel = "model"
+	// reasonFixed: the engine's fixed decline after model calls. The run
+	// reached its step limit without an answer, or the model declined with no
+	// words of its own; calls tells the two apart.
+	reasonFixed = "fixed"
+)
+
+// engineDecline is the engine's fixed decline text.
+const engineDecline = "That's outside what I can answer from my curated sources."
+
+// refusalReason classifies a refused reply.
+func refusalReason(text string, calls int64) string {
+	switch {
+	case calls == 0:
+		return reasonNoCall
+	case text == engineDecline:
+		return reasonFixed
+	default:
+		return reasonModel
+	}
+}
+
+// replayRun is what every line of a run shares.
+type replayRun struct {
+	Label   string
+	Model   string
+	Timeout time.Duration
+	// Calls counts the model calls the engine makes; nil counts none.
+	Calls *atomic.Int64
+}
+
+// countCalls counts every call made through m.
+func countCalls(m core.Model, n *atomic.Int64) core.Model {
+	return callCounter{inner: m, n: n}
+}
+
+type callCounter struct {
+	inner core.Model
+	n     *atomic.Int64
+}
+
+func (c callCounter) Complete(ctx context.Context, messages []core.Message, tools []core.ToolDef) (core.Completion, error) {
+	c.n.Add(1)
+	return c.inner.Complete(ctx, messages, tools)
 }
 
 // answerer is the engine as a replay uses it.
@@ -89,7 +150,14 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	a, err := c.buildAnswering(log, meter)
+	// A replay indexes the vault in memory: a persistent store is serve's, and
+	// may be open in a running bot, so a replay never opens it.
+	if storeName(c.RetrievalStore) != storeBackendMemory {
+		log.Info("replay: indexing the vault in memory; the configured store is not opened", "store", c.RetrievalStore, "path", c.StorePath)
+		c.RetrievalStore, c.StorePath = storeBackendMemory, ""
+	}
+	var calls atomic.Int64
+	a, err := c.buildAnswering(log, meter, &calls)
 	if err != nil {
 		return err
 	}
@@ -101,8 +169,9 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 	}
 	defer func() { _ = a.registry.Close() }()
 
-	log.Info("replay: answering", "questions", len(questions), "model", c.ModelName, "out", r.Out)
-	if err := replay(ctx, a.engine, questions, out, r.Timeout, log); err != nil {
+	log.Info("replay: answering", "questions", len(questions), "model", c.ModelName, "label", r.Label, "out", r.Out)
+	run := replayRun{Label: r.Label, Model: c.ModelName, Timeout: r.Timeout, Calls: &calls}
+	if err := replay(ctx, a.engine, questions, out, run, log); err != nil {
 		return err
 	}
 	return out.Close()
@@ -112,29 +181,41 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 // answered, so an interrupted run keeps what it finished. A question that
 // fails or times out is written with its error and the run goes on; only a
 // failed write, or ctx ending, stops it.
-func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Writer, timeout time.Duration, log *slog.Logger) error {
+func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Writer, run replayRun, log *slog.Logger) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
 	for i, q := range questions {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		qctx, cancel := context.WithTimeout(ctx, timeout)
+		var before int64
+		if run.Calls != nil {
+			before = run.Calls.Load()
+		}
+		qctx, cancel := context.WithTimeout(ctx, run.Timeout)
 		start := time.Now()
 		reply, err := e.Answer(qctx, core.Query{User: core.User{ID: replayUser}, Surface: core.SurfaceGroup, Text: q.Text})
 		elapsed := time.Since(start)
 		cancel()
-		line := replayAnswer{ID: q.ID, Question: q.Text, Answer: reply.Text, Refused: reply.Refused, MS: elapsed.Milliseconds()}
-		if err != nil {
-			if ctx.Err() != nil {
-				return ctx.Err()
+		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Question: q.Text, MS: elapsed.Milliseconds()}
+		if run.Calls != nil {
+			line.Calls = run.Calls.Load() - before
+		}
+		switch {
+		case err != nil && ctx.Err() != nil:
+			return ctx.Err()
+		case err != nil:
+			line.Error = err.Error()
+		default:
+			line.Answer, line.Refused = reply.Text, reply.Refused
+			if reply.Refused {
+				line.Reason = refusalReason(reply.Text, line.Calls)
 			}
-			line = replayAnswer{ID: q.ID, Question: q.Text, Error: err.Error(), MS: elapsed.Milliseconds()}
 		}
 		if err := enc.Encode(line); err != nil {
 			return fmt.Errorf("replay: write %s: %w", q.ID, err)
 		}
-		log.Info("replay: answered", "n", i+1, "of", len(questions), "id", q.ID, "refused", line.Refused, "error", line.Error != "", "ms", line.MS)
+		log.Info("replay: answered", "n", i+1, "of", len(questions), "id", q.ID, "refused", line.Refused, "reason", line.Reason, "calls", line.Calls, "error", line.Error != "", "ms", line.MS)
 	}
 	return nil
 }
@@ -335,19 +416,28 @@ func outcome(a replayAnswer) string {
 	return "answered"
 }
 
-// writeSide writes one run's answer to a question.
+// writeSide writes one run's answer to a question, headed by the run's label
+// and model when it has them, and what the answer took.
 func writeSide(b *strings.Builder, name string, a *replayAnswer) {
 	if a == nil {
 		fmt.Fprintf(b, "--- %s: not asked\n", name)
 		return
 	}
+	head := []string{}
+	for _, s := range []string{a.Label, a.Model} {
+		if s != "" {
+			head = append(head, s)
+		}
+	}
+	head = append(head, fmt.Sprintf("%d ms", a.MS), fmt.Sprintf("%d calls", a.Calls))
+	fmt.Fprintf(b, "--- %s (%s)", name, strings.Join(head, ", "))
 	switch {
 	case a.Error != "":
-		fmt.Fprintf(b, "--- %s (%d ms) error: %s\n", name, a.MS, a.Error)
+		fmt.Fprintf(b, " error: %s\n", a.Error)
 	case a.Refused:
-		fmt.Fprintf(b, "--- %s (%d ms) refused\n%s\n", name, a.MS, a.Answer)
+		fmt.Fprintf(b, " refused (%s)\n%s\n", a.Reason, a.Answer)
 	default:
-		fmt.Fprintf(b, "--- %s (%d ms)\n%s\n", name, a.MS, a.Answer)
+		fmt.Fprintf(b, "\n%s\n", a.Answer)
 	}
 }
 

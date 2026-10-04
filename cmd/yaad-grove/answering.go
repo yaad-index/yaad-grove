@@ -3,6 +3,7 @@ package main
 import (
 	"log/slog"
 	"os"
+	"sync/atomic"
 
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
@@ -28,16 +29,21 @@ type answering struct {
 
 // buildAnswering builds the engine from c: model, retrieval, tools, persona,
 // prompt template and language pack. Serve and replay both answer through it,
-// so a replay answers as the bot does. The registry is built but not connected.
-func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter) (*answering, error) {
+// so a replay answers as the bot does. A non-nil calls counts every call made
+// to the model endpoint. The registry is built but not connected.
+func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, calls *atomic.Int64) (*answering, error) {
 	// The model is wrapped with the spend meter (ADR 0006/0008): the engine sees a
 	// metered core.Model, so the ceiling is enforced on the model-call path while
 	// core stays free of budget.
-	m := runtime.MeterModel(meter, model.New(model.Config{
+	var base core.Model = model.New(model.Config{
 		BaseURL: c.ModelBaseURL,
 		APIKey:  os.Getenv("YAADGROVE_MODEL_API_KEY"),
 		Model:   c.ModelName,
-	}))
+	})
+	if calls != nil {
+		base = countCalls(base, calls)
+	}
+	m := runtime.MeterModel(meter, base)
 	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
 	// endpoint is configured, with keyword as the query-time fallback. Building the
 	// semantic index embeds the whole vault, so a failure here fails startup.
