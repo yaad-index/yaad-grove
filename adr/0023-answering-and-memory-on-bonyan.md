@@ -37,11 +37,11 @@ The move is made in increments. Each keeps the engine's answers byte-identical w
 
 ### 2. Subjects and sessions
 
-- **Namespace:** each instance of the engine has its own memory namespace, set in its configuration. bonyan applies it when it builds the memory store, so two instances sharing one memory service never see each other's records, and neither the engine nor the backend can reach outside it (bonyan ADR 0001 §4).
+- **Namespace:** each instance of the engine has its own memory namespace, set in its configuration, and may give a group chat a namespace of its own, mapped from the chat's ID. A group chat not in the map uses the instance's namespace. No namespace has a built-in default: each is the deployment's own value. bonyan applies a namespace when it builds a memory store, one store per namespace, so two instances sharing one memory service, or two groups with namespaces of their own, never see each other's records, and neither the engine nor the backend can reach outside a namespace (bonyan ADR 0001 §4).
 - **Subject:** the chat user's ID. Every memory record is about one user.
-- **Session:** the chat ID, the user's ID and the retention window the session started in. bonyan's session history is per subject, so a session is one person's turns in one chat. The window is in the key because the service deletes messages only a whole session at a time: a session that ends with its window can be deleted whole once retention has passed, where one that went on forever would keep its oldest messages.
+- **Session:** the chat ID, the user's ID and the window the session started in. bonyan's session history is per subject, so a session is one person's turns in one chat. The window is in the key because the service deletes messages only a whole session at a time: a session that ends with its window can be deleted whole once retention has passed, where one that went on forever would keep its oldest messages. A window's length is set in configuration, and the retention period must be a whole number of windows: the purge runs at each window boundary, so its cut falls between sessions and deletes each one whole, where a cut inside a session would rewrite it at every purge.
 - **The group's recent conversation** (several speakers) stays the ADR 0014 buffer and reaches the run as its history. It is not long-term memory, and its rules do not change.
-- **Long-term memory** is per user and across chats: what a person said in one group can be recalled when they speak in another the same instance serves.
+- **Long-term memory** is per user and across the chats that share a namespace: what a person said in one group can be recalled when they speak in another group of the same namespace. A user in two groups with different namespaces has two separate memories, and nothing kept in one is recalled in the other.
 
 ### 3. What is remembered: the memory service derives it
 
@@ -58,10 +58,10 @@ Extracting facts is the memory backend's job, not bonyan's or the engine's (bony
 
 ### 5. Consent and deletion
 
-- **Only consented turns reach long-term memory**, through the same gate that admits a turn to the ADR 0014 buffer. Nothing is derived from a turn that is not admitted.
+- **Only consented turns reach long-term memory:** a directed group turn the consent gate serves, and the engine's answer to it. Ambient turns the gate only logs are not kept, and neither are the DMs the engine answers for an admin, who need not have consented. Nothing is derived from a turn that is not kept.
 - **Every event is scrubbed of resolved secrets before it reaches the service**, so the service's deriver never sees what bonyan would not store.
-- **Withdrawal (`/consent remove`) deletes the subject:** every event and every derived record about that user, in every chat, through bonyan's `DeleteSubject`. This is stronger than the buffer-only purge it replaces. The consent disclosure says that memory is kept and is erased on withdrawal. The quarantine log and the transcript keep their own rules (ADR 0004, 0015); their withdrawal stays prospective, as disclosed.
-- **Retention:** a retention period is required, and the engine runs bonyan's purge on a schedule.
+- **Withdrawal (`/consent remove`) deletes the subject:** every event and every derived record about that user, in every chat and every namespace the instance is configured with, through bonyan's `DeleteSubject`. This is stronger than the buffer-only purge it replaces. The consent disclosure says that memory is kept and is erased on withdrawal. The quarantine log and the transcript keep their own rules (ADR 0004, 0015); their withdrawal stays prospective, as disclosed.
+- **Retention:** a retention period is required, and the engine runs bonyan's purge on a schedule, in every namespace.
 
 ### 6. The service as a bonyan memory backend
 
@@ -82,15 +82,15 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 
 **Rewriting a session that straddles the cut.** The service deletes messages only a whole session at a time, so a session holding records on both sides of the cut is rewritten: its newer messages are written to a new generation of the session, tagged with a generation ID in their metadata and re-added with the deriver turned off so it does not derive from them twice, and only then is the old generation deleted. A purge interrupted between the two steps leaves both generations, and the next purge finds the half-done rewrite, finishes it and removes the old one: a crash may leave a duplicate until the next purge, and never loses a newer record. The generation ID is part of the session's name. Sessions keyed by their retention window (§2) make a rewrite rare.
 
-**Namespaces.** The service's workspaces do not nest, so the namespace is part of each workspace's name. The backend refuses to read or delete a workspace outside its namespace, so one instance's withdrawal or retention purge can never touch another instance's users.
+**Namespaces.** The service's workspaces do not nest, so the namespace is part of each workspace's name. The backend refuses to read or delete a workspace outside its namespace, so one namespace's withdrawal or retention purge can never touch another namespace's users, whether the other belongs to another instance or to another group of the same one.
 
 **Why one workspace per subject:** the service cannot delete a peer or a single message, and deleting a session leaves in place the peer itself and every conclusion the service keeps outside that session. Deleting a workspace is its only complete erase. The cost is one workspace per user who consents, each with its own configuration, and no modelling across users, which this design does not want anyway. A backend that cannot show complete deletion does not ship.
 
 ## Invariants (acceptance)
 
 - A turn from a user who has not consented never reaches the service.
-- Two instances never see each other's memory, and neither can delete the other's.
-- After `/consent remove`, recall for that user returns nothing, in any chat, and the service holds no workspace for them.
+- Two namespaces never see each other's memory, and neither can delete the other's, whether they belong to two instances or to two groups of one.
+- After `/consent remove`, recall for that user returns nothing, in any chat and any of the instance's namespaces, and the service holds no workspace for them.
 - Recalled memory never enters the request as trusted.
 - A question the vault cannot ground is refused whether or not memory holds an answer to it.
 - No text reaches the service before bonyan's scrubber has removed every resolved secret from it.
@@ -103,6 +103,7 @@ The backend is `memory/honcho` in bonyan's repository: a Go module of its own, w
 - **The deriver's model calls are the service's, not bonyan's.** bonyan neither meters nor records them: their spend is outside the engine's spend ceiling, on the model the deployment configures for the service, and what the deriver concluded, and why, is outside bonyan's recordings and evaluation.
 - Opinions have no type of their own, so a policy or a prompt cannot treat them differently from other conclusions except by what their text says.
 - Keeping statements about other people out is steering, not a guarantee (§3).
+- A group given a namespace of its own keeps its members' memory apart from the instance's other groups. A user in both has two memories, and withdrawal has to erase every one of them.
 - A deployment that uses long-term memory runs one more service, with its own database. Without it, the engine answers as before, with the ADR 0014 buffer only.
 
 ## Alternatives considered
