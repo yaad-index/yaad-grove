@@ -107,17 +107,23 @@ Requires Go 1.26+.
 
 `replay run` answers a file of questions with the engine `serve` would build,
 from the same flags and the `serve` section of `config.yaml`, and writes one
-JSON line per answer. Each question is asked once and on its own: no history,
-no consent gate, no long-term memory, and a spend meter of its own in memory.
-`replay compare` prints two such runs side by side and flags changed
-refusals, errors and empty answers, so two builds can be read against each
-other on the same questions.
+JSON line per answer: the answer, whether it was refused and why, the model
+calls it took, and the run's model and `--label`. Each question is asked once
+and on its own: no history, no consent gate, no long-term memory, a spend meter
+of its own in memory, and the vault indexed in memory (a persistent store is
+never opened). `replay compare` prints two such runs side by side and flags
+changed refusals, errors and empty answers, so two builds can be read against
+each other on the same questions.
 
 ```sh
-yaad-grove replay run --questions questions.jsonl --out old.jsonl   # build A
-yaad-grove replay run --questions questions.jsonl --out new.jsonl   # build B
+yaad-grove replay run --questions questions.jsonl --out old.jsonl --label A   # build A
+yaad-grove replay run --questions questions.jsonl --out new.jsonl --label B   # build B
 yaad-grove replay compare old.jsonl new.jsonl
 ```
+
+A refusal's reason is `no-call` (nothing retrieved and no tools, so no model
+call), `model` (the model declined in its own words) or `fixed` (the engine's
+fixed decline after model calls: the step limit, or a decline with no words).
 
 A question line is `{"id": "q1", "query": "…"}`; an optional `query_en` is
 asked too, as `q1@en`. Other fields are ignored.

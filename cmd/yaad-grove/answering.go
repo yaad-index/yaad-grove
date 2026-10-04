@@ -4,8 +4,10 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"sync/atomic"
 	"time"
 
+	bmodel "github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/model/chatcompat"
 	"github.com/yaad-index/bonyan/secret"
 
@@ -34,8 +36,9 @@ type answering struct {
 // buildAnswering builds the engine from c: model, retrieval, tools, persona,
 // prompt template and language pack, with mem as its long-term memory (nil for
 // none). Serve and replay both answer through it, so a replay answers as the
-// bot does. The registry is built but not connected.
-func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets *secret.Resolver, mem *core.Memory) (*answering, error) {
+// bot does. A non-nil calls counts every call made to the model endpoint. The
+// registry is built but not connected.
+func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets *secret.Resolver, mem *core.Memory, calls *atomic.Int64) (*answering, error) {
 	// The model is bonyan's OpenAI-compatible client (ADR 0023), with the native
 	// tool-call fallback (#88), wrapped with the spend meter (ADR 0006/0008) so the
 	// ceiling is enforced on the model-call path while core stays free of budget.
@@ -45,9 +48,13 @@ func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets
 	if os.Getenv(modelKeyEnv) != "" {
 		chatOpts.Secrets, chatOpts.KeyName = secrets.Scope(modelKeyEnv), modelKeyEnv
 	}
+	var chat bmodel.Chat
 	chat, err := chatcompat.New(chatOpts)
 	if err != nil {
 		return nil, err
+	}
+	if calls != nil {
+		chat = countCalls(chat, calls)
 	}
 	m := runtime.MeterChat(meter, model.NativeToolCalls(chat))
 	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding

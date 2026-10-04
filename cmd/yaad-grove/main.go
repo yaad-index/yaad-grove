@@ -280,7 +280,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if longMemory != nil {
 		engineMemory = longMemory.memory
 	}
-	a, err := c.buildAnswering(log, meter, secrets, engineMemory)
+	a, err := c.buildAnswering(log, meter, secrets, engineMemory, nil)
 	if err != nil {
 		return err
 	}
