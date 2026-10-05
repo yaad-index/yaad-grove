@@ -46,7 +46,7 @@ func replyContextOf(in transport.Inbound) string {
 	if text == "" {
 		return ""
 	}
-	if sender := strings.TrimSpace(in.ReplyToSender); sender != "" {
+	if sender := core.DisplayName(in.ReplyToSender); sender != "" {
 		return sender + ": " + text
 	}
 	return text

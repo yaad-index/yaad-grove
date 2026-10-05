@@ -490,19 +490,16 @@ const (
 )
 
 // askerLabel prefixes the input with who asks, when known: a label on the
-// untrusted input, never in the instructions (#99, ADR 0023). Whitespace runs
-// collapse so a name cannot start a line of its own, and its square brackets
-// become parentheses so it cannot close the label early and open another.
+// untrusted input, never in the instructions (#99, ADR 0023). The name is
+// cleaned by DisplayName, so it cannot start a line of its own or close the
+// label early and open another.
 func askerLabel(display string) string {
-	name := labelBrackets.Replace(strings.Join(strings.Fields(display), " "))
+	name := DisplayName(display)
 	if name == "" {
 		return ""
 	}
 	return "[" + name + "] "
 }
-
-// labelBrackets keeps a name inside its label.
-var labelBrackets = strings.NewReplacer("[", "(", "]", ")")
 
 // material is the run's untrusted material: each retrieved chunk under its
 // grounding id, then the message the query replies to.
@@ -555,26 +552,36 @@ func historyMessages(history []HistoryTurn) []bmodel.Message {
 	return out
 }
 
-// speakerLabel renders a turn's author: the human display label, or the assistant
-// for the bot's own turns. A display name is untrusted (#62): control and
-// bidirectional formatting characters are dropped, whitespace runs collapse so it
-// cannot start a line of its own, and the brackets, parentheses and colons that
-// frame a turn become spaces so it cannot fake a time, a reply-to or the start of
-// the text. A person whose name is left empty is "a participant", never the
-// assistant.
+// speakerLabel renders a turn's author: the human display label cleaned by
+// DisplayName, or the assistant for the bot's own turns. A person whose name is
+// left empty is "a participant", never the assistant.
 func speakerLabel(t HistoryTurn) string {
 	if t.Bot {
 		return "assistant"
 	}
-	name := strings.Join(strings.Fields(strings.Map(speakerRune, t.Speaker)), " ")
+	name := DisplayName(t.Speaker)
 	if name == "" {
 		return "a participant"
 	}
 	return name
 }
 
-// speakerRune maps one rune of a display name for speakerLabel: -1 drops it.
-func speakerRune(r rune) rune {
+// DisplayName cleans a person's display name, which is untrusted, for a prompt
+// (#62): control and bidirectional formatting characters are dropped, whitespace
+// runs collapse so it cannot start a line of its own, and brackets, parentheses
+// and colons become spaces so it cannot fake a label, a time, a reply-to or the
+// start of a message's text. A name that reads as the bot's own label,
+// "assistant", is marked as a participant's.
+func DisplayName(s string) string {
+	name := strings.Join(strings.Fields(strings.Map(nameRune, s)), " ")
+	if strings.EqualFold(name, "assistant") {
+		return "a participant named " + name
+	}
+	return name
+}
+
+// nameRune maps one rune of a display name for DisplayName: -1 drops it.
+func nameRune(r rune) rune {
 	switch {
 	case unicode.IsSpace(r), r == '[' || r == ']' || r == '(' || r == ')' || r == ':':
 		return ' '
