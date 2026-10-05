@@ -13,9 +13,9 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 
-# Fetch the LadybugDB C library (headers + liblbug.so) into lib-ladybug/.
-RUN curl -fsSL https://raw.githubusercontent.com/LadybugDB/ladybug/refs/heads/main/scripts/download-liblbug.sh \
-      | LBUG_TARGET_DIR=/src/lib-ladybug bash
+# Fetch the LadybugDB C library (headers + liblbug.so) into lib-ladybug/: a
+# pinned release, checked against its SHA-256 (#213).
+RUN sh scripts/fetch-liblbug.sh /src/lib-ladybug
 
 # Build the ladybug-tagged binary (cgo, dynamically linked to liblbug.so). No
 # rpath: the runtime finds the library via ldconfig (see below).
