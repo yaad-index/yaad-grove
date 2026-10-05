@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.22.2](https://github.com/yaad-index/yaad-grove/compare/v0.22.1...v0.22.2) (2026-10-05)
+
+
+### Bug Fixes
+
+* **acl:** nudge an unconsented user at most once per cooldown ([#210](https://github.com/yaad-index/yaad-grove/issues/210)) ([ad133d4](https://github.com/yaad-index/yaad-grove/commit/ad133d4d54259257f0aa4659802af2dcdcd7692b))
+* **core:** clean every display name that reaches the prompt ([#212](https://github.com/yaad-index/yaad-grove/issues/212)) ([f51a5a2](https://github.com/yaad-index/yaad-grove/commit/f51a5a2b613e5b96f1f549d4dc24e7441b91db10))
+* **core:** sanitize the speaker label in the conversation history ([#207](https://github.com/yaad-index/yaad-grove/issues/207)) ([c7dd023](https://github.com/yaad-index/yaad-grove/commit/c7dd02368acd5d060e9bef8483b2cebb7766bc4e))
+* **transport:** send the plain-text fallback without markup ([#208](https://github.com/yaad-index/yaad-grove/issues/208)) ([f76e353](https://github.com/yaad-index/yaad-grove/commit/f76e3533028b7912edf53ecbd1d5a118886913e9))
+
 ## [0.22.1](https://github.com/yaad-index/yaad-grove/compare/v0.22.0...v0.22.1) (2026-10-05)
 
 
