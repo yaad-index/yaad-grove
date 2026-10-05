@@ -63,7 +63,7 @@ func (lm *longMemory) withdrawal(policy *runtime.Policy, derive bool) {
 // when memory is set up only in part.
 func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*longMemory, error) {
 	if c.LongMemoryURL == "" {
-		if c.LongMemoryNamespace != "" || len(c.LongMemoryGroupNamespaces) > 0 || c.LongMemoryRetention != 0 || c.LongMemoryDerive || c.LongMemoryInstructions != "" {
+		if c.LongMemoryNamespace != "" || c.LongMemoryWorkspace != "" || len(c.LongMemoryGroupNamespaces) > 0 || c.LongMemoryRetention != 0 || c.LongMemoryDerive || c.LongMemoryInstructions != "" {
 			return nil, errors.New("long-term memory options are set without --long-memory-url: set the URL to turn it on, or remove them")
 		}
 		return nil, nil
@@ -79,6 +79,8 @@ func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*lon
 		return nil, fmt.Errorf("--long-memory-retention (%s) must be a whole number of --long-memory-window (%s), so a purge deletes whole sessions", c.LongMemoryRetention, c.LongMemoryWindow)
 	case c.LongMemoryRecord == "":
 		return nil, errors.New("--long-memory-record is required with --long-memory-url: a file on persistent storage, the same at every start, recording every namespace memory was kept in")
+	case c.LongMemoryWorkspace != "" && len(c.LongMemoryGroupNamespaces) > 0:
+		return nil, errors.New("--long-memory-workspace names the workspace of --long-memory-namespace only, and a group namespace needs a workspace of its own: remove one of them")
 	}
 	groups, err := parseGroupNamespaces(c.LongMemoryGroupNamespaces)
 	if err != nil {
@@ -102,9 +104,14 @@ func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*lon
 		instructions = defaultDeriverInstructions
 	}
 	open := func(namespace string) (memory.Backend, error) {
+		var workspace string
+		if namespace == c.LongMemoryNamespace {
+			workspace = c.LongMemoryWorkspace
+		}
 		return honcho.Open(honcho.Options{
 			URL:          c.LongMemoryURL,
 			Namespace:    namespace,
+			Workspace:    workspace,
 			Derive:       c.LongMemoryDerive,
 			Instructions: instructions,
 			Token:        values[longMemoryTokenEnv],
@@ -113,6 +120,15 @@ func buildLongMemory(c *ServeCmd, secrets *secret.Resolver, now time.Time) (*lon
 	record, err := namespaces.Open(c.LongMemoryRecord)
 	if err != nil {
 		return nil, err
+	}
+	if c.LongMemoryWorkspace != "" {
+		// A namespace kept before, still to be erased and purged, has a
+		// workspace of its own, which --long-memory-workspace does not name.
+		for _, ns := range record.Namespaces() {
+			if ns != c.LongMemoryNamespace {
+				return nil, fmt.Errorf("--long-memory-workspace names the workspace of --long-memory-namespace only, but %s records namespace %q too, which has a workspace of its own", c.LongMemoryRecord, ns)
+			}
+		}
 	}
 	return newLongMemory(&storeSet{open: open, retention: c.LongMemoryRetention, scrubber: secrets.Scrubber()}, record, c.LongMemoryNamespace, groups, c.LongMemoryWindow, now)
 }

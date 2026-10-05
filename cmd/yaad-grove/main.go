@@ -229,6 +229,7 @@ type ServeCmd struct {
 	// from YAADGROVE_LONG_MEMORY_TOKEN.
 	LongMemoryURL       string `name:"long-memory-url" help:"Base URL of the memory service; setting it turns long-term memory on. Off by default. Consent withdrawal erases a user's long-term memory."`
 	LongMemoryNamespace string `name:"long-memory-namespace" help:"This instance's memory namespace. Required with --long-memory-url; no default. Instances sharing one memory service never see each other's records."`
+	LongMemoryWorkspace string `name:"long-memory-workspace" help:"The memory service workspace holding --long-memory-namespace, such as one an operator made and scoped the token to. Empty derives its name from the namespace. Not with --long-memory-group-namespace, since each namespace has a workspace of its own."`
 	// LongMemoryGroupNamespaces gives group chats namespaces of their own
 	// (ADR 0023 §2), each spec "chatid=namespace". sep:"none" keeps a spec whole,
 	// as for the MCP and topic maps.
