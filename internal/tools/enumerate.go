@@ -419,10 +419,9 @@ func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]stor
 func formatRefs(preds []predicate, refs []store.DocRef) string {
 	desc := describePredicates(preds)
 	if len(refs) == 0 {
-		if len(preds) > 1 {
-			return fmt.Sprintf("No documents found with %s: each filter matches documents on its own, but none matches them all.", desc)
-		}
-		return fmt.Sprintf("No documents found with %s.", desc)
+		// Only filters that each match can get here: intersect reports a filter
+		// that matches nothing on its own as unmatched first.
+		return fmt.Sprintf("No documents found with %s: each filter matches documents on its own, but none matches them all.", desc)
 	}
 	lines := make([]string, 0, len(refs)+1)
 	lines = append(lines, fmt.Sprintf("%d document(s) with %s:", len(refs), desc))
