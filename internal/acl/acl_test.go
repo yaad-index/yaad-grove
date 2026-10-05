@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -94,6 +96,65 @@ func TestConsentGateMatrix(t *testing.T) {
 	store.recs["d1"] = acl.Record{UserID: "d1", Consent: acl.ConsentDeclined}
 	assert.Equal(t, acl.DecideNudge, decide(t, g, "d1", true), "declined directed → nudge")
 	assert.Equal(t, acl.DecideSilent, decide(t, g, "d1", false), "declined ambient → ignored")
+}
+
+// An unconsented user is nudged at most once per cooldown, across chats, and
+// their directed messages in between draw nothing (ADR 0024). Each user has a
+// window of their own; ambient chatter and consented users are unaffected, and
+// the store is never written.
+func TestNudgeCooldown(t *testing.T) {
+	store := newMemStore()
+	g := acl.NewGate(store, acl.TierDefault).WithNudgeCooldown(10 * time.Minute)
+	now := time.Date(2026, 10, 5, 20, 0, 0, 0, time.UTC)
+	acl.SetClock(g, func() time.Time { return now })
+	store.recs["c1"] = acl.Record{UserID: "c1", Consent: acl.ConsentGranted}
+
+	assert.Equal(t, acl.DecideNudge, decide(t, g, "u1", true), "first directed message: nudge")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "u1", true), "inside the window: nothing")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "u1", false), "ambient: still nothing")
+	assert.Equal(t, acl.DecideNudge, decide(t, g, "u2", true), "another user has a window of their own")
+	assert.Equal(t, acl.DecideServe, decide(t, g, "c1", true), "a consented user is served")
+
+	now = now.Add(10*time.Minute - time.Second)
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "u1", true), "a second before the window ends: nothing")
+	now = now.Add(time.Second)
+	assert.Equal(t, acl.DecideNudge, decide(t, g, "u1", true), "once the window has passed: nudged again")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "u1", true), "which starts a new window")
+
+	assert.Equal(t, 1, acl.Nudged(g), "u2's window has passed and is dropped")
+	_, u1 := store.recs["u1"]
+	_, u2 := store.recs["u2"]
+	assert.False(t, u1 || u2, "nothing about a nudged user is stored")
+}
+
+// Without a cooldown every directed message is nudged (ADR 0012).
+func TestNudgeNoCooldown(t *testing.T) {
+	for _, cd := range []time.Duration{0, -time.Minute} {
+		g := acl.NewGate(newMemStore(), acl.TierDefault).WithNudgeCooldown(cd)
+		for i := 0; i < 3; i++ {
+			assert.Equal(t, acl.DecideNudge, decide(t, g, "u1", true), cd)
+		}
+		assert.Zero(t, acl.Nudged(g), "nothing is held")
+	}
+}
+
+// Concurrent directed messages from one user draw a single nudge.
+func TestNudgeCooldownConcurrent(t *testing.T) {
+	g := acl.NewGate(newMemStore(), acl.TierDefault).WithNudgeCooldown(time.Hour)
+	var wg sync.WaitGroup
+	var nudges atomic.Int32
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d, err := g.Check(context.Background(), acl.GateInput{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Directed: true})
+			if err == nil && d == acl.DecideNudge {
+				nudges.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	assert.Equal(t, int32(1), nudges.Load())
 }
 
 // Consented ambient chatter is logged but not rate-counted — logging is cheap and
