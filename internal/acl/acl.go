@@ -23,6 +23,7 @@ package acl
 
 import (
 	"context"
+	"sync"
 	"time"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
@@ -106,11 +107,52 @@ const (
 type Gate struct {
 	store   Store
 	defTier Tier
+	now     func() time.Time
+
+	// The nudge cooldown (ADR 0024): when each unconsented user was last nudged,
+	// held in memory only, so nothing about them reaches the store.
+	cooldown time.Duration
+	mu       sync.Mutex
+	nudged   map[string]time.Time
 }
 
 // NewGate returns a Gate over store with the instance's default tier.
 func NewGate(store Store, defaultTier Tier) *Gate {
-	return &Gate{store: store, defTier: defaultTier}
+	return &Gate{store: store, defTier: defaultTier, now: time.Now}
+}
+
+// WithNudgeCooldown makes the gate nudge an unconsented user at most once per
+// cooldown, across chats, and stay silent for their directed messages in between
+// (ADR 0024). Zero or less turns the cooldown off: every directed message is
+// nudged (ADR 0012). It returns g.
+func (g *Gate) WithNudgeCooldown(cooldown time.Duration) *Gate {
+	g.cooldown = cooldown
+	return g
+}
+
+// nudge decides an unconsented directed message under the cooldown: a nudge, which
+// starts the user's window, or silence inside it. Windows that have passed are
+// dropped, so the map holds only users nudged within one cooldown.
+func (g *Gate) nudge(userID string) Decision {
+	if g.cooldown <= 0 {
+		return DecideNudge
+	}
+	now := g.now()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id, at := range g.nudged {
+		if now.Sub(at) >= g.cooldown {
+			delete(g.nudged, id)
+		}
+	}
+	if _, ok := g.nudged[userID]; ok {
+		return DecideSilent
+	}
+	if g.nudged == nil {
+		g.nudged = make(map[string]time.Time)
+	}
+	g.nudged[userID] = now
+	return DecideNudge
 }
 
 // Access-control windows (ADR 0003). The per-tier allowances tune the rate
@@ -178,11 +220,11 @@ func (g *Gate) Check(ctx context.Context, in GateInput) (Decision, error) {
 
 	// Consent gate (ADR 0012): consent is granted only via the DM flow, never
 	// inferred here. An unconsented user is nudged when they direct a message at
-	// the bot, and ignored otherwise; only a directed message draws a reply, so a
-	// nudge cannot flood the group. Nothing unconsented is recorded.
+	// the bot, at most once per cooldown (ADR 0024), and ignored otherwise.
+	// Nothing unconsented is recorded.
 	if rec.Consent != ConsentGranted {
 		if in.Directed {
-			return DecideNudge, nil
+			return g.nudge(in.User.ID), nil
 		}
 		return DecideSilent, nil
 	}
@@ -197,7 +239,7 @@ func (g *Gate) Check(ctx context.Context, in GateInput) (Decision, error) {
 	// 0003); the global spend ceiling (ADR 0006) is the cost backstop, on the
 	// model-call path, not here.
 	allow := allowanceFor(g.resolveTier(rec))
-	now := time.Now()
+	now := g.now()
 	if rec.RateWindowStart.IsZero() || now.Sub(rec.RateWindowStart) >= rateWindow {
 		rec.RateWindowStart, rec.RateCount = now, 0
 	}
