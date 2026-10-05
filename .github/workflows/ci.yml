@@ -70,9 +70,8 @@ jobs:
           go-version-file: go.mod
 
       - name: Download LadybugDB library
-        run: |
-          curl -fsSL https://raw.githubusercontent.com/LadybugDB/ladybug/refs/heads/main/scripts/download-liblbug.sh \
-            | LBUG_TARGET_DIR="$PWD/lib-ladybug" bash
+        # Pinned release, checked against its SHA-256 (#213).
+        run: scripts/fetch-liblbug.sh "$PWD/lib-ladybug"
 
       - name: Build + test (ladybug tag)
         env:
