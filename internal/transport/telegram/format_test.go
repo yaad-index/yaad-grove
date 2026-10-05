@@ -3,6 +3,7 @@ package telegram
 import (
 	"testing"
 
+	"github.com/go-telegram/bot/models"
 	"github.com/stretchr/testify/assert"
 )
 
@@ -106,4 +107,29 @@ func TestToTelegramHTMLKeepsHTMLBlockText(t *testing.T) {
 // An inline tag carries no text of its own, so dropping it keeps the sentence.
 func TestToTelegramHTMLInlineTagDropped(t *testing.T) {
 	assert.Equal(t, "Plain inline tag.", toTelegramHTML("Plain <b>inline</b> tag."))
+}
+
+// The plain-text fallback carries no markup: code and pre contents lose their
+// backticks and are marked with entities instead, so a /command inside one is
+// not made a link, and a link keeps its address (#160). Offsets count UTF-16
+// code units: the die before the first code span is two.
+func TestPlainFromHTML(t *testing.T) {
+	text, entities := plainFromHTML(toTelegramHTML("🎲 Use `/start` or **see** [docs](https://x.example/a), <https://y.example> and `a<b`\n\n```\n/help\n```\n"))
+	assert.Equal(t, "🎲 Use /start or see docs (https://x.example/a), https://y.example and a<b\n\n/help\n", text)
+	assert.Equal(t, []models.MessageEntity{
+		{Type: models.MessageEntityTypeCode, Offset: 7, Length: 6},
+		{Type: models.MessageEntityTypeCode, Offset: 71, Length: 3},
+		{Type: models.MessageEntityTypePre, Offset: 76, Length: 6},
+	}, entities)
+}
+
+// A code span holding only a backtick shows that one backtick, marked; text with
+// no code needs no entities.
+func TestPlainFromHTMLBacktickAndNoCode(t *testing.T) {
+	text, entities := plainFromHTML(toTelegramHTML("just **text** and `` ` ``"))
+	assert.Equal(t, "just text and `", text)
+	assert.Equal(t, []models.MessageEntity{{Type: models.MessageEntityTypeCode, Offset: 14, Length: 1}}, entities)
+	text, entities = plainFromHTML(toTelegramHTML("just **text**"))
+	assert.Equal(t, "just text", text)
+	assert.Empty(t, entities)
 }

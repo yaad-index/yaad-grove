@@ -307,16 +307,18 @@ func TestSendUsesHTMLParseMode(t *testing.T) {
 }
 
 // On a Telegram rejection of the HTML message (a malformed-entity 400), Send
-// retries with the raw text and no parse mode, so a formatting glitch never
-// blocks the message (#53).
+// retries with no parse mode, so a formatting glitch never blocks the message
+// (#53). The retry is the rendered text with its code marked as entities: no
+// backticks, and a /command in code is not made a link (#160).
 func TestSendFallsBackToPlainOnHTMLError(t *testing.T) {
 	var calls int
-	var lastParseMode, lastText string
+	var lastParseMode, lastText, lastEntities string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
 			calls++
 			lastParseMode = r.FormValue("parse_mode")
 			lastText = r.FormValue("text")
+			lastEntities = r.FormValue("entities")
 			if calls == 1 {
 				_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"can't parse entities"}`)
 				return
@@ -329,10 +331,41 @@ func TestSendFallsBackToPlainOnHTMLError(t *testing.T) {
 	a := New(Config{Token: "tok"}, nil)
 	running(t, a, srv.URL)
 
-	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "**x**"}))
+	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "**x**: send `/start`"}))
 	assert.Equal(t, 2, calls, "an HTML attempt then a plain-text retry")
 	assert.Empty(t, lastParseMode, "the retry carries no parse mode")
-	assert.Equal(t, "**x**", lastText, "the retry sends the raw text")
+	assert.Equal(t, "x: send /start", lastText, "the retry sends the rendered text without markup")
+	assert.JSONEq(t, `[{"type":"code","offset":8,"length":6}]`, lastEntities, "the command is marked as code")
+}
+
+// When the plain retry is rejected too, Send makes a last attempt with the raw
+// text and no entities.
+func TestSendFallsBackToRawText(t *testing.T) {
+	var calls int
+	var lastParseMode, lastText, lastEntities string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			calls++
+			lastParseMode = r.FormValue("parse_mode")
+			lastText = r.FormValue("text")
+			lastEntities = r.FormValue("entities")
+			if calls < 3 {
+				_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"bad request"}`)
+				return
+			}
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.NoError(t, a.Send(context.Background(), "555", core.Reply{Text: "**x**: send `/start`"}))
+	assert.Equal(t, 3, calls, "HTML, then plain with entities, then raw")
+	assert.Empty(t, lastParseMode)
+	assert.Empty(t, lastEntities)
+	assert.Equal(t, "**x**: send `/start`", lastText, "the last attempt sends the raw text")
 }
 
 // react calls setMessageReaction on the triggering message with a single emoji

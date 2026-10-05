@@ -221,14 +221,23 @@ func (a *Adapter) sendTo(ctx context.Context, chatID int64, threadID int, reply 
 
 	// Render the model's Markdown as Telegram HTML so **bold** / `code` / [links]
 	// display instead of leaking their raw markup (#53). On any send failure — most
-	// likely a malformed-entity 400 from an edge the renderer got wrong — fall back
-	// to the plain text, so a formatting glitch never blocks the message.
+	// likely a malformed-entity 400 from an edge the renderer got wrong — retry
+	// without a parse mode: first the rendered text with its code marked as
+	// entities, so it carries no backticks and a /command in code stays unlinked
+	// (#160), then the raw text, so a formatting glitch never blocks the message.
 	if htmlText := toTelegramHTML(plain); htmlText != "" {
 		p := &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: htmlText, ParseMode: models.ParseModeHTML, ReplyMarkup: markup}
 		if _, err := a.bot.SendMessage(ctx, p); err == nil {
 			return nil
 		} else {
 			slog.Warn("telegram: HTML send failed; retrying as plain text", "err", a.redact(err))
+		}
+		text, entities := plainFromHTML(htmlText)
+		p = &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: text, Entities: entities, ReplyMarkup: markup}
+		if _, err := a.bot.SendMessage(ctx, p); err == nil {
+			return nil
+		} else {
+			slog.Warn("telegram: plain send failed; retrying as raw text", "err", a.redact(err))
 		}
 	}
 	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: plain, ReplyMarkup: markup}); err != nil {
