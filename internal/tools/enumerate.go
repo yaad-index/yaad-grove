@@ -146,7 +146,7 @@ func (e enumerateTool) def() core.ToolDef {
 	// rather than adding a second one).
 	required := []string{"dimension", "value"}
 	desc := "List EVERY document matching the given dimension/value — the complete set, not a sample or the top matches. " +
-		"Pass 'and' to require several facets at once (the intersection). " +
+		"A filter is a dimension with a value; pass 'and' to require further facets at once (the intersection). " +
 		"Declared dimensions: " + strings.Join(e.dimensions, ", ") + ". " +
 		"Use this for which/what-covers/list questions; free-text questions use normal grounding instead."
 	if len(e.orderable) > 0 {
@@ -199,7 +199,7 @@ func (e enumerateTool) call(ctx context.Context, args map[string]any) (string, e
 	if err != nil {
 		return "", err
 	}
-	preds, err := parsePredicates(args, ord.field != "")
+	preds, err := parsePredicates(args, ord.field != "", e.filterHint())
 	if err != nil {
 		return "", err
 	}
@@ -209,17 +209,43 @@ func (e enumerateTool) call(ctx context.Context, args map[string]any) (string, e
 		}
 	}
 	if ord.field == "" {
-		refs, err := e.intersect(ctx, preds)
+		refs, unmatched, err := e.intersect(ctx, preds)
 		if err != nil {
 			return "", err
 		}
+		if unmatched != nil {
+			return e.formatUnmatched(*unmatched), nil
+		}
 		return formatRefs(preds, refs), nil
 	}
-	refs, err := e.ordered(ctx, preds, ord)
+	refs, unmatched, err := e.ordered(ctx, preds, ord)
 	if err != nil {
 		return "", err
 	}
+	if unmatched != nil {
+		return e.formatUnmatched(*unmatched), nil
+	}
 	return formatOrdered(preds, ord, refs), nil
+}
+
+// filterHint is the advice appended to a malformed-filter error, so the model
+// learns how to correct the call rather than only that it was wrong.
+func (e enumerateTool) filterHint() string {
+	hint := "A filter is a dimension with a value: put one facet in dimension and value, and use 'and' only for further facets."
+	if len(e.dimensions) > 0 {
+		hint += " kb_dimensions lists the values each dimension holds."
+	}
+	return hint
+}
+
+// formatUnmatched reports a filter whose value no document has. An empty set
+// there is a fact about the value, not about the documents: something stored
+// under another attribute, or spelled another way, may still exist, so the
+// result says where to look instead of reading as "there are none".
+func (e enumerateTool) formatUnmatched(p predicate) string {
+	return fmt.Sprintf("No document has %s = %q. That value matches nothing in %s, which does not mean no such documents exist: "+
+		"call kb_dimensions to see the values %s holds, or use another declared dimension (%s).",
+		p.dimension, p.value, p.dimension, p.dimension, strings.Join(e.dimensions, ", "))
 }
 
 // order is a parsed sort request: which declared field, which way, and how many.
@@ -268,16 +294,20 @@ func (e enumerateTool) parseOrder(args map[string]any) (order, error) {
 // further down the order. That is precisely the defect ADR 0022 exists to remove
 // (an answer read off a partial view that omitted the deciding document), rebuilt
 // one layer below where it was found.
-func (e enumerateTool) ordered(ctx context.Context, preds []predicate, ord order) ([]store.DocRef, error) {
+//
+// A filter whose value matches no document is returned as unmatched, as
+// intersect reports it, rather than as an empty ordering.
+func (e enumerateTool) ordered(ctx context.Context, preds []predicate, ord order) ([]store.DocRef, *predicate, error) {
 	if len(preds) == 0 {
-		return e.store.Ordered(ctx, ord.field, ord.dir, ord.limit)
+		refs, err := e.store.Ordered(ctx, ord.field, ord.dir, ord.limit)
+		return refs, nil, err
 	}
-	matching, err := e.intersect(ctx, preds)
-	if err != nil {
-		return nil, err
+	matching, unmatched, err := e.intersect(ctx, preds)
+	if err != nil || unmatched != nil {
+		return nil, unmatched, err
 	}
 	if len(matching) == 0 {
-		return nil, nil
+		return nil, nil, nil
 	}
 	keep := make(map[string]bool, len(matching))
 	for _, r := range matching {
@@ -285,7 +315,7 @@ func (e enumerateTool) ordered(ctx context.Context, preds []predicate, ord order
 	}
 	all, err := e.store.Ordered(ctx, ord.field, ord.dir, 0)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]store.DocRef, 0, len(matching))
 	for _, r := range all {
@@ -296,7 +326,7 @@ func (e enumerateTool) ordered(ctx context.Context, preds []predicate, ord order
 	if ord.limit > 0 && len(out) > ord.limit {
 		out = out[:ord.limit]
 	}
-	return out, nil
+	return out, nil, nil
 }
 
 // parsePredicates reads the required primary {dimension, value} and any optional
@@ -305,17 +335,23 @@ func (e enumerateTool) ordered(ctx context.Context, preds []predicate, ord order
 // carries no facet, so an absent dimension/value is legitimate there. A half-given
 // pair is still an error either way — that is a malformed filter, not an omitted
 // one, and answering it as though no filter were asked would quietly widen the
-// question.
-func parsePredicates(args map[string]any, sorting bool) ([]predicate, error) {
+// question. Each malformed-filter error ends with hint, which says how to correct
+// the call.
+func parsePredicates(args map[string]any, sorting bool, hint string) ([]predicate, error) {
 	dim, val := scalarArg(args, "dimension"), scalarArg(args, "value")
-	if dim == "" && val == "" {
+	switch {
+	case dim == "" && val == "":
 		if sorting {
 			return nil, nil
 		}
-		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required")
-	}
-	if dim == "" || val == "" {
-		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required")
+		if _, ok := args["and"]; ok {
+			return nil, fmt.Errorf("kb_enumerate: both dimension and value are required, also when 'and' is given. %s", hint)
+		}
+		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required. %s", hint)
+	case val == "":
+		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required: dimension %q was given without a value. %s", dim, hint)
+	case dim == "":
+		return nil, fmt.Errorf("kb_enumerate: both dimension and value are required: value %q was given without a dimension. %s", val, hint)
 	}
 	preds := []predicate{{dim, val}}
 	raw, ok := args["and"]
@@ -333,7 +369,7 @@ func parsePredicates(args map[string]any, sorting bool) ([]predicate, error) {
 		}
 		d, v := scalarArg(m, "dimension"), scalarArg(m, "value")
 		if d == "" || v == "" {
-			return nil, fmt.Errorf("kb_enumerate: each 'and' filter needs both dimension and value")
+			return nil, fmt.Errorf("kb_enumerate: each 'and' filter needs both dimension and value. %s", hint)
 		}
 		preds = append(preds, predicate{d, v})
 	}
@@ -342,19 +378,25 @@ func parsePredicates(args map[string]any, sorting bool) ([]predicate, error) {
 
 // intersect enumerates each predicate's complete set and AND-joins them by document
 // path, preserving the primary predicate's order. Each leg is itself complete, so
-// the intersection is exact and deterministic (ADR 0020).
-func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]store.DocRef, error) {
+// the intersection is exact and deterministic (ADR 0020). Every leg is looked up,
+// even once the intersection is empty, and the first filter that matches no
+// document on its own is returned as unmatched: that is a different fact from
+// filters that each match but share no document.
+func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]store.DocRef, *predicate, error) {
 	result, err := e.store.Enumerate(ctx, preds[0].dimension, preds[0].value)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	for _, p := range preds[1:] {
-		if len(result) == 0 {
-			break
-		}
+	if len(result) == 0 {
+		return nil, &preds[0], nil
+	}
+	for i, p := range preds[1:] {
 		refs, err := e.store.Enumerate(ctx, p.dimension, p.value)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
+		}
+		if len(refs) == 0 {
+			return nil, &preds[i+1], nil
 		}
 		keep := make(map[string]bool, len(refs))
 		for _, r := range refs {
@@ -368,7 +410,7 @@ func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]stor
 		}
 		result = filtered
 	}
-	return result, nil
+	return result, nil, nil
 }
 
 // formatRefs renders the complete ref set as one compact line per document, so a
@@ -377,6 +419,9 @@ func (e enumerateTool) intersect(ctx context.Context, preds []predicate) ([]stor
 func formatRefs(preds []predicate, refs []store.DocRef) string {
 	desc := describePredicates(preds)
 	if len(refs) == 0 {
+		if len(preds) > 1 {
+			return fmt.Sprintf("No documents found with %s: each filter matches documents on its own, but none matches them all.", desc)
+		}
 		return fmt.Sprintf("No documents found with %s.", desc)
 	}
 	lines := make([]string, 0, len(refs)+1)
