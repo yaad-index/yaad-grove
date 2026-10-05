@@ -1,13 +1,16 @@
 package telegram
 
 import (
+	"bytes"
 	"html"
+	"regexp"
 	"strconv"
 	"strings"
 
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
+	xhtml "golang.org/x/net/html"
 )
 
 // mdParser parses CommonMark once; it is stateless and reused across goroutines.
@@ -186,9 +189,17 @@ func (r *htmlRenderer) render(n ast.Node, entering bool) (ast.WalkStatus, error)
 		if entering {
 			r.b.WriteString("—\n")
 		}
-	case *ast.RawHTML, *ast.HTMLBlock:
-		// Drop model-emitted raw HTML rather than forward tags Telegram would
-		// reject; the text around it still renders.
+	case *ast.RawHTML:
+		// An inline tag carries no text of its own (the text around it is in sibling
+		// nodes), so dropping it loses nothing and forwards no tag Telegram would
+		// reject.
+		return ast.WalkSkipChildren, nil
+	case *ast.HTMLBlock:
+		// A block runs to the next blank line, so its text is inside it: keep the
+		// text, drop the tags.
+		if entering {
+			r.writeHTMLBlockText(n)
+		}
 		return ast.WalkSkipChildren, nil
 	}
 	return ast.WalkContinue, nil
@@ -219,4 +230,96 @@ func (r *htmlRenderer) writeLines(n ast.Node) {
 func isWebURL(dest string) bool {
 	d := strings.ToLower(strings.TrimSpace(dest))
 	return strings.HasPrefix(d, "http://") || strings.HasPrefix(d, "https://")
+}
+
+// htmlBreaks maps the block-level tags whose boundaries become line breaks when an
+// HTML block is flattened to text: a paragraph-like tag to a blank line, a line
+// tag to a single break. A list item starts a line with the bullet the Markdown
+// lists use.
+var htmlBreaks = map[string]string{
+	"p": "\n\n", "div": "\n\n", "blockquote": "\n\n", "pre": "\n\n",
+	"ul": "\n\n", "ol": "\n\n", "table": "\n\n", "hr": "\n\n",
+	"h1": "\n\n", "h2": "\n\n", "h3": "\n\n", "h4": "\n\n", "h5": "\n\n", "h6": "\n\n",
+	"br": "\n", "tr": "\n",
+}
+
+var (
+	htmlSpaceRun = regexp.MustCompile(`[ \t\r\n\f]+`)
+	htmlLineEdge = regexp.MustCompile(` *\n *`)
+	htmlBlankRun = regexp.MustCompile(`\n{3,}`)
+	htmlSpaces   = regexp.MustCompile(` {2,}`)
+)
+
+// writeHTMLBlockText writes an HTML block's text, escaped, without its tags.
+// Whitespace collapses as a browser would show it, except that the line breaks
+// inside pre are kept; block tags become line breaks; the contents of script and
+// style elements, which are not text a reader sees, are left out along with
+// comments.
+func (r *htmlRenderer) writeHTMLBlockText(n *ast.HTMLBlock) {
+	var raw bytes.Buffer
+	lines := n.Lines()
+	for i := 0; i < lines.Len(); i++ {
+		seg := lines.At(i)
+		raw.Write(seg.Value(r.src))
+	}
+	if n.HasClosure() {
+		raw.Write(n.ClosureLine.Value(r.src))
+	}
+	var out strings.Builder
+	hidden, pre := 0, 0
+	z := xhtml.NewTokenizer(&raw)
+	for {
+		tt := z.Next()
+		if tt == xhtml.ErrorToken {
+			break
+		}
+		switch tt {
+		case xhtml.TextToken:
+			switch {
+			case hidden > 0:
+			case pre > 0:
+				out.WriteString(string(z.Text()))
+			default:
+				out.WriteString(htmlSpaceRun.ReplaceAllString(string(z.Text()), " "))
+			}
+		case xhtml.StartTagToken, xhtml.EndTagToken, xhtml.SelfClosingTagToken:
+			name, _ := z.TagName()
+			tag := string(name)
+			if tag == "script" || tag == "style" {
+				switch {
+				case tt == xhtml.StartTagToken:
+					hidden++
+				case tt == xhtml.EndTagToken && hidden > 0:
+					hidden--
+				}
+				continue
+			}
+			if tag == "pre" {
+				switch {
+				case tt == xhtml.StartTagToken:
+					pre++
+				case tt == xhtml.EndTagToken && pre > 0:
+					pre--
+				}
+			}
+			if tag == "li" {
+				if tt == xhtml.StartTagToken {
+					out.WriteString("\n• ")
+				}
+				continue
+			}
+			out.WriteString(htmlBreaks[tag])
+		}
+	}
+	t := htmlLineEdge.ReplaceAllString(htmlSpaces.ReplaceAllString(out.String(), " "), "\n")
+	t = strings.TrimSpace(htmlBlankRun.ReplaceAllString(t, "\n\n"))
+	if t == "" {
+		return
+	}
+	r.b.WriteString(html.EscapeString(t))
+	if r.inList() {
+		r.b.WriteByte('\n')
+	} else {
+		r.b.WriteString("\n\n")
+	}
 }
