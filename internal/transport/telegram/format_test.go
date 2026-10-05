@@ -71,3 +71,39 @@ func TestToTelegramHTMLEmpty(t *testing.T) {
 	assert.Empty(t, toTelegramHTML(""))
 	assert.Empty(t, toTelegramHTML("   \n  "))
 }
+
+// An HTML block runs to the next blank line, so its text is inside it: the text
+// must survive with the tags dropped, escaped like any other text (#199).
+func TestToTelegramHTMLKeepsHTMLBlockText(t *testing.T) {
+	cases := []struct {
+		name string
+		md   string
+		want string
+	}{
+		{"one paragraph", "<p>A.</p>", "A."},
+		{"two paragraphs", "<p>A.</p>\n<p>B.</p>", "A.\n\nB."},
+		{"between markdown", "Intro.\n\n<p>A.</p>\n\nTail.", "Intro.\n\nA.\n\nTail."},
+		{"line break", "<p>one<br>two</p>", "one\ntwo"},
+		{"list items", "<ul>\n<li>a</li>\n<li>b</li>\n</ul>", "• a\n• b"},
+		{"whitespace collapses", "<div>a\n   b\t c</div>", "a b c"},
+		{"entities decoded then escaped", "<p>a &amp; b &lt; c</p>", "a &amp; b &lt; c"},
+		{"accepted tag stays text", "<div><b>bold</b> and <a href=\"https://x.y\">link</a></div>", "bold and link"},
+		{"script and style dropped", "<div>shown <script>hidden()</script><style>p{}</style> too</div>", "shown too"},
+		{"pre keeps its line breaks", "<pre>\nfirst\nlast</pre>\n\nAfter.", "first\nlast\n\nAfter."},
+		{"collapsing resumes after pre", "<div><pre>a\nb</pre>c\n   d</div>", "a\nb\n\nc d"},
+		{"multi-line script dropped", "<script>\nx()\n</script>\n\nAfter.", "After."},
+		{"inside a list item", "- item\n\n  <p>inner</p>\n- next", "• item\ninner\n\n• next"},
+		{"comment dropped", "<!-- note -->\n\nAfter.", "After."},
+		{"empty block", "Before.\n\n<div></div>\n\nAfter.", "Before.\n\nAfter."},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			assert.Equal(t, tc.want, toTelegramHTML(tc.md))
+		})
+	}
+}
+
+// An inline tag carries no text of its own, so dropping it keeps the sentence.
+func TestToTelegramHTMLInlineTagDropped(t *testing.T) {
+	assert.Equal(t, "Plain inline tag.", toTelegramHTML("Plain <b>inline</b> tag."))
+}
