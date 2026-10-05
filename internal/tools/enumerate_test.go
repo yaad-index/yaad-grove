@@ -162,12 +162,17 @@ func TestEnumerateCallFormatsRefs(t *testing.T) {
 	assert.NotContains(t, strings.ToLower(out), "chunk", "refs, not chunk bodies")
 }
 
-// An empty result is stated, not an error.
+// A value that matches no document is stated, not an error, and it does not read
+// as "there are none": it names the filter and where to look instead (#200).
 func TestEnumerateCallEmpty(t *testing.T) {
-	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{refs: nil}, []string{"games"}, nil)
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{refs: nil}, []string{"games", "hosts"}, nil)
 	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{"dimension": "games", "value": "Nope"})
 	require.NoError(t, err)
-	assert.Contains(t, out, "No documents found")
+	assert.Contains(t, out, `No document has games = "Nope"`)
+	assert.Contains(t, out, "does not mean no such documents exist")
+	assert.Contains(t, out, "kb_dimensions")
+	assert.Contains(t, out, "(games, hosts)", "the declared dimensions are named")
+	assert.NotContains(t, out, "No documents found")
 }
 
 // An undeclared dimension or a missing argument is a loud error, not a silent
@@ -480,4 +485,123 @@ func TestOrderedRoutingTextIsAdvertised(t *testing.T) {
 		assert.Contains(t, def.Description, phrase)
 	}
 	assert.Contains(t, def.Description, "episode", "the orderable fields are named")
+}
+
+// tripleKB is a real memory store with three facets, so a filter's own set and the
+// intersection can be empty independently.
+func tripleKB(t *testing.T) *store.Memory {
+	t.Helper()
+	m := store.NewMemory(nil, 0)
+	require.NoError(t, m.Index(context.Background(), []store.Doc{
+		{Ref: store.DocRef{Path: "g1.md", Title: "G1"}, Dimensions: map[string][]string{"category": {"Trains"}, "players": {"2"}}},
+		{Ref: store.DocRef{Path: "g2.md", Title: "G2"}, Dimensions: map[string][]string{"category": {"Dice"}, "players": {"4"}}},
+	}))
+	return m
+}
+
+// An 'and' filter whose value matches nothing is reported as that filter, even
+// when an earlier filter already emptied the intersection: every filter is looked
+// up, and an unmatched value is the more useful fact (#200).
+func TestEnumerateReportsTheUnmatchedAndFilter(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, tripleKB(t), []string{"category", "players"}, nil)
+
+	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains",
+		"and": []any{
+			map[string]any{"dimension": "players", "value": "4"},
+			map[string]any{"dimension": "players", "value": "9"},
+		},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `No document has players = "9"`)
+
+	out, err = ts.Call(context.Background(), "kb_enumerate", map[string]any{"dimension": "category", "value": "Solo"})
+	require.NoError(t, err)
+	assert.Contains(t, out, `No document has category = "Solo"`, "the primary filter too")
+}
+
+// Filters that each match documents but share none are a different result: the
+// set really is empty, and the reply says each filter matched on its own.
+func TestEnumerateDisjointFiltersSayNoneMatchesAll(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, tripleKB(t), []string{"category", "players"}, nil)
+
+	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Trains",
+		"and": []any{map[string]any{"dimension": "players", "value": "4"}},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `No documents found with category = "Trains" AND players = "4"`)
+	assert.Contains(t, out, "each filter matches documents on its own")
+	assert.NotContains(t, out, "No document has")
+}
+
+// A sorted request with an unmatched filter gets the same report, not the claim
+// that the matching documents carry no value for the sort field.
+func TestEnumerateSortedWithUnmatchedFilter(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, tripleKB(t), []string{"category"}, []string{"episode"})
+
+	out, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{
+		"dimension": "category", "value": "Solo", "sort": "episode",
+	})
+	require.NoError(t, err)
+	assert.Contains(t, out, `No document has category = "Solo"`)
+	assert.NotContains(t, out, "cannot be ordered")
+}
+
+// A malformed filter's error says what was given and how to correct the call, so
+// the model can retry instead of giving up (#200). Half a filter stays an error:
+// guessing which filter was meant would widen the question.
+func TestEnumerateFilterErrorsSayHowToFix(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games"}, []string{"episode"})
+	call := func(args map[string]any) string {
+		t.Helper()
+		_, err := ts.Call(context.Background(), "kb_enumerate", args)
+		require.Error(t, err)
+		return err.Error()
+	}
+
+	msg := call(map[string]any{
+		"dimension": "games",
+		"and":       []any{map[string]any{"dimension": "games", "value": "Acme"}},
+	})
+	assert.Contains(t, msg, `dimension "games" was given without a value`)
+	assert.Contains(t, msg, "put one facet in dimension and value, and use 'and' only for further facets")
+	assert.Contains(t, msg, "kb_dimensions lists the values")
+
+	msg = call(map[string]any{"value": "Acme", "sort": "episode"})
+	assert.Contains(t, msg, `value "Acme" was given without a dimension`)
+
+	msg = call(map[string]any{"dimension": "games", "value": "Acme", "and": []any{map[string]any{"value": "x"}}})
+	assert.Contains(t, msg, "each 'and' filter needs both dimension and value")
+	assert.Contains(t, msg, "use 'and' only for further facets")
+
+	unsorted := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games"}, nil)
+	_, err := unsorted.Call(context.Background(), "kb_enumerate", map[string]any{
+		"and": []any{map[string]any{"dimension": "games", "value": "Acme"}},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "also when 'and' is given")
+	_, err = unsorted.Call(context.Background(), "kb_enumerate", map[string]any{})
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "also when 'and' is given")
+	assert.Contains(t, err.Error(), "put one facet in dimension and value")
+}
+
+// With no dimensions declared kb_dimensions is not advertised, so the advice must
+// not send the model to it.
+func TestEnumerateFilterHintWithoutDimensions(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, nil, []string{"episode"})
+	_, err := ts.Call(context.Background(), "kb_enumerate", map[string]any{"dimension": "games", "sort": "episode"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "put one facet in dimension and value")
+	assert.NotContains(t, err.Error(), "kb_dimensions")
+}
+
+// The description says up front what a filter is, since the schema cannot once
+// sorting makes the top-level arguments optional.
+func TestEnumerateDescriptionSaysWhatAFilterIs(t *testing.T) {
+	ts := tools.WithEnumerate(&fakeBase{}, &fakeEnum{}, []string{"games"}, []string{"episode"})
+	def, has := defByName(ts.Defs(), "kb_enumerate")
+	require.True(t, has)
+	assert.Contains(t, def.Description, "A filter is a dimension with a value")
 }

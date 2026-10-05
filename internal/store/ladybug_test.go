@@ -131,6 +131,13 @@ func TestLadybugLargeIndex(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, got, "the complete set for a shared game")
 
+	// A value no document has under the dimension is an empty set, not an error:
+	// kb_enumerate reads that as "the value matches nothing" (#200). A value that
+	// exists under ANOTHER dimension is the case that matters.
+	none, err := l.Enumerate(context.Background(), "games", "Host 3")
+	require.NoError(t, err)
+	assert.Empty(t, none, "a value from another dimension matches nothing here")
+
 	// The vector + FTS indexes built over the full chunk set.
 	sem, err := l.Semantic(context.Background(), []float32{1, 1, 0, 0}, 3)
 	require.NoError(t, err)
