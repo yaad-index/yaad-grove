@@ -10,7 +10,7 @@ require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
 	github.com/stretchr/testify v1.12.1
 	github.com/yaad-index/bonyan v0.1.0
-	github.com/yaad-index/bonyan/memory/honcho v0.1.0
+	github.com/yaad-index/bonyan/memory/honcho v0.2.0
 	github.com/yuin/goldmark v1.8.6
 	go.etcd.io/bbolt v1.5.0
 	golang.org/x/net v0.52.0

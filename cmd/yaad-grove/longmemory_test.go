@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -55,6 +56,13 @@ func TestBuildLongMemoryConfig(t *testing.T) {
 		{"no record file", func(c *ServeCmd) { c.LongMemoryRecord = "" }, "--long-memory-record is required"},
 		{"bad group namespace", func(c *ServeCmd) { c.LongMemoryGroupNamespaces = []string{"-100123"} }, "want chatid=namespace"},
 		{"group namespaces", func(c *ServeCmd) { c.LongMemoryGroupNamespaces = []string{"-100123=club"} }, ""},
+		{"workspace", func(c *ServeCmd) { c.LongMemoryWorkspace = "ops-made" }, ""},
+		{"workspace with group namespaces", func(c *ServeCmd) {
+			c.LongMemoryWorkspace, c.LongMemoryGroupNamespaces = "ops-made", []string{"-100123=club"}
+		}, "a group namespace needs a workspace of its own"},
+		{"workspace without the URL", func(c *ServeCmd) {
+			*c = ServeCmd{LongMemoryWindow: 24 * time.Hour, LongMemoryWorkspace: "ops-made"}
+		}, "without --long-memory-url"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,4 +245,54 @@ func TestNewLongMemoryPolicyName(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, recs, 1)
 	assert.Equal(t, trust.DefaultName, recs[0].Decision.Policy)
+}
+
+// --long-memory-workspace names the instance namespace's workspace only, so a
+// record holding another namespace, still to be erased and purged in a
+// workspace of its own, refuses it at startup; without the option it starts.
+func TestBuildLongMemoryWorkspaceRefusesAnotherRecordedNamespace(t *testing.T) {
+	c := memoryCmd(t)
+	r, err := namespaces.Open(c.LongMemoryRecord)
+	require.NoError(t, err)
+	require.NoError(t, r.Configured("inst-a", "old-ns"))
+
+	c.LongMemoryWorkspace = "ops-made"
+	lm, err := buildLongMemory(c, secret.NewResolver(secret.Env{}), time.Now())
+	require.ErrorContains(t, err, `records namespace "old-ns" too`)
+	assert.Nil(t, lm)
+
+	c.LongMemoryWorkspace = ""
+	lm, err = buildLongMemory(c, secret.NewResolver(secret.Env{}), time.Now())
+	require.NoError(t, err)
+	assert.NotNil(t, lm)
+}
+
+// The instance's namespace is kept in the workspace --long-memory-workspace
+// names, and in the one derived from the namespace without it.
+func TestBuildLongMemoryUsesTheWorkspace(t *testing.T) {
+	for want, workspace := range map[string]string{
+		"ops-made":                  "ops-made",
+		"bonyan--" + "696e73742d61": "",
+	} {
+		ids := make(chan string, 1)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost && r.URL.Path == "/v3/workspaces" {
+				var body struct{ ID string }
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				select {
+				case ids <- body.ID:
+				default:
+				}
+			}
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+		}))
+		c := memoryCmd(t)
+		c.LongMemoryURL, c.LongMemoryWorkspace = srv.URL, workspace
+		lm, err := buildLongMemory(c, secret.NewResolver(secret.Env{}), time.Now())
+		require.NoError(t, err)
+		_, err = lm.memory.Store.Recall(context.Background(), "u1", "anything", 5)
+		require.Error(t, err, "the fake service refuses")
+		assert.Equal(t, want, <-ids, "workspace option %q", workspace)
+		srv.Close()
+	}
 }
