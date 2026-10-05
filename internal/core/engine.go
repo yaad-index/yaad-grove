@@ -19,6 +19,7 @@ import (
 	"strings"
 	"text/template"
 	"time"
+	"unicode"
 
 	"github.com/yaad-index/bonyan/agent"
 	"github.com/yaad-index/bonyan/assemble"
@@ -555,12 +556,32 @@ func historyMessages(history []HistoryTurn) []bmodel.Message {
 }
 
 // speakerLabel renders a turn's author: the human display label, or the assistant
-// for the bot's own turns.
+// for the bot's own turns. A display name is untrusted (#62): control and
+// bidirectional formatting characters are dropped, whitespace runs collapse so it
+// cannot start a line of its own, and the brackets, parentheses and colons that
+// frame a turn become spaces so it cannot fake a time, a reply-to or the start of
+// the text. A person whose name is left empty is "a participant", never the
+// assistant.
 func speakerLabel(t HistoryTurn) string {
-	if t.Bot || t.Speaker == "" {
+	if t.Bot {
 		return "assistant"
 	}
-	return t.Speaker
+	name := strings.Join(strings.Fields(strings.Map(speakerRune, t.Speaker)), " ")
+	if name == "" {
+		return "a participant"
+	}
+	return name
+}
+
+// speakerRune maps one rune of a display name for speakerLabel: -1 drops it.
+func speakerRune(r rune) rune {
+	switch {
+	case unicode.IsSpace(r), r == '[' || r == ']' || r == '(' || r == ')' || r == ':':
+		return ' '
+	case unicode.IsControl(r), unicode.Is(unicode.Bidi_Control, r):
+		return -1
+	}
+	return r
 }
 
 // chunkSources lists the source tags of the retrieved chunks, for the server-side
