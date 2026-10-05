@@ -225,6 +225,8 @@ func (a *Adapter) sendTo(ctx context.Context, chatID int64, threadID int, reply 
 	// without a parse mode: first the rendered text with its code marked as
 	// entities, so it carries no backticks and a /command in code stays unlinked
 	// (#160), then the raw text, so a formatting glitch never blocks the message.
+	// The raw text goes only after a rejected request: a failure that may have
+	// delivered the message (a timeout) is resent once at most.
 	if htmlText := toTelegramHTML(plain); htmlText != "" {
 		p := &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: htmlText, ParseMode: models.ParseModeHTML, ReplyMarkup: markup}
 		if _, err := a.bot.SendMessage(ctx, p); err == nil {
@@ -234,11 +236,14 @@ func (a *Adapter) sendTo(ctx context.Context, chatID int64, threadID int, reply 
 		}
 		text, entities := plainFromHTML(htmlText)
 		p = &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: text, Entities: entities, ReplyMarkup: markup}
-		if _, err := a.bot.SendMessage(ctx, p); err == nil {
+		_, err := a.bot.SendMessage(ctx, p)
+		if err == nil {
 			return nil
-		} else {
-			slog.Warn("telegram: plain send failed; retrying as raw text", "err", a.redact(err))
 		}
+		if !errors.Is(err, bot.ErrorBadRequest) {
+			return a.redact(err)
+		}
+		slog.Warn("telegram: plain send rejected; retrying as raw text", "err", a.redact(err))
 	}
 	if _, err := a.bot.SendMessage(ctx, &bot.SendMessageParams{ChatID: chatID, MessageThreadID: threadID, Text: plain, ReplyMarkup: markup}); err != nil {
 		return a.redact(err)

@@ -368,6 +368,32 @@ func TestSendFallsBackToRawText(t *testing.T) {
 	assert.Equal(t, "**x**: send `/start`", lastText, "the last attempt sends the raw text")
 }
 
+// A plain retry that failed without a rejection may have been delivered, so it
+// is not resent: the error is returned after two attempts.
+func TestSendDoesNotResendAnUnrejectedFailure(t *testing.T) {
+	var calls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasSuffix(r.URL.Path, "/sendMessage") {
+			calls++
+			if calls == 1 {
+				_, _ = io.WriteString(w, `{"ok":false,"error_code":400,"description":"can't parse entities"}`)
+				return
+			}
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = io.WriteString(w, `{"ok":false,"error_code":500,"description":"internal"}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":1,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	running(t, a, srv.URL)
+
+	require.Error(t, a.Send(context.Background(), "555", core.Reply{Text: "**x**: send `/start`"}))
+	assert.Equal(t, 2, calls, "HTML, then plain; no raw resend")
+}
+
 // react calls setMessageReaction on the triggering message with a single emoji
 // reaction (the reaction-mode consent nudge, ADR 0012).
 func TestReactSetsMessageReaction(t *testing.T) {
