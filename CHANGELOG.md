@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.22.0](https://github.com/yaad-index/yaad-grove/compare/v0.21.0...v0.22.0) (2026-10-05)
+
+
+### Features
+
+* name the memory service workspace with --long-memory-workspace ([#204](https://github.com/yaad-index/yaad-grove/issues/204)) ([6ba33ba](https://github.com/yaad-index/yaad-grove/commit/6ba33ba138ab9a5db5bf67c208f4c0685f17371b))
+* replay run records each question's run with --record-dir ([#197](https://github.com/yaad-index/yaad-grove/issues/197)) ([6f0c2be](https://github.com/yaad-index/yaad-grove/commit/6f0c2be3e2c316f0560f26a8a0d67ec185a5afac))
+
+
+### Bug Fixes
+
+* kb_enumerate says how to correct a malformed filter and names an unmatched value ([#203](https://github.com/yaad-index/yaad-grove/issues/203)) ([a0dee46](https://github.com/yaad-index/yaad-grove/commit/a0dee465a04b6e37cd6fa84cefec20d2052eb13d))
+* keep the text of model-written HTML blocks in formatted replies ([#202](https://github.com/yaad-index/yaad-grove/issues/202)) ([36bf6af](https://github.com/yaad-index/yaad-grove/commit/36bf6af4fd539a4a848568f0012ee8c8728a8af0))
+
 ## [0.21.0](https://github.com/yaad-index/yaad-grove/compare/v0.20.0...v0.21.0) (2026-10-04)
 
 
