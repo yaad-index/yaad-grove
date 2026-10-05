@@ -199,6 +199,8 @@ type ServeCmd struct {
 	NudgeMode  string `name:"nudge-mode" default:"message" enum:"message,reaction" help:"How to nudge an unconsented user who addresses the bot in a group: 'message' (text reply) or 'reaction' (emoji)."`
 	NudgeText  string `name:"nudge-text" help:"Message-mode nudge copy (the opt-in instruction). Empty uses a sensible default."`
 	NudgeEmoji string `name:"nudge-emoji" help:"Reaction-mode nudge emoji. Empty uses a sensible default (🤝)."`
+	// At most one nudge per user per window, across chats (ADR 0024).
+	NudgeCooldown time.Duration `name:"nudge-cooldown" default:"10m" help:"Nudge an unconsented user at most once per this window, across chats; their directed messages in between get no reply. 0 nudges every directed message."`
 
 	// Conversation memory (ADR 0014): a per-conversation buffer of recent turns so
 	// the bot can answer follow-ups ("tldr", "what about X"). MemoryTurns is how
@@ -297,7 +299,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		return err
 	}
 	defer func() { _ = aclStore.Close() }()
-	gate := acl.NewGate(aclStore, acl.Tier(c.DefaultTier))
+	gate := acl.NewGate(aclStore, acl.Tier(c.DefaultTier)).WithNudgeCooldown(c.NudgeCooldown)
 
 	// The callback token store backs interactive buttons (ADR 0009). It owns its
 	// own sweeper — started here on open, stopped on Close — so the storage bound
