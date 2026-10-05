@@ -6,7 +6,9 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"unicode/utf16"
 
+	"github.com/go-telegram/bot/models"
 	"github.com/yuin/goldmark"
 	"github.com/yuin/goldmark/ast"
 	"github.com/yuin/goldmark/text"
@@ -322,4 +324,84 @@ func (r *htmlRenderer) writeHTMLBlockText(n *ast.HTMLBlock) {
 	} else {
 		r.b.WriteString("\n\n")
 	}
+}
+
+// plainFromHTML turns toTelegramHTML's output back into text for a send without a
+// parse mode (#160): the tags are dropped, a link keeps its address after its text
+// when the two differ, and code and pre contents are marked with code and pre
+// entities instead, so they show without the Markdown backticks and a /command
+// inside one is not made a link. Entity offsets and lengths count UTF-16 code
+// units, as the platform requires.
+func plainFromHTML(h string) (string, []models.MessageEntity) {
+	var (
+		b        strings.Builder
+		n        int // UTF-16 length of b
+		entities []models.MessageEntity
+		start    = -1 // offset of the open code or pre element
+		kind     models.MessageEntityType
+		links    []openLink
+	)
+	write := func(t string) {
+		b.WriteString(t)
+		for _, r := range t {
+			n += utf16.RuneLen(r)
+		}
+	}
+	z := xhtml.NewTokenizer(strings.NewReader(h))
+	for {
+		tt := z.Next()
+		if tt == xhtml.ErrorToken {
+			break
+		}
+		switch tt {
+		case xhtml.TextToken:
+			write(string(z.Text()))
+		case xhtml.StartTagToken:
+			name, more := z.TagName()
+			switch string(name) {
+			case "code", "pre":
+				if start < 0 {
+					start, kind = n, models.MessageEntityTypeCode
+					if string(name) == "pre" {
+						kind = models.MessageEntityTypePre
+					}
+				}
+			case "a":
+				href := ""
+				for more {
+					var k, v []byte
+					k, v, more = z.TagAttr()
+					if string(k) == "href" {
+						href = string(v)
+					}
+				}
+				links = append(links, openLink{href: href, from: b.Len()})
+			}
+		case xhtml.EndTagToken:
+			name, _ := z.TagName()
+			switch string(name) {
+			case "code", "pre":
+				if start >= 0 && n > start {
+					entities = append(entities, models.MessageEntity{Type: kind, Offset: start, Length: n - start})
+				}
+				start = -1
+			case "a":
+				if len(links) > 0 {
+					l := links[len(links)-1]
+					links = links[:len(links)-1]
+					if l.href != "" && b.String()[l.from:] != l.href {
+						write(" (" + l.href + ")")
+					}
+				}
+			}
+		}
+	}
+	return b.String(), entities
+}
+
+// openLink is a link plainFromHTML is inside: its address and the byte offset its
+// text began at.
+type openLink struct {
+	href string
+	from int
 }
