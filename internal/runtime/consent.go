@@ -51,7 +51,8 @@ func isConsentCommand(text string) bool {
 // went. The transcript (ADR 0015) is prospective and never read, so withdrawal
 // just stops new entries — no purge here; an active transcript only adds the
 // durable-record line to the opt-in disclosure so consent is informed, as long-
-// term memory adds its own.
+// term memory adds its own. A grant or withdrawal that went through also reacts
+// to the command with policy.ConsentAck (#100).
 func dmConsentFlow(ctx context.Context, consent consenter, policy Policy, in transport.Inbound) core.Reply {
 	strs := policy.Strings
 	switch strings.TrimSpace(in.Text) {
@@ -60,7 +61,7 @@ func dmConsentFlow(ctx context.Context, consent consenter, policy Policy, in tra
 			slog.Warn("consent grant failed", "err", err)
 			return core.Reply{Text: strs.Get(StrConsentError)}
 		}
-		return core.Reply{Text: strs.Get(StrConsentGranted)}
+		return core.Reply{Text: strs.Get(StrConsentGranted), Reaction: policy.ConsentAck}
 	case "/consent remove":
 		// Self-withdrawal, always available (ADR 0012). Back to unconsented, so the
 		// user can opt in again later.
@@ -73,12 +74,14 @@ func dmConsentFlow(ctx context.Context, consent consenter, policy Policy, in tra
 		// prompts, so a withdrawn user's turns must stop shaping answers immediately.
 		policy.Memory.PurgeUser(in.User.ID)
 		if policy.Erase == nil {
-			return core.Reply{Text: strs.Get(StrConsentRemoved)}
+			return core.Reply{Text: strs.Get(StrConsentRemoved), Reaction: policy.ConsentAck}
 		}
+		// A partial erase gets no reaction: the reply asks the user to send the
+		// command again, so it is not acknowledged as done.
 		if !Erased(policy.Erase.Erase(ctx, in.User.ID)) {
 			return core.Reply{Text: strs.Get(StrConsentEraseFailed)}
 		}
-		return core.Reply{Text: strs.Get(StrConsentRemovedErased)}
+		return core.Reply{Text: strs.Get(StrConsentRemovedErased), Reaction: policy.ConsentAck}
 	}
 
 	c, err := consent.ConsentOf(ctx, in.User.ID)
