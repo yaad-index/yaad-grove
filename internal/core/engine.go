@@ -216,6 +216,9 @@ type Engine struct {
 	tools agent.Tools
 	// maxOutputTokens caps each model reply (bonyan requires a cap).
 	maxOutputTokens int
+	// temperature is every model call's sampling temperature; nil leaves it
+	// to the provider.
+	temperature *float64
 	// scope is the instance's system prompt / scope statement that bounds the
 	// bot and drives refusal. Loaded from config.
 	scope string
@@ -291,6 +294,12 @@ func WithMaxOutputTokens(n int) Option {
 			e.maxOutputTokens = n
 		}
 	}
+}
+
+// WithTemperature sets the sampling temperature of every model call. Nil, the
+// default, leaves it to the provider.
+func WithTemperature(t *float64) Option {
+	return func(e *Engine) { e.temperature = t }
 }
 
 // DefaultMaxOutputTokens caps a model reply when no cap is configured. bonyan
@@ -423,6 +432,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		Models:          []agent.Model{{Name: e.modelName, Chat: e.chat}},
 		Prices:          budget.PriceTable{e.modelName: {}},
 		MaxOutputTokens: e.maxOutputTokens,
+		Temperature:     e.temperature,
 		Limits: agent.Limits{
 			MaxSteps: maxToolIterations,
 			Deadline: answerDeadline,

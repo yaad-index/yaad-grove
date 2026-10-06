@@ -593,6 +593,22 @@ func TestTheReplyCapReachesTheModel(t *testing.T) {
 	assert.Equal(t, 777, mdl2.last.MaxOutputTokens)
 }
 
+// The configured temperature reaches the model call; none leaves it unset.
+func TestTheTemperatureReachesTheModel(t *testing.T) {
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+	mdl := textModel("ok")
+	_, err := newEngine(mdl, ret, nil, "scope").Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	assert.Nil(t, mdl.last.Temperature)
+
+	mdl2 := textModel("ok")
+	temp := 0.3
+	_, err = newEngine(mdl2, ret, nil, "scope", core.WithTemperature(&temp)).Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	require.NotNil(t, mdl2.last.Temperature)
+	assert.Equal(t, 0.3, *mdl2.last.Temperature)
+}
+
 var updateRequest = flag.Bool("update-request", false, "update the request golden file")
 
 // The whole request the model receives for a query with everything — vault
