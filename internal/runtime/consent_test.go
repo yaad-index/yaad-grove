@@ -124,15 +124,34 @@ func TestDMConsentTextGrant(t *testing.T) {
 	assert.Equal(t, []string{"u1"}, consent.granted, "/consent grants the user's consent")
 }
 
-// /consent remove withdraws the sender's own consent (→ ConsentUnknown, re-join
-// possible) and confirms with how to opt back in.
+// /consent remove withdraws the sender's own consent and records a decline,
+// whatever their consent was before (ADR 0025), and confirms with how to opt back
+// in.
 func TestDMConsentSelfRemove(t *testing.T) {
-	consent := &mockConsenter{consent: acl.ConsentGranted}
-	reply, err := consentHandler(consent)(context.Background(), dmInbound("/consent remove"))
+	for _, before := range []acl.Consent{acl.ConsentGranted, acl.ConsentUnknown, acl.ConsentDeclined} {
+		consent := &mockConsenter{consent: before}
+		reply, err := consentHandler(consent)(context.Background(), dmInbound("/consent remove"))
+		require.NoError(t, err)
+		assert.Contains(t, reply.Text, "opted out")
+		assert.Contains(t, reply.Text, "`/consent` to opt back in")
+		assert.Equal(t, acl.ConsentDeclined, consent.consent, "from %d, a withdrawal records a decline", before)
+	}
+}
+
+// A user who declined can always opt back in through the DM (ADR 0025): a DM
+// shows them the disclosure and the opt-in button, and /consent grants.
+func TestDMConsentDeclinedCanOptBackIn(t *testing.T) {
+	consent := &mockConsenter{consent: acl.ConsentDeclined}
+	reply, err := consentHandler(consent)(context.Background(), dmInbound("/start"))
 	require.NoError(t, err)
-	assert.Contains(t, reply.Text, "opted out")
-	assert.Contains(t, reply.Text, "`/consent` to opt back in")
-	assert.Equal(t, acl.ConsentUnknown, consent.consent, "consent is withdrawn to unknown")
+	assert.Contains(t, reply.Text, "opting in means")
+	require.Len(t, reply.Actions, 1)
+	assert.Equal(t, "consent_grant", reply.Actions[0].Verb)
+
+	reply, err = consentHandler(consent)(context.Background(), dmInbound("/consent"))
+	require.NoError(t, err)
+	assert.Contains(t, reply.Text, "opted in")
+	assert.Equal(t, acl.ConsentGranted, consent.consent)
 }
 
 // A DM never reaches the engine — the non-admin DM surface is consent-only (ADR
@@ -252,7 +271,7 @@ func TestDMConsentRemoveErasesMemory(t *testing.T) {
 	eraser := &fakeEraser{consent: consent, results: []runtime.EraseResult{{Namespace: "inst-a"}, {Namespace: "club"}}}
 	reply := withdrawWith(t, runtime.Policy{Erase: eraser}, consent)
 	assert.Equal(t, []string{"u1"}, eraser.erased)
-	assert.Equal(t, []acl.Consent{acl.ConsentUnknown}, eraser.consentAt, "consent is off before anything is erased")
+	assert.Equal(t, []acl.Consent{acl.ConsentDeclined}, eraser.consentAt, "consent is off before anything is erased")
 	assert.Contains(t, reply.Text, "opted out")
 	assert.Contains(t, reply.Text, "long-term memory is erased")
 	assert.Contains(t, log.String(), `msg="consent withdrawn" user=u1`)
@@ -264,7 +283,7 @@ func TestDMConsentRemoveErasesMemory(t *testing.T) {
 	assert.Contains(t, reply.Text, "could not erase all of your long-term memory")
 	assert.Contains(t, reply.Text, "send `/consent remove` again")
 	assert.NotContains(t, reply.Text, "is erased", "a partial erase is never reported as done")
-	assert.Equal(t, acl.ConsentUnknown, consent.consent, "the withdrawal itself stands")
+	assert.Equal(t, acl.ConsentDeclined, consent.consent, "the withdrawal itself stands")
 }
 
 // Without long-term memory, /consent remove says nothing about it.

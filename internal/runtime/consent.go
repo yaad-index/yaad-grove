@@ -62,9 +62,10 @@ func dmConsentFlow(ctx context.Context, consent consenter, policy Policy, in tra
 		}
 		return core.Reply{Text: strs.Get(StrConsentGranted)}
 	case "/consent remove":
-		// Self-withdrawal, always available (ADR 0012). Back to unconsented, so the
-		// user can opt in again later.
-		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentUnknown); err != nil {
+		// Self-withdrawal, always available (ADR 0012). It records a decline whatever
+		// the user's consent was, so they are not nudged again (ADR 0025); the DM
+		// stays open for opting back in.
+		if err := consent.SetConsent(ctx, in.User.ID, acl.ConsentDeclined); err != nil {
 			slog.Warn("consent removal failed", "err", err)
 			return core.Reply{Text: strs.Get(StrConsentError)}
 		}

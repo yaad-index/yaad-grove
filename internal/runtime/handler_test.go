@@ -500,9 +500,10 @@ func TestHandlerDeclinedConsentLogsNothing(t *testing.T) {
 	qlog := &quarantine.MemoryLog{}
 	h := runtime.NewHandler(gate, &mockEngine{}, nil, nil, nil, qlog, nil, runtime.Policy{})
 
-	_, err = h(ctx, transport.Inbound{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "secret", Directed: true})
+	reply, err := h(ctx, transport.Inbound{User: core.User{ID: "u1"}, Surface: core.SurfaceGroup, Text: "secret", Directed: true})
 	require.NoError(t, err)
 	assert.Empty(t, qlog.Entries(), "a declined user's message is never recorded")
+	assert.Equal(t, core.Reply{Silent: true}, reply, "and draws no nudge (ADR 0025)")
 }
 
 // A nil log disables logging without a panic on the serve path.

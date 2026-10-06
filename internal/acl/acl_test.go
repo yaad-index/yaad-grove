@@ -92,10 +92,27 @@ func TestConsentGateMatrix(t *testing.T) {
 	assert.Equal(t, acl.DecideServe, decide(t, g, "c1", true), "consented directed → serve")
 	assert.Equal(t, acl.DecideLogOnly, decide(t, g, "c1", false), "consented ambient → log-only")
 
-	// Declined collapses to the same unconsented handling (nudge when directed).
+	// Declined (ADR 0025): unconsented, and never nudged.
 	store.recs["d1"] = acl.Record{UserID: "d1", Consent: acl.ConsentDeclined}
-	assert.Equal(t, acl.DecideNudge, decide(t, g, "d1", true), "declined directed → nudge")
+	assert.Equal(t, acl.DecideSilent, decide(t, g, "d1", true), "declined directed → nothing")
 	assert.Equal(t, acl.DecideSilent, decide(t, g, "d1", false), "declined ambient → ignored")
+}
+
+// A user who declined is never nudged, with or without a cooldown, and takes no
+// place in the cooldown's windows (ADR 0025). Their record is not written.
+func TestDeclinedIsNeverNudged(t *testing.T) {
+	for _, cd := range []time.Duration{0, 10 * time.Minute} {
+		store := newMemStore()
+		g := acl.NewGate(store, acl.TierDefault).WithNudgeCooldown(cd)
+		rec := acl.Record{UserID: "d1", Consent: acl.ConsentDeclined}
+		store.recs["d1"] = rec
+		for i := 0; i < 3; i++ {
+			assert.Equal(t, acl.DecideSilent, decide(t, g, "d1", true), cd)
+		}
+		assert.Zero(t, acl.Nudged(g), "no window is started for a declined user")
+		assert.Equal(t, rec, store.recs["d1"], "the record is unchanged")
+		assert.Equal(t, acl.DecideNudge, decide(t, g, "u1", true), "a user never asked is still nudged")
+	}
 }
 
 // An unconsented user is nudged at most once per cooldown, across chats, and
