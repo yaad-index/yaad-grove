@@ -670,6 +670,57 @@ func TestRunDeliversAndReplies(t *testing.T) {
 	}
 }
 
+// Run: a reply carrying both a reaction and text reacts to the triggering
+// message and then sends the text (the DM consent acknowledgement, #100).
+func TestRunReactsAndReplies(t *testing.T) {
+	calls := make(chan string, 4)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasSuffix(r.URL.Path, "/getUpdates"):
+			offset, _ := strconv.ParseInt(r.FormValue("offset"), 10, 64)
+			if offset <= 100 {
+				_, _ = io.WriteString(w, `{"ok":true,"result":[{"update_id":100,"message":`+
+					`{"message_id":7,"from":{"id":42,"username":"alice"},"chat":{"id":555,"type":"private"},"text":"/consent"}}]}`)
+				return
+			}
+			_, _ = io.WriteString(w, `{"ok":true,"result":[]}`)
+		case strings.HasSuffix(r.URL.Path, "/setMessageReaction"):
+			calls <- "react " + r.FormValue("chat_id") + " " + r.FormValue("message_id") + " " + r.FormValue("reaction")
+			_, _ = io.WriteString(w, `{"ok":true,"result":true}`)
+		case strings.HasSuffix(r.URL.Path, "/sendMessage"):
+			calls <- "send " + r.FormValue("text")
+			_, _ = io.WriteString(w, `{"ok":true,"result":{"message_id":8,"chat":{"id":555,"type":"private"},"text":"ok"}}`)
+		default:
+			_, _ = io.WriteString(w, `{"ok":true,"result":{}}`)
+		}
+	}))
+	defer srv.Close()
+
+	a := New(Config{Token: "tok"}, nil)
+	a.serverURL = srv.URL
+	a.skipGetMe = true
+	handler := func(context.Context, transport.Inbound) (core.Reply, error) {
+		return core.Reply{Text: "opted in", Reaction: "👍"}, nil
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = a.Run(ctx, handler) }()
+
+	var got []string
+	for len(got) < 2 {
+		select {
+		case c := <-calls:
+			got = append(got, c)
+		case <-time.After(3 * time.Second):
+			t.Fatalf("got %q, want a reaction and a send", got)
+		}
+	}
+	require.True(t, strings.HasPrefix(got[0], "react 555 7 "), "reacts to the triggering message first: %q", got[0])
+	assert.Contains(t, got[0], "👍")
+	assert.Equal(t, "send opted in", got[1])
+}
+
 // On startup Run drops the pre-online backlog: it calls deleteWebhook with
 // drop_pending_updates=true before polling, so messages queued while the bot was
 // offline aren't processed.

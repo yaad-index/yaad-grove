@@ -309,3 +309,58 @@ func captureLog(t *testing.T) *bytes.Buffer {
 	t.Cleanup(func() { slog.SetDefault(prev) })
 	return &buf
 }
+
+// failingConsenter fails every read and write.
+type failingConsenter struct{}
+
+func (failingConsenter) ConsentOf(context.Context, string) (acl.Consent, error) {
+	return acl.ConsentUnknown, errors.New("store down")
+}
+
+func (failingConsenter) SetConsent(context.Context, string, acl.Consent) error {
+	return errors.New("store down")
+}
+
+// A DM /consent or /consent remove that went through reacts with the configured
+// emoji alongside its text (#100). A reply that asks the user to do something
+// else (the disclosure, a status, a partial erase, an error) gets no reaction.
+func TestDMConsentAckReaction(t *testing.T) {
+	ack := runtime.Policy{ConsentAck: "👍"}
+	dm := func(p runtime.Policy, consent runtimeConsenter, text string) core.Reply {
+		t.Helper()
+		h := runtime.NewHandler(&mockGate{decision: acl.DecideServe}, &mockEngine{}, nil, nil, nil, nil, consent, p)
+		reply, err := h(context.Background(), dmInbound(text))
+		require.NoError(t, err)
+		return reply
+	}
+
+	granted := dm(ack, &mockConsenter{consent: acl.ConsentUnknown}, "/consent")
+	assert.Equal(t, "👍", granted.Reaction)
+	assert.Contains(t, granted.Text, "opted in", "the reaction comes with the text, not instead of it")
+
+	removed := dm(ack, &mockConsenter{consent: acl.ConsentGranted}, "/consent remove")
+	assert.Equal(t, "👍", removed.Reaction)
+	assert.Contains(t, removed.Text, "opted out")
+
+	consent := &mockConsenter{consent: acl.ConsentGranted}
+	erased := runtime.Policy{ConsentAck: "👍", Erase: &fakeEraser{consent: consent, results: []runtime.EraseResult{{Namespace: "inst-a"}}}}
+	reply := dm(erased, consent, "/consent remove")
+	assert.Equal(t, "👍", reply.Reaction)
+	assert.Contains(t, reply.Text, "long-term memory is erased")
+
+	consent = &mockConsenter{consent: acl.ConsentGranted}
+	partial := runtime.Policy{ConsentAck: "👍", Erase: &fakeEraser{consent: consent, results: []runtime.EraseResult{{Namespace: "inst-a", Err: errors.New("down")}}}}
+	reply = dm(partial, consent, "/consent remove")
+	assert.Empty(t, reply.Reaction, "a partial erase is not acknowledged as done")
+	assert.Contains(t, reply.Text, "send `/consent remove` again")
+
+	assert.Empty(t, dm(ack, &mockConsenter{consent: acl.ConsentUnknown}, "/start").Reaction, "the disclosure")
+	assert.Empty(t, dm(ack, &mockConsenter{consent: acl.ConsentGranted}, "/start").Reaction, "the status")
+	assert.Empty(t, dm(ack, failingConsenter{}, "/consent").Reaction, "a failed grant")
+	assert.Empty(t, dm(ack, failingConsenter{}, "/consent remove").Reaction, "a failed withdrawal")
+
+	// With no acknowledgement configured, as on a transport that cannot react,
+	// nothing reacts.
+	assert.Empty(t, dm(runtime.Policy{}, &mockConsenter{consent: acl.ConsentUnknown}, "/consent").Reaction)
+	assert.Empty(t, dm(runtime.Policy{}, &mockConsenter{consent: acl.ConsentGranted}, "/consent remove").Reaction)
+}

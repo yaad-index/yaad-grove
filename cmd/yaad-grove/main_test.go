@@ -423,3 +423,12 @@ func TestParseMCPServersInvalid(t *testing.T) {
 		assert.Error(t, err, "spec %q is rejected", spec)
 	}
 }
+
+// The consent acknowledgement is the configured emoji, the default when none is
+// set, and nothing on a transport that cannot react (#100).
+func TestConsentAckEmoji(t *testing.T) {
+	assert.Equal(t, "🎉", consentAckEmoji("🎉", true))
+	assert.Equal(t, "👍", consentAckEmoji("", true))
+	assert.Empty(t, consentAckEmoji("🎉", false))
+	assert.Empty(t, consentAckEmoji("", false))
+}
