@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.23.0](https://github.com/yaad-index/yaad-grove/compare/v0.22.2...v0.23.0) (2026-10-06)
+
+
+### Features
+
+* react to a DM opt-in or opt-out that went through ([#220](https://github.com/yaad-index/yaad-grove/issues/220)) ([7fa0e2e](https://github.com/yaad-index/yaad-grove/commit/7fa0e2e06ae8a4435e2dc4f4f9fa78862783abd6))
+* record a withdrawal as a decline, and never nudge a decline ([#221](https://github.com/yaad-index/yaad-grove/issues/221)) ([8171f93](https://github.com/yaad-index/yaad-grove/commit/8171f9304d868683b5f739491fa891f045be44eb))
+
 ## [0.22.2](https://github.com/yaad-index/yaad-grove/compare/v0.22.1...v0.22.2) (2026-10-05)
 
 
