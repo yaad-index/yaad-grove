@@ -226,7 +226,7 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 		rec = &replayRecorder{dir: r.RecordDir, scrub: secrets.Scrubber()}
 		opts = append(opts, core.WithRecording(rec.recorder))
 	}
-	a, err := c.buildAnswering(log, meter, secrets, nil, &calls, opts...)
+	a, err := c.buildAnswering(log, meter, secrets, nil, &calls, nil, opts...)
 	if err != nil {
 		return err
 	}

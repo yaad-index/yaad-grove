@@ -111,6 +111,22 @@ GenAI conventions:
 | `gen_ai.client.token.usage` | `{token}` | Input and output tokens per model call. |
 | `bonyan.usage.cost` | `1` | Cost per model call. Always 0 here: the spend ceiling counts tokens, so no price is set. |
 
+grove's own metrics, sent with the metrics signal:
+
+| Metric | Unit | Attributes | What it measures |
+|--------|------|------------|------------------|
+| `grove.answers` | `{answer}` | `grove.surface` (`group`, `dm`), `grove.answer.outcome` (`answered`, `refused`, `at_capacity`, `error`) | Questions the engine was asked, by how the answer ended. |
+| `grove.answer.duration` | `s` | as `grove.answers` | From taking a question to its reply being ready. |
+| `grove.retrieval.duration` | `s` | `grove.retrieval.mode` (`keyword`, `semantic`, `hybrid`) | How long retrieving a question's vault chunks took. |
+| `grove.retrieval.chunks` | `{chunk}` | none | The vault chunks an answer was given, after the context-size guard. |
+| `gen_ai.client.operation.duration` | `s` | `gen_ai.operation.name` (`embeddings`), `gen_ai.request.model`, `error.type` on a failure | How long each embedding call took, the vault's indexing included. |
+| `gen_ai.client.token.usage` | `{token}` | as above, with `gen_ai.token.type` (`input`) | Input tokens per embedding call, when the endpoint reports them. |
+| `grove.spend.remaining` | `{token}` | none | Tokens left under the spend ceiling in the current period. |
+| `grove.spend.ceiling` | `{token}` | none | The spend ceiling. |
+
+Only questions that reach the engine are counted. A message the consent gate
+or the rate limit stops is not counted, nor anything about who sent it.
+
 Telemetry carries what a run did, never content: no message text, names, user
 or chat ids, prompts, vault text, tool arguments or tool results. The
 attributes are the model and tool names, the tool call's id, token counts,
