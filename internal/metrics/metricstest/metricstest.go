@@ -20,10 +20,12 @@ type Point struct {
 	Sum   float64
 }
 
-// Instrument is what one instrument recorded.
+// Instrument is what one instrument recorded. Bounds are a histogram's bucket
+// boundaries, from its first point.
 type Instrument struct {
 	Unit   string
 	Points []Point
+	Bounds []float64
 }
 
 // New returns Metrics and a function that collects what they recorded, by
@@ -44,7 +46,7 @@ func New(t *testing.T) (*metrics.Metrics, func() map[string]Instrument) {
 		out := map[string]Instrument{}
 		for _, sm := range rm.ScopeMetrics {
 			for _, md := range sm.Metrics {
-				out[md.Name] = Instrument{Unit: md.Unit, Points: points(t, md.Data)}
+				out[md.Name] = Instrument{Unit: md.Unit, Points: points(t, md.Data), Bounds: bounds(md.Data)}
 			}
 		}
 		return out
@@ -74,6 +76,20 @@ func points(t *testing.T, data metricdata.Aggregation) []Point {
 		t.Fatalf("metric data %T is not read", data)
 	}
 	return out
+}
+
+func bounds(data metricdata.Aggregation) []float64 {
+	switch d := data.(type) {
+	case metricdata.Histogram[int64]:
+		if len(d.DataPoints) > 0 {
+			return d.DataPoints[0].Bounds
+		}
+	case metricdata.Histogram[float64]:
+		if len(d.DataPoints) > 0 {
+			return d.DataPoints[0].Bounds
+		}
+	}
+	return nil
 }
 
 func attrs(kvs []attribute.KeyValue) map[string]string {

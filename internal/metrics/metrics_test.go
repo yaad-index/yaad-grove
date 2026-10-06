@@ -105,3 +105,29 @@ func TestNilMetricsRecordNothing(t *testing.T) {
 		assert.NoError(t, m.ObserveSpend(1, func() int64 { return 1 }))
 	})
 }
+
+// Each histogram carries its boundaries from its creation, whatever meter
+// provider records it: seconds and token counts on the GenAI conventions'
+// advised boundaries, chunks on powers of two up to 64.
+func TestHistogramsHaveTheirBuckets(t *testing.T) {
+	m, collect := metricstest.New(t)
+	ctx := context.Background()
+	m.Answer(ctx, "group", metrics.Answered, time.Second)
+	m.Retrieval(ctx, "keyword", time.Second)
+	m.Chunks(ctx, 3)
+	m.Embedding(ctx, "embed-model", time.Second, 5, nil)
+
+	got := collect()
+	for name, want := range map[string][]float64{
+		"grove.answer.duration":            metrics.DurationBuckets,
+		"grove.retrieval.duration":         metrics.DurationBuckets,
+		"gen_ai.client.operation.duration": metrics.DurationBuckets,
+		"gen_ai.client.token.usage":        metrics.TokenBuckets,
+		"grove.retrieval.chunks":           metrics.ChunkBuckets,
+	} {
+		assert.Equal(t, want, got[name].Bounds, name)
+	}
+	assert.Equal(t, 0.01, metrics.DurationBuckets[0])
+	assert.Equal(t, 81.92, metrics.DurationBuckets[len(metrics.DurationBuckets)-1])
+	assert.Equal(t, float64(67108864), metrics.TokenBuckets[len(metrics.TokenBuckets)-1])
+}

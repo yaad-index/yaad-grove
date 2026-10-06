@@ -124,6 +124,9 @@ grove's own metrics, sent with the metrics signal:
 | `grove.spend.remaining` | `{token}` | none | Tokens left under the spend ceiling in the current period. |
 | `grove.spend.ceiling` | `{token}` | none | The spend ceiling. |
 
+Durations and token counts use the GenAI conventions' advised histogram
+boundaries (10ms to about 82s; 1 to 67,108,864 tokens), and chunks use 1 to 64.
+
 Only questions that reach the engine are counted. A message the consent gate
 or the rate limit stops is not counted, nor anything about who sent it.
 
