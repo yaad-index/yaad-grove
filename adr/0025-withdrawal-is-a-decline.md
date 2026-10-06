@@ -12,12 +12,12 @@ So a user who withdrew is nudged again whenever they direct a message at the bot
 
 ## Decision
 
-- **A withdrawal records a decline.** `/consent remove` sets the user's consent to declined instead of unknown. Everything else it does is unchanged: the buffered turns are purged (ADR 0014) and long-term memory is erased (ADR 0023).
+- **A withdrawal records a decline.** `/consent remove` sets the user's consent to declined instead of unknown, whatever their consent was before. Sending the command is an explicit no, from a user who opted in or not. It is also how a user who withdrew before this change records the decline (Consequences). Everything else it does is unchanged: the buffered turns are purged (ADR 0014) and long-term memory is erased (ADR 0023).
 - **A declined user draws no nudge.** In a group, every message from a declined user, directed or ambient, gets the gate's "reply nothing" decision. As for any unconsented user, it is not answered and not logged, and nothing they said is recorded (ADR 0002). The nudge cooldown (ADR 0024) does not apply, since there is no nudge to space out.
 - **The way back is the DM, and it stays open.** The gate decides group messages only; the DM is the consent flow, and a decline does not change it. A DM from a declined user shows the disclosure and the opt-in button, as for anyone not opted in, and `/consent` or the button grants consent. The reply to a withdrawal that went through already says how to opt back in.
 - **A user who was never asked is unchanged:** a directed message draws a nudge, once per cooldown.
 - **No admin reset.** Returning a declined user to unknown would only bring the nudges back to someone who said no; the user's own way back is always open. ADR 0012's admin removal of another user's consent is not built and is not part of this decision.
-- **No decline before a first opt-in.** The DM offers only the opt-in. A user who has never opted in is nudged at most once per cooldown and can ignore it; withdrawal is the one explicit no.
+- **No decline button.** The DM offers only the opt-in button. A user who has never opted in is nudged at most once per cooldown and can ignore it, or send `/consent remove`; that command is the one explicit no.
 
 ## Consequences
 
