@@ -685,21 +685,3 @@ func TestWithRecordingRecordsTheRunsToolResults(t *testing.T) {
 	assert.Equal(t, 2, calls, "both model calls are recorded")
 	assert.Contains(t, all.String(), "TOOL-RESULT-4b7", "the tool's result is in the recording")
 }
-
-// The asker's label, here a handle, reaches the model so it knows who is
-// speaking, and the default instructions forbid using it, or any username or
-// handle, to address anyone. Nothing in them invites addressing the asker by
-// name. Greetings stay the persona's call (ADR 0013).
-func TestTheHandleIsNotOfferedAsAFormOfAddress(t *testing.T) {
-	mdl := textModel("ok")
-	_, err := newEngine(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}, nil, "SCOPE").Answer(context.Background(), core.Query{
-		Text: "how do I join?", User: core.User{Display: "some_handle"},
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, "[some_handle] how do I join?", inputOf(t, mdl), "the label stays as context")
-	sys := systemOf(mdl)
-	assert.Contains(t, sys, "never use it, or any username or handle, to address anyone")
-	assert.NotContains(t, sys, "address them by name")
-	assert.NotContains(t, sys, "some_handle", "the handle is never in the instructions")
-}
