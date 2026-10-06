@@ -27,6 +27,10 @@ import (
 	"github.com/yaad-index/bonyan/content"
 	bmodel "github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
+	"github.com/yaad-index/bonyan/telemetry"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
+	"go.opentelemetry.io/otel/metric"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // ErrNotImplemented marks scaffold stubs that have structure but no behavior
@@ -219,6 +223,10 @@ type Engine struct {
 	// temperature is every model call's sampling temperature; nil leaves it
 	// to the provider.
 	temperature *float64
+	// telemetry emits each run's spans and metrics; nil emits none.
+	telemetry *telemetry.Telemetry
+	// metrics records grove's own metrics; nil records none.
+	metrics *metrics.Metrics
 	// scope is the instance's system prompt / scope statement that bounds the
 	// bot and drives refusal. Loaded from config.
 	scope string
@@ -300,6 +308,26 @@ func WithMaxOutputTokens(n int) Option {
 // default, leaves it to the provider.
 func WithTemperature(t *float64) Option {
 	return func(e *Engine) { e.temperature = t }
+}
+
+// WithTelemetry emits each answer's run, loop steps, model calls and tool
+// calls as spans and metrics through t, made by NewTelemetry. Nil, the
+// default, emits none.
+func WithTelemetry(t *telemetry.Telemetry) Option {
+	return func(e *Engine) { e.telemetry = t }
+}
+
+// WithMetrics records how many vault chunks each answer is given through m.
+// Nil, the default, records nothing.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(e *Engine) { e.metrics = m }
+}
+
+// NewTelemetry returns the telemetry an engine emits through tp and mp. It
+// never captures content: a span or metric carries what a run did, never what
+// anyone wrote, the prompts, or a tool's arguments and results.
+func NewTelemetry(tp trace.TracerProvider, mp metric.MeterProvider) (*telemetry.Telemetry, error) {
+	return telemetry.New(telemetry.Options{TracerProvider: tp, MeterProvider: mp})
 }
 
 // DefaultMaxOutputTokens caps a model reply when no cap is configured. bonyan
@@ -402,6 +430,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 			"cap_tokens", e.contextTokens, "kept", len(kept), "dropped", len(chunks)-len(kept))
 	}
 	chunks = kept
+	e.metrics.Chunks(ctx, len(chunks))
 	// Server-side grounding trace (ADR 0008): the source tags never reach the user
 	// (they are internal, un-openable paths), so the sources that grounded an
 	// answer are recorded here instead — model-independent, straight from the
@@ -433,6 +462,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		Prices:          budget.PriceTable{e.modelName: {}},
 		MaxOutputTokens: e.maxOutputTokens,
 		Temperature:     e.temperature,
+		Telemetry:       e.telemetry,
 		Limits: agent.Limits{
 			MaxSteps: maxToolIterations,
 			Deadline: answerDeadline,

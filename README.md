@@ -83,6 +83,56 @@ Key fields (the full annotated reference lives in
 The model is any **OpenAI-compatible** endpoint — swap providers by changing
 `model-base-url` + `model-name` + the key, with no code change.
 
+## Telemetry
+
+`serve` can send traces and metrics to an OpenTelemetry collector over OTLP. It
+is off unless an endpoint is set, and is configured only by the standard
+environment variables:
+
+- `OTEL_EXPORTER_OTLP_ENDPOINT` turns on both signals;
+  `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT` or `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+  turns on that signal alone.
+- `OTEL_EXPORTER_OTLP_PROTOCOL` (or the per-signal `…_TRACES_PROTOCOL` /
+  `…_METRICS_PROTOCOL`) is `http/protobuf`, the default, or `grpc`.
+- The other `OTEL_EXPORTER_OTLP_*` variables (headers, timeout, compression,
+  certificate) work as the standard describes. `OTEL_SDK_DISABLED=true` turns
+  export off.
+- The service is `yaad-grove` at the build version; `OTEL_SERVICE_NAME` and
+  `OTEL_RESOURCE_ATTRIBUTES` override it.
+
+Each answer is a trace: an `invoke_agent grove` span with a `bonyan.step` span
+per loop step, and under those a `chat <model>` span per model call and an
+`execute_tool <tool>` span per tool call. The metrics follow the OpenTelemetry
+GenAI conventions:
+
+| Metric | Unit | What it measures |
+|--------|------|------------------|
+| `gen_ai.client.operation.duration` | `s` | How long each model call took. |
+| `gen_ai.client.token.usage` | `{token}` | Input and output tokens per model call. |
+| `bonyan.usage.cost` | `1` | Cost per model call. Always 0 here: the spend ceiling counts tokens, so no price is set. |
+
+grove's own metrics, sent with the metrics signal:
+
+| Metric | Unit | Attributes | What it measures |
+|--------|------|------------|------------------|
+| `grove.answers` | `{answer}` | `grove.surface` (`group`, `dm`), `grove.answer.outcome` (`answered`, `refused`, `at_capacity`, `error`) | Questions the engine was asked, by how the answer ended. |
+| `grove.answer.duration` | `s` | as `grove.answers` | From taking a question to its reply being ready. |
+| `grove.retrieval.duration` | `s` | `grove.retrieval.mode` (`keyword`, `semantic`, `hybrid`) | How long retrieving a question's vault chunks took. |
+| `grove.retrieval.chunks` | `{chunk}` | none | The vault chunks an answer was given, after the context-size guard. |
+| `gen_ai.client.operation.duration` | `s` | `gen_ai.operation.name` (`embeddings`), `gen_ai.request.model`, `error.type` on a failure | How long each embedding call took, the vault's indexing included. |
+| `gen_ai.client.token.usage` | `{token}` | as above, with `gen_ai.token.type` (`input`) | Input tokens per embedding call, when the endpoint reports them. |
+| `grove.spend.remaining` | `{token}` | none | Tokens left under the spend ceiling in the current period. |
+| `grove.spend.ceiling` | `{token}` | none | The spend ceiling. |
+
+Only questions that reach the engine are counted. A message the consent gate
+or the rate limit stops is not counted, nor anything about who sent it.
+
+Telemetry carries what a run did, never content: no message text, names, user
+or chat ids, prompts, vault text, tool arguments or tool results. The
+attributes are the model and tool names, the tool call's id, token counts,
+durations, the step number, how the run ended, the kind of any error, and a
+hash of the instructions the model was given.
+
 ## Access & consent
 
 - **Consent is a hard gate.** Before opt-in the bot only sends a consent prompt;
