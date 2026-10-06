@@ -5,6 +5,10 @@
 # from the environment:
 #   YAADGROVE_MODEL_API_KEY    OpenAI-compatible API key
 #   YAADGROVE_TELEGRAM_TOKEN   Telegram bot token
+#
+# Telemetry export (traces and metrics over OTLP) is also set in the
+# environment, by the standard OTEL_EXPORTER_OTLP_* variables, and is off when
+# no endpoint is set. See "Telemetry" in the README.
 
 log-level: info
 

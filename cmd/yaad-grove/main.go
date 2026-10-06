@@ -30,6 +30,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/embed"
 	"github.com/yaad-index/yaad-grove/internal/memory"
+	"github.com/yaad-index/yaad-grove/internal/otelexport"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
@@ -43,6 +44,10 @@ import (
 
 // version is the build version, overridden at link time via -ldflags.
 var version = "dev"
+
+// telemetryFlushTimeout bounds how long shutdown waits to send the telemetry
+// still buffered.
+const telemetryFlushTimeout = 5 * time.Second
 
 // modelKeyEnv names the environment variable holding the model API key.
 const modelKeyEnv = "YAADGROVE_MODEL_API_KEY"
@@ -291,7 +296,29 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if longMemory != nil {
 		engineMemory = longMemory.memory
 	}
-	a, err := c.buildAnswering(log, meter, secrets, engineMemory, nil)
+	// Telemetry export is off unless the environment names an OTLP endpoint.
+	// Nothing it sends carries content (core.NewTelemetry).
+	var answerOpts []core.Option
+	exp, err := otelexport.Setup(context.Background(), "yaad-grove", version)
+	if err != nil {
+		return err
+	}
+	if exp != nil {
+		defer func() {
+			ctx, cancel := context.WithTimeout(context.Background(), telemetryFlushTimeout)
+			defer cancel()
+			if err := exp.Shutdown(ctx); err != nil {
+				log.Warn("telemetry flush at shutdown failed", "err", err)
+			}
+		}()
+		tel, err := core.NewTelemetry(exp.TracerProvider, exp.MeterProvider)
+		if err != nil {
+			return err
+		}
+		answerOpts = append(answerOpts, core.WithTelemetry(tel))
+		log.Info("telemetry export on", "traces", exp.Traces, "metrics", exp.Metrics)
+	}
+	a, err := c.buildAnswering(log, meter, secrets, engineMemory, nil, answerOpts...)
 	if err != nil {
 		return err
 	}
