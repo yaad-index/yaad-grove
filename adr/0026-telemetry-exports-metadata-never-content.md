@@ -19,7 +19,7 @@ Metrics have the same problem in another form. An attribute that takes a user id
   - **Allowed:** the model and tool names, token counts, durations, the step number, the request's limits, how the run ended, a tool call's id, the kind of an error, and a hash of the operator's instructions (the template, persona and scope, not the conversation).
   - **Never:** a question, an answer, the conversation, a replied-to message, a name, vault text, the instructions themselves, a tool's arguments or result, or an error's text.
 - **Metric attributes are bounded.** Every metric attribute takes values from a small fixed set: a surface, an outcome, a retrieval mode, a model or tool name from the instance's configuration. A user id, a chat id, a name or any text is never an attribute value or part of a metric name.
-- **Nothing is counted on the unconsented path.** Metrics count only questions that reach the engine. The consent gate's decisions are not counted: nudges, silences, throttles and refusals. Nothing is counted about a user who has not consented (ADR 0002).
+- **A message is counted only once it reaches the engine.** None of the gate's decisions is a metric: its nudges, silences, throttles, the ambient messages it only logs, and its fail-closed refusals (a store error) are not counted, since none of them reaches the engine. This is apart from the engine's own refusal of an out-of-scope question, which is an answer and is counted under its outcome. Nudges and silences are also the unconsented path: nothing is counted about a user who has not consented (ADR 0002).
 - **Names follow the conventions.** A metric takes the OpenTelemetry semantic conventions' name where one exists, else `grove.<area>.<thing>`. Its unit goes in the unit field. The README lists every metric with its unit and attributes.
 
 ## Consequences
@@ -28,4 +28,4 @@ Metrics have the same problem in another form. An attribute that takes a user id
 - Withdrawal and erasure need nothing from the collector: there is nothing of the user's there to remove.
 - Turning content capture on takes a new ADR that supersedes this one. A debugging flag is not enough.
 - How many unconsented users are nudged or silenced is not observable. That is the price of ADR 0002's "record nothing without consent", now applied to counts as well.
-- A new metric or attribute is reviewed against this list. Its attribute values must come from a fixed set, and it must be counted after the consent gate.
+- A new metric or attribute is reviewed against this list. Its attribute values must come from a fixed set, and a metric about messages may count only those that reach the engine.
