@@ -10,6 +10,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/memory"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
 	"github.com/yaad-index/yaad-grove/internal/transcript"
@@ -76,7 +77,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			if policy.Admins.IsAdmin(in.User.ID) && !isConsentCommand(in.Text) {
 				// An admin's DM is answered without long-term memory: an admin need not
 				// have consented, and only consented turns reach it (ADR 0023 §5).
-				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, false, 0)
+				return answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, policy.Metrics, false, 0)
 			}
 			return dmConsentFlow(ctx, consent, policy, in), nil
 		}
@@ -118,7 +119,7 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 			// A consented, directed group turn is the only turn long-term memory
 			// keeps, with its answer (ADR 0023 §5). A DM reaches here only on a bot
 			// with no consent surface, and is not kept.
-			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, in.Surface == core.SurfaceGroup, withdrawals)
+			reply, err := answerRemembering(ctx, engine, policy.Memory, policy.Inject, policy.FollowupWindow, in, policy.Strings, policy.Metrics, in.Surface == core.SurfaceGroup, withdrawals)
 			purgeIfWithdrawn(ctx, consent, policy.Memory, in.User.ID)
 			// The bot's serve-path response — an answer OR a refusal — is the bot's real
 			// reply to the query, so the transcript records it (ADR 0015). This is
@@ -164,8 +165,10 @@ func NewHandler(gate checker, engine answerer, callbacks pending.Store, registry
 // answer runs the engine with the selected recent-conversation context (ADR 0014)
 // and maps its outcome to a reply: a spend-ceiling breach (ADR 0006) degrades to
 // a capacity notice rather than crashing; any other error propagates. remember
-// lets the run use long-term memory (ADR 0023).
-func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings, remember bool, withdrawals uint64) (core.Reply, error) {
+// lets the run use long-term memory (ADR 0023). m counts the answer by how it
+// ended.
+func answer(ctx context.Context, engine answerer, in transport.Inbound, history []core.HistoryTurn, strs Strings, m *metrics.Metrics, remember bool, withdrawals uint64) (core.Reply, error) {
+	start := time.Now()
 	reply, err := engine.Answer(ctx, core.Query{
 		User:         in.User,
 		Surface:      in.Surface,
@@ -176,12 +179,23 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 		Remember:     remember,
 		Withdrawals:  withdrawals,
 	})
+	surface := metrics.Surface("group")
+	if in.Surface == core.SurfaceDM {
+		surface = "dm"
+	}
 	if err != nil {
 		if errors.Is(err, budget.ErrOverBudget) {
+			m.Answer(ctx, surface, metrics.AtCapacity, time.Since(start))
 			return core.Reply{Text: strs.Get(StrAtCapacity), Refused: true}, nil
 		}
+		m.Answer(ctx, surface, metrics.Failed, time.Since(start))
 		return core.Reply{}, err
 	}
+	outcome := metrics.Answered
+	if reply.Refused {
+		outcome = metrics.Refused
+	}
+	m.Answer(ctx, surface, outcome, time.Since(start))
 	return reply, nil
 }
 
@@ -193,10 +207,10 @@ func answer(ctx context.Context, engine answerer, in transport.Inbound, history 
 // nil/disabled buffer makes the whole thing a plain answer. remember is passed
 // on to the engine for long-term memory (ADR 0023), with the user's withdrawal
 // count read before the gate.
-func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings, remember bool, withdrawals uint64) (core.Reply, error) {
+func answerRemembering(ctx context.Context, engine answerer, buf *memory.Buffer, injectN int, window time.Duration, in transport.Inbound, strs Strings, m *metrics.Metrics, remember bool, withdrawals uint64) (core.Reply, error) {
 	history := selectHistory(buf, in, injectN, window)
 	rememberUser(buf, in)
-	reply, err := answer(ctx, engine, in, history, strs, remember, withdrawals)
+	reply, err := answer(ctx, engine, in, history, strs, m, remember, withdrawals)
 	if err == nil && !reply.Refused {
 		rememberBot(buf, in.ReplyTo, reply.Text)
 	}

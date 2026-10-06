@@ -14,6 +14,7 @@ import (
 
 	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 	"github.com/yaad-index/yaad-grove/internal/model"
 	"github.com/yaad-index/yaad-grove/internal/runtime"
 	"github.com/yaad-index/yaad-grove/internal/store"
@@ -39,7 +40,7 @@ type answering struct {
 // none). Serve and replay both answer through it, so a replay answers as the
 // bot does. A non-nil calls counts every call made to the model endpoint, and
 // opts are added to the engine's own. The registry is built but not connected.
-func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets *secret.Resolver, mem *core.Memory, calls *atomic.Int64, opts ...core.Option) (*answering, error) {
+func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets *secret.Resolver, mem *core.Memory, calls *atomic.Int64, mx *metrics.Metrics, opts ...core.Option) (*answering, error) {
 	if t := c.Temperature; t != nil && !(*t >= 0) {
 		return nil, fmt.Errorf("--temperature must not be negative, got %v", *t)
 	}
@@ -64,7 +65,7 @@ func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets
 	// Retrieval (ADR 0001/0017): keyword by default; semantic when an embedding
 	// endpoint is configured, with keyword as the query-time fallback. Building the
 	// semantic index embeds the whole vault, so a failure here fails startup.
-	retriever, kbStore, err := buildRetriever(c, log)
+	retriever, kbStore, err := buildRetriever(c, log, mx)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +119,7 @@ func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets
 	opts = append([]core.Option{
 		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
 		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens), core.WithTemperature(c.Temperature),
-		core.WithMemory(mem),
+		core.WithMemory(mem), core.WithMetrics(mx),
 	}, opts...)
 	engine := core.New(m, c.ModelName, retriever, tools.ForAgent(toolset, registry), c.Scope, opts...)
 	return &answering{engine: engine, registry: registry, kbStore: kbStore, toolset: toolset, servers: servers, persona: persona, pack: pack}, nil

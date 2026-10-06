@@ -3,6 +3,7 @@ package core_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -15,6 +16,7 @@ import (
 	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/metrics/metricstest"
 )
 
 // An answer is emitted as a run with its model and tool calls, and nothing
@@ -107,4 +109,16 @@ func attributeSets(t *testing.T, data metricdata.Aggregation) []attribute.Set {
 		t.Fatalf("metric data %T is not read", data)
 	}
 	return sets
+}
+
+// The chunk count is what the answer was given, after the context-size guard
+// trims, not what retrieval returned.
+func TestTheChunksGivenAreCounted(t *testing.T) {
+	m, collect := metricstest.New(t)
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "short"}, {Source: "b.md", Text: strings.Repeat("fact ", 500)}}}
+	mdl := textModel("ok")
+	_, err := newEngine(mdl, ret, nil, "SCOPE", core.WithContextTokens(50), core.WithMetrics(m)).Answer(context.Background(), core.Query{Text: "q"})
+	require.NoError(t, err)
+	require.Len(t, itemsIn(mdl, "material"), 1, "the guard dropped one chunk")
+	assert.Equal(t, []metricstest.Point{{Attrs: map[string]string{}, Value: 1, Sum: 1}}, collect()["grove.retrieval.chunks"].Points)
 }

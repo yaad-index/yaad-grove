@@ -30,6 +30,7 @@ import (
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/embed"
 	"github.com/yaad-index/yaad-grove/internal/memory"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 	"github.com/yaad-index/yaad-grove/internal/otelexport"
 	"github.com/yaad-index/yaad-grove/internal/pending"
 	"github.com/yaad-index/yaad-grove/internal/quarantine"
@@ -299,6 +300,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	// Telemetry export is off unless the environment names an OTLP endpoint.
 	// Nothing it sends carries content (core.NewTelemetry).
 	var answerOpts []core.Option
+	var mx *metrics.Metrics
 	exp, err := otelexport.Setup(context.Background(), "yaad-grove", version)
 	if err != nil {
 		return err
@@ -316,9 +318,17 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 			return err
 		}
 		answerOpts = append(answerOpts, core.WithTelemetry(tel))
+		if exp.Metrics {
+			if mx, err = metrics.New(exp.MeterProvider); err != nil {
+				return err
+			}
+			if err := mx.ObserveSpend(c.SpendCeiling, meter.Remaining); err != nil {
+				return err
+			}
+		}
 		log.Info("telemetry export on", "traces", exp.Traces, "metrics", exp.Metrics)
 	}
-	a, err := c.buildAnswering(log, meter, secrets, engineMemory, nil, answerOpts...)
+	a, err := c.buildAnswering(log, meter, secrets, engineMemory, nil, mx, answerOpts...)
 	if err != nil {
 		return err
 	}
@@ -429,6 +439,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		Admins:         runtime.NewAdminSet(c.Admins),
 		Nudge:          nudge,
 		Memory:         convoMemory,
+		Metrics:        mx,
 		Inject:         c.MemoryInject,
 		FollowupWindow: c.FollowupWindow,
 		Strings:        strs,
@@ -606,7 +617,7 @@ const retrievalMaxChunks = 8
 // hybrid (RRF fusion of both, always). The default is hybrid when embeddings are
 // configured, else keyword. semantic and hybrid both require embeddings. An
 // incomplete embedding pair (one without the other) is a startup error.
-func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store, error) {
+func buildRetriever(c *ServeCmd, log *slog.Logger, mx *metrics.Metrics) (core.Retriever, store.Store, error) {
 	base := strings.TrimSpace(c.EmbeddingBaseURL)
 	emodel := strings.TrimSpace(c.EmbeddingModel)
 	embeddingsSet := base != "" || emodel != ""
@@ -638,7 +649,7 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 		if key == "" {
 			key = os.Getenv("YAADGROVE_MODEL_API_KEY")
 		}
-		embedder = embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel})
+		embedder = embed.New(embed.Config{BaseURL: base, APIKey: key, Model: emodel, Metrics: mx})
 	}
 
 	// Read the vault (with the declared structured dimensions, ADR 0019) and index
@@ -689,7 +700,25 @@ func buildRetriever(c *ServeCmd, log *slog.Logger) (core.Retriever, store.Store,
 	}
 	log.Info("retrieval index built", attrs...)
 
-	return retrieval.NewPlanner(kb, embedder, mode, retrievalMaxChunks), kb, nil
+	var r core.Retriever = retrieval.NewPlanner(kb, embedder, mode, retrievalMaxChunks)
+	if mx != nil {
+		r = timedRetriever{inner: r, mode: mode, metrics: mx}
+	}
+	return r, kb, nil
+}
+
+// timedRetriever records how long each retrieval takes, under its mode.
+type timedRetriever struct {
+	inner   core.Retriever
+	mode    string
+	metrics *metrics.Metrics
+}
+
+func (t timedRetriever) Retrieve(ctx context.Context, query string) ([]core.Chunk, error) {
+	start := time.Now()
+	chunks, err := t.inner.Retrieve(ctx, query)
+	t.metrics.Retrieval(ctx, t.mode, time.Since(start))
+	return chunks, err
 }
 
 // Store backends (ADR 0019, #86): memory is the volatile pure-Go default; ladybug

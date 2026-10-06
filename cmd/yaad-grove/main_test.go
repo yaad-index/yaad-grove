@@ -14,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
+	"github.com/yaad-index/yaad-grove/internal/metrics/metricstest"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
 	"github.com/yaad-index/yaad-grove/internal/store"
 	"github.com/yaad-index/yaad-grove/internal/tools"
@@ -145,16 +146,16 @@ func tempVault(t *testing.T) string {
 func TestBuildRetriever(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
-	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
+	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log, nil)
 	require.NoError(t, err)
 	p, ok := r.(*retrieval.Planner)
 	require.True(t, ok, "buildRetriever returns a Planner")
 	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "no embedding endpoint → keyword mode (zero-config default)")
 
-	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingBaseURL: "http://x"}, log, nil)
 	assert.Error(t, err, "base-url without model is a startup error")
 
-	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "embed-model"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", EmbeddingModel: "embed-model"}, log, nil)
 	assert.Error(t, err, "model without base-url is a startup error")
 }
 
@@ -166,20 +167,20 @@ func TestBuildRetrieverMode(t *testing.T) {
 	log := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	// keyword mode returns a keyword-mode planner even with no embeddings.
-	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t), RetrievalMode: "keyword"}, log)
+	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t), RetrievalMode: "keyword"}, log, nil)
 	require.NoError(t, err)
 	p, ok := r.(*retrieval.Planner)
 	require.True(t, ok, "buildRetriever returns a Planner")
 	assert.Equal(t, retrieval.ModeKeyword, p.Mode(), "keyword mode → keyword-mode planner")
 
 	// semantic / hybrid without embeddings configured is a startup error.
-	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "hybrid"}, log, nil)
 	assert.ErrorContains(t, err, "requires", "hybrid needs embeddings")
-	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "semantic"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "semantic"}, log, nil)
 	assert.ErrorContains(t, err, "requires", "semantic needs embeddings")
 
 	// An unknown mode is rejected.
-	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log)
+	_, _, err = buildRetriever(&ServeCmd{VaultDir: "vault", RetrievalMode: "bogus"}, log, nil)
 	assert.ErrorContains(t, err, "unknown --retrieval-mode")
 }
 
@@ -189,7 +190,7 @@ func TestBuildRetrieverMode(t *testing.T) {
 func TestRetrievalStoreLogged(t *testing.T) {
 	var buf bytes.Buffer
 	log := slog.New(slog.NewTextHandler(&buf, nil))
-	_, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log)
+	_, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log, nil)
 	require.NoError(t, err)
 	out := buf.String()
 	assert.Contains(t, out, "retrieval store", "the backend is logged at startup")
@@ -431,4 +432,18 @@ func TestConsentAckEmoji(t *testing.T) {
 	assert.Equal(t, "👍", consentAckEmoji("", true))
 	assert.Empty(t, consentAckEmoji("🎉", false))
 	assert.Empty(t, consentAckEmoji("", false))
+}
+
+// With metrics on, each retrieval is timed under the resolved mode.
+func TestRetrievalIsTimed(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	m, collect := metricstest.New(t)
+	r, _, err := buildRetriever(&ServeCmd{VaultDir: tempVault(t)}, log, m)
+	require.NoError(t, err)
+	_, err = r.Retrieve(context.Background(), "hello")
+	require.NoError(t, err)
+	points := collect()["grove.retrieval.duration"].Points
+	require.Len(t, points, 1)
+	assert.Equal(t, map[string]string{"grove.retrieval.mode": "keyword"}, points[0].Attrs)
+	assert.Equal(t, int64(1), points[0].Value)
 }

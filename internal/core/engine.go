@@ -28,6 +28,7 @@ import (
 	bmodel "github.com/yaad-index/bonyan/model"
 	"github.com/yaad-index/bonyan/record"
 	"github.com/yaad-index/bonyan/telemetry"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 	"go.opentelemetry.io/otel/metric"
 	"go.opentelemetry.io/otel/trace"
 )
@@ -224,6 +225,8 @@ type Engine struct {
 	temperature *float64
 	// telemetry emits each run's spans and metrics; nil emits none.
 	telemetry *telemetry.Telemetry
+	// metrics records grove's own metrics; nil records none.
+	metrics *metrics.Metrics
 	// scope is the instance's system prompt / scope statement that bounds the
 	// bot and drives refusal. Loaded from config.
 	scope string
@@ -312,6 +315,12 @@ func WithTemperature(t *float64) Option {
 // default, emits none.
 func WithTelemetry(t *telemetry.Telemetry) Option {
 	return func(e *Engine) { e.telemetry = t }
+}
+
+// WithMetrics records how many vault chunks each answer is given through m.
+// Nil, the default, records nothing.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(e *Engine) { e.metrics = m }
 }
 
 // NewTelemetry returns the telemetry an engine emits through tp and mp. It
@@ -421,6 +430,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 			"cap_tokens", e.contextTokens, "kept", len(kept), "dropped", len(chunks)-len(kept))
 	}
 	chunks = kept
+	e.metrics.Chunks(ctx, len(chunks))
 	// Server-side grounding trace (ADR 0008): the source tags never reach the user
 	// (they are internal, un-openable paths), so the sources that grounded an
 	// answer are recorded here instead — model-independent, straight from the

@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 )
 
 // defaultTimeout bounds a single embeddings call; a tighter ctx deadline still
@@ -32,6 +34,8 @@ type Config struct {
 	BaseURL string // e.g. https://api.openai.com/v1 or a local Ollama /v1 gateway
 	APIKey  string // via env/secret; empty is fine for a no-auth local endpoint
 	Model   string // embedding model id understood by the endpoint (e.g. bge-m3)
+	// Metrics records each call's duration and input tokens; nil records nothing.
+	Metrics *metrics.Metrics
 }
 
 // Client is an OpenAI-compatible embeddings client implementing Embedder.
@@ -70,6 +74,10 @@ type response struct {
 		Index     int       `json:"index"`
 		Embedding []float32 `json:"embedding"`
 	} `json:"data"`
+	// Usage is absent when the endpoint does not report it.
+	Usage *struct {
+		PromptTokens int64 `json:"prompt_tokens"`
+	} `json:"usage"`
 }
 
 // Embed returns one vector per input text, in input order. An empty input makes
@@ -79,14 +87,24 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 	if len(texts) == 0 {
 		return nil, nil
 	}
+	start := time.Now()
+	vecs, tokens, err := c.embed(ctx, texts)
+	c.cfg.Metrics.Embedding(ctx, c.cfg.Model, time.Since(start), tokens, err)
+	return vecs, err
+}
+
+// embed makes the call Embed measures. tokens is the input tokens the
+// endpoint reported, or -1.
+func (c *Client) embed(ctx context.Context, texts []string) (vecs [][]float32, tokens int64, err error) {
+	tokens = -1
 	body, err := json.Marshal(request{Model: c.cfg.Model, Input: texts})
 	if err != nil {
-		return nil, err
+		return nil, tokens, err
 	}
 	url := strings.TrimRight(c.cfg.BaseURL, "/") + "/embeddings"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return nil, err
+		return nil, tokens, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if c.cfg.APIKey != "" {
@@ -95,32 +113,35 @@ func (c *Client) Embed(ctx context.Context, texts []string) ([][]float32, error)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, tokens, err
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, &StatusError{Status: resp.StatusCode, Snippet: strings.TrimSpace(string(snippet))}
+		return nil, tokens, &StatusError{Status: resp.StatusCode, Snippet: strings.TrimSpace(string(snippet))}
 	}
 
 	var out response
 	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, err
+		return nil, tokens, err
+	}
+	if out.Usage != nil {
+		tokens = out.Usage.PromptTokens
 	}
 	if len(out.Data) != len(texts) {
-		return nil, fmt.Errorf("embed: got %d vectors for %d inputs", len(out.Data), len(texts))
+		return nil, tokens, fmt.Errorf("embed: got %d vectors for %d inputs", len(out.Data), len(texts))
 	}
 	sort.Slice(out.Data, func(i, j int) bool { return out.Data[i].Index < out.Data[j].Index })
-	vecs := make([][]float32, len(out.Data))
+	vecs = make([][]float32, len(out.Data))
 	for i := range out.Data {
 		// After sorting, indices must be exactly 0..n-1. A right-count-but-
 		// duplicate/gapped set would pass the count check yet misalign vectors with
 		// inputs — a silent wrong-retrieval bug — so reject it here.
 		if out.Data[i].Index != i {
-			return nil, fmt.Errorf("embed: non-contiguous response index %d at position %d", out.Data[i].Index, i)
+			return nil, tokens, fmt.Errorf("embed: non-contiguous response index %d at position %d", out.Data[i].Index, i)
 		}
 		vecs[i] = out.Data[i].Embedding
 	}
-	return vecs, nil
+	return vecs, tokens, nil
 }

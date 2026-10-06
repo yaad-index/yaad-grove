@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/yaad-index/yaad-grove/internal/memory"
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 	"github.com/yaad-index/yaad-grove/internal/transcript"
 )
 
@@ -20,6 +21,9 @@ type Policy struct {
 	// Memory is the conversation buffer (ADR 0014); nil or disabled means the bot
 	// answers each message in isolation (pre-0014 behavior).
 	Memory *memory.Buffer
+	// Metrics counts each answer the engine gives by how it ended; nil counts
+	// nothing.
+	Metrics *metrics.Metrics
 	// Inject is how many retained turns may enter a prompt (--memory-inject).
 	Inject int
 	// FollowupWindow is how far back a non-reply message's sender must have a prior
