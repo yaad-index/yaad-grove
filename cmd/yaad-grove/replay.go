@@ -61,16 +61,18 @@ type replayQuestion struct {
 // replayAnswer is one line of a run's output. Reason says how a refusal came
 // about, and Calls is how many model calls the question took.
 type replayAnswer struct {
-	ID       string `json:"id"`
-	Label    string `json:"label,omitempty"`
-	Model    string `json:"model,omitempty"`
-	Question string `json:"question"`
-	Answer   string `json:"answer"`
-	Refused  bool   `json:"refused"`
-	Reason   string `json:"reason,omitempty"`
-	Calls    int64  `json:"calls"`
-	Error    string `json:"error,omitempty"`
-	MS       int64  `json:"ms"`
+	ID    string `json:"id"`
+	Label string `json:"label,omitempty"`
+	Model string `json:"model,omitempty"`
+	// Temperature is the run's sampling temperature, when it set one.
+	Temperature *float64 `json:"temperature,omitempty"`
+	Question    string   `json:"question"`
+	Answer      string   `json:"answer"`
+	Refused     bool     `json:"refused"`
+	Reason      string   `json:"reason,omitempty"`
+	Calls       int64    `json:"calls"`
+	Error       string   `json:"error,omitempty"`
+	MS          int64    `json:"ms"`
 	// Recording is the file the question's run was recorded to, with
 	// --record-dir.
 	Recording string `json:"recording,omitempty"`
@@ -108,9 +110,10 @@ func refusalReason(text string, calls int64) string {
 
 // replayRun is what every line of a run shares.
 type replayRun struct {
-	Label   string
-	Model   string
-	Timeout time.Duration
+	Label       string
+	Model       string
+	Temperature *float64
+	Timeout     time.Duration
 	// Calls counts the model calls the engine makes; nil counts none.
 	Calls *atomic.Int64
 	// Record records each question's run to a file of its own; nil records
@@ -236,7 +239,7 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 	defer func() { _ = a.registry.Close() }()
 
 	log.Info("replay: answering", "questions", len(questions), "model", c.ModelName, "label", r.Label, "out", r.Out)
-	run := replayRun{Label: r.Label, Model: c.ModelName, Timeout: r.Timeout, Calls: &calls, Record: rec}
+	run := replayRun{Label: r.Label, Model: c.ModelName, Temperature: c.Temperature, Timeout: r.Timeout, Calls: &calls, Record: rec}
 	if err := replay(ctx, a.engine, questions, out, run, log); err != nil {
 		return err
 	}
@@ -276,7 +279,7 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 			}
 			recording = path
 		}
-		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Question: q.Text, MS: elapsed.Milliseconds(), Recording: recording}
+		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Temperature: run.Temperature, Question: q.Text, MS: elapsed.Milliseconds(), Recording: recording}
 		if run.Calls != nil {
 			line.Calls = run.Calls.Load() - before
 		}
@@ -495,8 +498,8 @@ func outcome(a replayAnswer) string {
 	return "answered"
 }
 
-// writeSide writes one run's answer to a question, headed by the run's label
-// and model when it has them, and what the answer took.
+// writeSide writes one run's answer to a question, headed by the run's label,
+// model and temperature when it has them, and what the answer took.
 func writeSide(b *strings.Builder, name string, a *replayAnswer) {
 	if a == nil {
 		fmt.Fprintf(b, "--- %s: not asked\n", name)
@@ -507,6 +510,9 @@ func writeSide(b *strings.Builder, name string, a *replayAnswer) {
 		if s != "" {
 			head = append(head, s)
 		}
+	}
+	if a.Temperature != nil {
+		head = append(head, fmt.Sprintf("temperature %v", *a.Temperature))
 	}
 	head = append(head, fmt.Sprintf("%d ms", a.MS), fmt.Sprintf("%d calls", a.Calls))
 	fmt.Fprintf(b, "--- %s (%s)", name, strings.Join(head, ", "))

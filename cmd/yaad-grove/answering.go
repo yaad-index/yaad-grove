@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"log/slog"
 	"net/http"
 	"os"
@@ -39,6 +40,9 @@ type answering struct {
 // bot does. A non-nil calls counts every call made to the model endpoint, and
 // opts are added to the engine's own. The registry is built but not connected.
 func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets *secret.Resolver, mem *core.Memory, calls *atomic.Int64, opts ...core.Option) (*answering, error) {
+	if t := c.Temperature; t != nil && !(*t >= 0) {
+		return nil, fmt.Errorf("--temperature must not be negative, got %v", *t)
+	}
 	// The model is bonyan's OpenAI-compatible client (ADR 0023), with the native
 	// tool-call fallback (#88), wrapped with the spend meter (ADR 0006/0008) so the
 	// ceiling is enforced on the model-call path while core stays free of budget.
@@ -113,7 +117,7 @@ func (c *ServeCmd) buildAnswering(log *slog.Logger, meter *budget.Meter, secrets
 	}
 	opts = append([]core.Option{
 		core.WithPersona(persona), core.WithPromptTemplate(promptTmpl), core.WithLanguage(pack.Prompt),
-		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens),
+		core.WithContextTokens(c.ContextSize), core.WithMaxOutputTokens(c.MaxOutputTokens), core.WithTemperature(c.Temperature),
 		core.WithMemory(mem),
 	}, opts...)
 	engine := core.New(m, c.ModelName, retriever, tools.ForAgent(toolset, registry), c.Scope, opts...)

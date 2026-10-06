@@ -87,6 +87,9 @@ type ServeCmd struct {
 	ModelName    string `name:"model-name" default:"gpt-4o-mini" help:"Model id understood by the endpoint."`
 	// MaxOutputTokens caps each model reply (ADR 0023: the agent run requires a cap).
 	MaxOutputTokens int `name:"max-output-tokens" default:"4096" help:"Cap on each model reply, in tokens."`
+	// Temperature is the sampling temperature of every model call; unset
+	// leaves it to the provider's default.
+	Temperature *float64 `name:"temperature" help:"Sampling temperature of every model call. Unset leaves it to the provider's default."`
 
 	// Semantic retrieval (ADR 0017): setting the embedding base-url + model pair
 	// (both together) switches retrieval from keyword to embedding-based, with
@@ -423,11 +426,16 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	if transcriptState == "" {
 		transcriptState = "disabled"
 	}
+	temperatureState := "provider default"
+	if c.Temperature != nil {
+		temperatureState = strconv.FormatFloat(*c.Temperature, 'g', -1, 64)
+	}
 	// Startup line: what is actually live, so the staged wiring (sweeper, logging,
 	// tools) is verifiable at a glance.
 	log.Info("yaad-grove serving",
 		"transport", tp.Name(),
 		"model", c.ModelName,
+		"temperature", temperatureState,
 		"vault_dir", c.VaultDir,
 		"default_tier", c.DefaultTier,
 		"acl_db", c.ACLDB,

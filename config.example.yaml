@@ -23,6 +23,10 @@ serve:
   # OpenAI-compatible model endpoint. Any compatible gateway works.
   model-base-url: https://api.openai.com/v1
   model-name: gpt-4o-mini
+  # Sampling temperature of every model call. Unset leaves it to the provider's
+  # default. `replay run` writes it on every answer line, so one run per
+  # setting can be compared with `replay compare`.
+  # temperature: 0.2
 
   # Language pack (issue #65 / ADR 0018): selects the language whose prompt
   # guidance is layered into the system prompt (e.g. "answer in Persian"). Built-in

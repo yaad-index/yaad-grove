@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log/slog"
@@ -195,6 +196,7 @@ func TestReplayWriteError(t *testing.T) {
 // The comparison flags what changed, follows the newer run's order and keeps
 // questions only one run has.
 func TestCompare(t *testing.T) {
+	warm := 0.7
 	older := []replayAnswer{
 		{ID: "same", Label: "88cc0a5", Model: "m1", Question: "q same", Answer: "A", Calls: 1, MS: 10},
 		{ID: "flip", Question: "q flip", Answer: "B"},
@@ -203,7 +205,7 @@ func TestCompare(t *testing.T) {
 	}
 	newer := []replayAnswer{
 		{ID: "flip", Question: "q flip", Answer: "no", Refused: true, Reason: reasonModel, Calls: 1},
-		{ID: "same", Label: "9e7fac7", Model: "m1", Question: "q same", Answer: "A2", Calls: 3, MS: 20},
+		{ID: "same", Label: "9e7fac7", Model: "m1", Temperature: &warm, Question: "q same", Answer: "A2", Calls: 3, MS: 20},
 		{ID: "err", Question: "q err", Error: "boom"},
 		{ID: "empty", Question: "q empty", Answer: " "},
 	}
@@ -213,7 +215,7 @@ func TestCompare(t *testing.T) {
 
 	assert.True(t, strings.HasPrefix(s, "replay compare: 5 questions, 4 flagged; refusal changed 1; new error 1; new empty 1; only in old 1; only in new 1\nflagged: flip, err, empty, gone\n"), s)
 	assert.Contains(t, s, "## flip  [refusal changed: answered -> refused]\nquestion: q flip\n--- old (0 ms, 0 calls)\nB\n--- new (0 ms, 1 calls) refused (model)\nno\n")
-	assert.Contains(t, s, "## same\nquestion: q same\n--- old (88cc0a5, m1, 10 ms, 1 calls)\nA\n--- new (9e7fac7, m1, 20 ms, 3 calls)\nA2\n")
+	assert.Contains(t, s, "## same\nquestion: q same\n--- old (88cc0a5, m1, 10 ms, 1 calls)\nA\n--- new (9e7fac7, m1, temperature 0.7, 20 ms, 3 calls)\nA2\n")
 	assert.Contains(t, s, "## err  [new error]\nquestion: q err\n--- old (0 ms, 0 calls)\nC\n--- new (0 ms, 0 calls) error: boom\n")
 	assert.NotContains(t, s, "refusal changed: answered -> answered")
 	assert.Contains(t, s, "## empty  [only in new; new empty]\nquestion: q empty\n--- old: not asked\n")
@@ -252,6 +254,14 @@ func TestConfigLoaderReplayReadsServe(t *testing.T) {
 
 	cli = parse(t, serve+"replay:\n  run:\n    vault-dir: /other\n", "replay", "run", "--questions", q, "--out", "o.jsonl")
 	assert.Equal(t, "/other", cli.Replay.Answer.VaultDir, "a replay section of the file's own wins")
+
+	assert.Nil(t, parse(t, serve, "serve").Serve.Temperature, "unset by default")
+	cli = parse(t, serve+"  temperature: 0\n", "replay", "run", "--questions", q, "--out", "o.jsonl")
+	require.NotNil(t, cli.Replay.Answer.Temperature, "a zero temperature is set")
+	assert.Equal(t, 0.0, *cli.Replay.Answer.Temperature)
+	cli = parse(t, serve+"  temperature: 0\n", "replay", "run", "--questions", q, "--out", "o.jsonl", "--temperature", "0.7")
+	require.NotNil(t, cli.Replay.Answer.Temperature)
+	assert.Equal(t, 0.7, *cli.Replay.Answer.Temperature, "a flag still wins over the file")
 }
 
 // End to end: `replay run` builds serve's engine from the flags, asks the
@@ -261,10 +271,14 @@ func TestConfigLoaderReplayReadsServe(t *testing.T) {
 // bot's budget, and an existing output file is never overwritten.
 func TestReplayRunEndToEnd(t *testing.T) {
 	var requests int
+	var temperatures []any
 	var mu sync.Mutex
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
 		mu.Lock()
 		requests++
+		temperatures = append(temperatures, body["temperature"])
 		mu.Unlock()
 		w.Header().Set("Content-Type", "application/json")
 		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"the vault says hello"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
@@ -273,10 +287,11 @@ func TestReplayRunEndToEnd(t *testing.T) {
 
 	dir := t.TempDir()
 	out := filepath.Join(dir, "out.jsonl")
+	temp := 0.25
 	cmd := &ReplayRunCmd{
 		ServeCmd: ServeCmd{
 			VaultDir: tempVault(t), Scope: "notes", Language: "en", ModelBaseURL: srv.URL, ModelName: "m",
-			MaxOutputTokens: 100, SimilarityThreshold: 0.3, ContextSize: 8000,
+			MaxOutputTokens: 100, Temperature: &temp, SimilarityThreshold: 0.3, ContextSize: 8000,
 			SpendCeiling: 1000, SpendPeriod: time.Hour, BudgetDB: filepath.Join(dir, "budget.db"),
 			LongMemoryURL:  "http://unused.invalid",
 			RetrievalStore: storeBackendLadybug, StorePath: filepath.Join(dir, "index.ldb"),
@@ -292,9 +307,10 @@ func TestReplayRunEndToEnd(t *testing.T) {
 	got, err := readAnswers(out)
 	require.NoError(t, err)
 	require.Len(t, got, 2)
-	assert.Equal(t, replayAnswer{ID: "1", Label: "new", Model: "m", Question: "hello world", Answer: "the vault says hello", Calls: 1, MS: got[0].MS}, got[0])
-	assert.Equal(t, replayAnswer{ID: "2", Label: "new", Model: "m", Question: "zebra quantum", Answer: engineDecline, Refused: true, Reason: reasonNoCall, MS: got[1].MS}, got[1])
+	assert.Equal(t, replayAnswer{ID: "1", Label: "new", Model: "m", Temperature: &temp, Question: "hello world", Answer: "the vault says hello", Calls: 1, MS: got[0].MS}, got[0])
+	assert.Equal(t, replayAnswer{ID: "2", Label: "new", Model: "m", Temperature: &temp, Question: "zebra quantum", Answer: engineDecline, Refused: true, Reason: reasonNoCall, MS: got[1].MS}, got[1])
 	assert.Equal(t, 1, requests)
+	assert.Equal(t, []any{0.25}, temperatures, "the temperature reaches the model")
 	_, err = os.Stat(cmd.BudgetDB)
 	assert.ErrorIs(t, err, os.ErrNotExist, "a replay never opens the bot's budget")
 	_, err = os.Stat(filepath.Join(dir, "index.ldb"))
@@ -365,4 +381,27 @@ func TestReplayRecordingFails(t *testing.T) {
 	var out bytes.Buffer
 	require.ErrorContains(t, replay(context.Background(), e, []replayQuestion{{"1", "a"}}, &out, run, discard), "record 1")
 	assert.Empty(t, e.queries, "nothing is asked unrecorded")
+}
+
+// A negative temperature is refused before any question is asked.
+func TestReplayRunRefusesANegativeTemperature(t *testing.T) {
+	dir := t.TempDir()
+	temp := -0.5
+	cmd := &ReplayRunCmd{
+		ServeCmd: ServeCmd{
+			VaultDir: tempVault(t), Scope: "notes", Language: "en", ModelBaseURL: "http://unused.invalid", ModelName: "m",
+			MaxOutputTokens: 100, Temperature: &temp, SimilarityThreshold: 0.3, ContextSize: 8000,
+			SpendCeiling: 1000, SpendPeriod: time.Hour, BudgetDB: filepath.Join(dir, "budget.db"),
+		},
+		Questions: writeFile(t, "q.jsonl", `{"id":"1","query":"hello world"}`),
+		Out:       filepath.Join(dir, "out.jsonl"),
+		Timeout:   time.Minute,
+	}
+	t.Chdir(dir)
+	require.ErrorContains(t, cmd.Run(discard), "--temperature must not be negative")
+	got, err := readAnswers(cmd.Out)
+	if !errors.Is(err, os.ErrNotExist) {
+		require.NoError(t, err)
+	}
+	assert.Empty(t, got, "nothing was answered")
 }
