@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.1](https://github.com/yaad-index/yaad-grove/compare/v0.24.0...v0.24.1) (2026-10-06)
+
+
+### Bug Fixes
+
+* histogram buckets sized for seconds and token counts ([#229](https://github.com/yaad-index/yaad-grove/issues/229)) ([0024944](https://github.com/yaad-index/yaad-grove/commit/0024944dca4945fefc0bffdb39f0b097912b017f))
+
 ## [0.24.0](https://github.com/yaad-index/yaad-grove/compare/v0.23.0...v0.24.0) (2026-10-06)
 
 
