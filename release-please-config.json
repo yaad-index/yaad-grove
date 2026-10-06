@@ -4,6 +4,7 @@
   "packages": {
     ".": {
       "release-type": "go",
+      "bump-minor-pre-major": true,
       "package-name": "yaad-grove"
     }
   }
