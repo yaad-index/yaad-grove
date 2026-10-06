@@ -137,8 +137,10 @@ type Reply struct {
 	// Reaction is an emoji the transport attaches to the message that triggered
 	// this reply, rather than sending a new message — a Telegram setMessageReaction
 	// (CapReactions, ADR 0012). The runtime sets it for a reaction-mode consent
-	// nudge; empty leaves the reply a normal message. A transport without reactions
-	// never sees it: the runtime downgrades reaction-mode to text at wiring time.
+	// nudge, and alongside the text for a DM opt-in or opt-out that went through
+	// (#100); empty leaves the reply a normal message. A transport without
+	// reactions never sees it: at wiring time the runtime downgrades reaction-mode
+	// to text and leaves the consent acknowledgement empty.
 	Reaction string
 }
 

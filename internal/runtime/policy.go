@@ -42,6 +42,10 @@ type Policy struct {
 	// MemoryDerive is whether the memory service derives conclusions about users
 	// from their turns; the disclosure says so when it does.
 	MemoryDerive bool
+	// ConsentAck is the emoji the bot reacts with on a DM /consent or /consent
+	// remove that went through (#100), alongside the text reply. Empty means no
+	// reaction, as on a transport that cannot react.
+	ConsentAck string
 }
 
 // AdminSet is the configured admin allowlist (ADR 0012): a user is an admin iff
@@ -96,6 +100,9 @@ const (
 	// "let's connect" that doesn't add noise to the group. (Emoji is not localized;
 	// the message-mode text comes from the language pack — the "nudge" catalog key.)
 	DefaultNudgeEmoji = "🤝"
+	// DefaultConsentAckEmoji is the reaction on a DM opt-in or opt-out that went
+	// through. It must be one the transport accepts as a reaction.
+	DefaultConsentAckEmoji = "👍"
 )
 
 // resolve fills unset Mode/Emoji with the Phase-1 defaults, so a partial config

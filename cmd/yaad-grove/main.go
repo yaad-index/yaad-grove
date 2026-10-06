@@ -201,6 +201,8 @@ type ServeCmd struct {
 	NudgeEmoji string `name:"nudge-emoji" help:"Reaction-mode nudge emoji. Empty uses a sensible default (🤝)."`
 	// At most one nudge per user per window, across chats (ADR 0024).
 	NudgeCooldown time.Duration `name:"nudge-cooldown" default:"10m" help:"Nudge an unconsented user at most once per this window, across chats; their directed messages in between get no reply. 0 nudges every directed message."`
+	// The reaction on a DM /consent or /consent remove that went through (#100).
+	ConsentAckEmoji string `name:"consent-ack-emoji" help:"Emoji reaction on a DM /consent or /consent remove that went through, alongside the text reply. Empty uses a sensible default (👍)."`
 
 	// Conversation memory (ADR 0014): a per-conversation buffer of recent turns so
 	// the bot can answer follow-ups ("tldr", "what about X"). MemoryTurns is how
@@ -385,6 +387,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		log.Warn("nudge-mode 'reaction' unsupported by transport; using message-mode", "transport", tp.Name())
 		nudge.Mode = runtime.NudgeMessage
 	}
+	consentAck := consentAckEmoji(c.ConsentAckEmoji, tp.Supports(transport.CapReactions))
 	// Conversation memory (ADR 0014): an in-memory per-chat buffer of recent turns.
 	// MemoryTurns 0 disables it — the bot then answers each message in isolation.
 	convoMemory := memory.New(c.MemoryTurns)
@@ -400,6 +403,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 		FollowupWindow: c.FollowupWindow,
 		Strings:        strs,
 		Transcript:     tlog,
+		ConsentAck:     consentAck,
 	}
 	longMemory.withdrawal(&policy, c.LongMemoryDerive)
 
@@ -798,6 +802,20 @@ func splitTools(csv string) []string {
 		}
 	}
 	return out
+}
+
+// consentAckEmoji is the reaction on a DM opt-in or opt-out that went through
+// (#100): the configured emoji, or the default when none is set. The
+// acknowledgement is a reaction only, so a transport that cannot react gets none
+// and the text reply carries the confirmation.
+func consentAckEmoji(configured string, canReact bool) string {
+	if !canReact {
+		return ""
+	}
+	if configured == "" {
+		return runtime.DefaultConsentAckEmoji
+	}
+	return configured
 }
 
 // VersionCmd prints the build version.

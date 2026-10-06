@@ -120,6 +120,11 @@ serve:
   # messages inside the window get no reply. 0 nudges every directed message.
   nudge-cooldown: 10m
 
+  # The reaction on a DM /consent or /consent remove that went through, alongside
+  # the text reply. Empty uses 👍. It must be an emoji the platform accepts as a
+  # reaction; a transport without reactions gets none.
+  consent-ack-emoji: ""
+
 # --- Planned config (Phase 1 build; not yet read by the scaffold) ---
 #
 # tools:                 # external MCP servers whose tools this bot may call
