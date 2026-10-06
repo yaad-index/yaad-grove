@@ -32,6 +32,17 @@ serve:
   # terms. An external directory can add/override packs beyond the embedded ones.
   # language: fa
   # langpacks-dir: /etc/yaad-grove/langpacks
+  #
+  # The pack's `strings` hold every message the bot sends on its own: the DM
+  # consent flow (disclosure, opt-in button caption, granted / already / removed
+  # replies), the nudge, and the rate-limit and error replies. To change any of
+  # them, put a <language>.yaml in langpacks-dir that sets only those keys; every
+  # key it leaves out keeps the built-in text. The keys are the ones in
+  # langpacks/en.yaml. For example, /etc/yaad-grove/langpacks/en.yaml:
+  #
+  #   strings:
+  #     consent_opt_in_label: "Count me in"
+  #     consent_granted: "You're in. Send `/consent remove` to leave."
 
   # Retrieval mode (issue #65): how lexical + semantic retrieval combine.
   #   keyword  — lexical only (the zero-config default when no embeddings are set)
@@ -87,6 +98,27 @@ serve:
   # validated writable at startup.
   transcript-log: ""
 
+  # Admins (ADR 0012): platform user ids whose DMs the bot answers. This is a DM
+  # privilege only: in a group an admin is consent-gated like anyone else. With
+  # no admins, a DM is consent management only, for everyone.
+  # admin: ["<platform-user-id>"]
+
+  # The consent nudge (ADR 0012): what an unconsented user gets when they direct a
+  # message at the bot in a group (a reply to the bot or a mention). It never
+  # answers them and records nothing they said.
+  #   message  — a text reply with the opt-in instruction (the default)
+  #   reaction — an emoji reaction on their message; falls back to message on a
+  #              transport without reactions
+  nudge-mode: message
+  # Message-mode text. Empty uses the language pack's `nudge` string; set here,
+  # it replaces that string in every language.
+  nudge-text: ""
+  # Reaction-mode emoji. Empty uses 🤝.
+  nudge-emoji: ""
+  # At most one nudge per user per window, across chats (ADR 0024); their directed
+  # messages inside the window get no reply. 0 nudges every directed message.
+  nudge-cooldown: 10m
+
 # --- Planned config (Phase 1 build; not yet read by the scaffold) ---
 #
 # tools:                 # external MCP servers whose tools this bot may call
@@ -102,5 +134,3 @@ serve:
 # default) OR a deny-list (subtractive) per server, not both.
 #   mcp-allow: ["example=search,lookup"]     # expose ONLY these
 #   mcp-deny:  ["example=write_thing"]        # expose all EXCEPT these
-#
-# admins: ["<platform-user-id>"]         # who may configure the bot live
