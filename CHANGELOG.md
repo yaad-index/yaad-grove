@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.24.0](https://github.com/yaad-index/yaad-grove/compare/v0.23.0...v0.24.0) (2026-10-06)
+
+
+### Features
+
+* export traces and metrics over OTLP ([#225](https://github.com/yaad-index/yaad-grove/issues/225)) ([c783bd2](https://github.com/yaad-index/yaad-grove/commit/c783bd27dd9f31c1723de56e51b2693363bf12f8))
+* grove's own metrics ([#226](https://github.com/yaad-index/yaad-grove/issues/226)) ([7f06747](https://github.com/yaad-index/yaad-grove/commit/7f06747b23de9acbe3cb402be157345b5a68a39a))
+* optional sampling temperature for model calls ([#223](https://github.com/yaad-index/yaad-grove/issues/223)) ([8ea1947](https://github.com/yaad-index/yaad-grove/commit/8ea1947db0ba432ae2dc27132a06e7ba1da238ac))
+
 ## [0.23.0](https://github.com/yaad-index/yaad-grove/compare/v0.22.2...v0.23.0) (2026-10-06)
 
 
