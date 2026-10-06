@@ -334,7 +334,7 @@ func (c *ServeCmd) Run(log *slog.Logger) error {
 	}
 	engine, registry, kbStore, toolset, persona, pack, servers := a.engine, a.registry, a.kbStore, a.toolset, a.persona, a.pack, a.servers
 
-	// The gate stacks surface-reach -> rate-limit -> consent -> serve (ADR
+	// The gate stacks surface-reach -> consent -> rate-limit -> serve (ADR
 	// 0002/0003/0007) over a persisted ACL store.
 	aclStore, err := acl.OpenBolt(c.ACLDB)
 	if err != nil {
