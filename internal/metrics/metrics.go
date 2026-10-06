@@ -68,6 +68,20 @@ type Metrics struct {
 	meter           metric.Meter
 }
 
+// The bucket boundaries of grove's histograms. The SDK's default ones (0, 5,
+// 10, 25 ...) are sized for milliseconds and would put nearly every duration
+// in seconds into one bucket.
+var (
+	// DurationBuckets are the GenAI conventions' advised boundaries for a
+	// duration in seconds, 10ms to about 82s.
+	DurationBuckets = []float64{0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96, 81.92}
+	// TokenBuckets are the GenAI conventions' advised boundaries for a token
+	// count.
+	TokenBuckets = []float64{1, 4, 16, 64, 256, 1024, 4096, 16384, 65536, 262144, 1048576, 4194304, 16777216, 67108864}
+	// ChunkBuckets bound the chunks an answer is given.
+	ChunkBuckets = []float64{1, 2, 4, 8, 16, 32, 64}
+)
+
 // New returns Metrics recording through mp.
 func New(mp metric.MeterProvider) (*Metrics, error) {
 	m := mp.Meter(scope)
@@ -77,25 +91,25 @@ func New(mp metric.MeterProvider) (*Metrics, error) {
 		return nil, err
 	}
 	answerDuration, err := m.Float64Histogram(metricAnswerDuration, metric.WithUnit("s"),
-		metric.WithDescription("From taking a question to its reply being ready."))
+		metric.WithDescription("From taking a question to its reply being ready."), metric.WithExplicitBucketBoundaries(DurationBuckets...))
 	if err != nil {
 		return nil, err
 	}
 	retrievalTime, err := m.Float64Histogram(metricRetrievalTime, metric.WithUnit("s"),
-		metric.WithDescription("How long retrieving a question's vault chunks took."))
+		metric.WithDescription("How long retrieving a question's vault chunks took."), metric.WithExplicitBucketBoundaries(DurationBuckets...))
 	if err != nil {
 		return nil, err
 	}
 	retrievalChunks, err := m.Int64Histogram(metricRetrievalChunks, metric.WithUnit("{chunk}"),
-		metric.WithDescription("The vault chunks a question's answer was given, after the context-size guard."))
+		metric.WithDescription("The vault chunks a question's answer was given, after the context-size guard."), metric.WithExplicitBucketBoundaries(ChunkBuckets...))
 	if err != nil {
 		return nil, err
 	}
-	embedDuration, err := genaiconv.NewClientOperationDuration(m)
+	embedDuration, err := genaiconv.NewClientOperationDuration(m, metric.WithExplicitBucketBoundaries(DurationBuckets...))
 	if err != nil {
 		return nil, err
 	}
-	embedTokens, err := genaiconv.NewClientTokenUsage(m)
+	embedTokens, err := genaiconv.NewClientTokenUsage(m, metric.WithExplicitBucketBoundaries(TokenBuckets...))
 	if err != nil {
 		return nil, err
 	}

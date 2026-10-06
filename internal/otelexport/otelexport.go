@@ -22,6 +22,8 @@ import (
 	semconv "go.opentelemetry.io/otel/semconv/v1.41.0"
 	"go.opentelemetry.io/otel/trace"
 	tracenoop "go.opentelemetry.io/otel/trace/noop"
+
+	"github.com/yaad-index/yaad-grove/internal/metrics"
 )
 
 // Exporter holds the providers spans and metrics are made with, and sends
@@ -78,7 +80,7 @@ func Setup(ctx context.Context, service, version string) (*Exporter, error) {
 			_ = e.Shutdown(ctx)
 			return nil, err
 		}
-		mp := sdkmetric.NewMeterProvider(sdkmetric.WithReader(sdkmetric.NewPeriodicReader(exp)), sdkmetric.WithResource(res))
+		mp := NewMeterProvider(sdkmetric.NewPeriodicReader(exp), sdkmetric.WithResource(res))
 		e.MeterProvider = mp
 		e.shutdown = append(e.shutdown, mp.Shutdown)
 	}
@@ -143,4 +145,24 @@ func metricExporter(ctx context.Context) (sdkmetric.Exporter, error) {
 		return otlpmetricgrpc.New(ctx)
 	}
 	return otlpmetrichttp.New(ctx)
+}
+
+// NewMeterProvider returns a meter provider reading through r, with the
+// GenAI conventions' advised bucket boundaries on the two GenAI histograms.
+// The agent library creates its model-call instruments without boundaries,
+// so the SDK's millisecond-sized defaults would apply; grove's own
+// instruments set theirs at creation (internal/metrics).
+func NewMeterProvider(r sdkmetric.Reader, opts ...sdkmetric.Option) *sdkmetric.MeterProvider {
+	opts = append([]sdkmetric.Option{
+		sdkmetric.WithReader(r),
+		sdkmetric.WithView(buckets("gen_ai.client.operation.duration", metrics.DurationBuckets)),
+		sdkmetric.WithView(buckets("gen_ai.client.token.usage", metrics.TokenBuckets)),
+	}, opts...)
+	return sdkmetric.NewMeterProvider(opts...)
+}
+
+// buckets is a view giving the histogram named name the boundaries b.
+func buckets(name string, b []float64) sdkmetric.View {
+	return sdkmetric.NewView(sdkmetric.Instrument{Name: name, Kind: sdkmetric.InstrumentKindHistogram},
+		sdkmetric.Stream{Aggregation: sdkmetric.AggregationExplicitBucketHistogram{Boundaries: b}})
 }
