@@ -69,9 +69,9 @@ jobs:
         with:
           go-version-file: go.mod
 
-      - name: Download LadybugDB library
-        # Pinned release, checked against its SHA-256 (#213).
-        run: scripts/fetch-liblbug.sh "$PWD/lib-ladybug"
+      - name: Download LadybugDB library and extensions
+        # Pinned releases, each checked against its SHA-256 (#213, #215).
+        run: scripts/fetch-liblbug.sh "$PWD/lib-ladybug" "$HOME"
 
       - name: Build + test (ladybug tag)
         env:
@@ -82,3 +82,8 @@ jobs:
           export CGO_LDFLAGS="-L$LIB -lstdc++ -lm -Wl,-rpath,$LIB"
           go build -tags "ladybug system_ladybug" ./...
           go test -tags "ladybug system_ladybug" ./internal/store/...
+
+      - name: Check no extension was installed
+        # The tests LOAD the pinned extensions; a changed or extra file under
+        # ~/.lbdb means one was INSTALLed from the network instead (#215).
+        run: scripts/fetch-liblbug.sh --check "$HOME"
