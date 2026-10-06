@@ -105,7 +105,8 @@ serve:
 
   # The consent nudge (ADR 0012): what an unconsented user gets when they direct a
   # message at the bot in a group (a reply to the bot or a mention). It never
-  # answers them and records nothing they said.
+  # answers them and records nothing they said. A user who opted out with
+  # /consent remove is not nudged at all (ADR 0025).
   #   message  — a text reply with the opt-in instruction (the default)
   #   reaction — an emoji reaction on their message; falls back to message on a
   #              transport without reactions

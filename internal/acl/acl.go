@@ -13,7 +13,8 @@
 //     directed message from an unconsented user draws a consent nudge, ambient
 //     chatter from a consented user is logged silently, and ambient chatter from
 //     an unconsented user is ignored. Only directed messages ever draw a reply,
-//     so a nudge cannot flood the group.
+//     so a nudge cannot flood the group. A user who declined is never nudged
+//     (ADR 0025).
 //   - The DM surface is routed by the runtime, not here: an admin DM is answered
 //     by the engine, a non-admin DM is consent management only. Admins are a
 //     config allowlist (a DM-surface privilege), so this gate never sees them.
@@ -42,13 +43,14 @@ const (
 
 // Consent is a user's recorded answer to the consent prompt. The zero value is
 // ConsentUnknown: not yet answered, treated as "no consent" (answer nothing,
-// keep prompting), never as an implied yes.
+// nudge when addressed), never as an implied yes. ConsentDeclined is an explicit
+// no, recorded by a withdrawal (ADR 0025): no consent, and no nudge.
 type Consent int
 
 const (
 	ConsentUnknown  Consent = iota // never answered — default, no consent
 	ConsentGranted                 // opted in; answering + logging enabled
-	ConsentDeclined                // explicitly declined
+	ConsentDeclined                // explicitly declined (a withdrawal) — never nudged
 )
 
 // Record is the minimal persistent per-user row. It deliberately holds no
@@ -94,8 +96,10 @@ const (
 	// DecideRateLimited: consented and directed but over the user's rate allowance
 	// — a polite "try again shortly".
 	DecideRateLimited
-	// DecideSilent: unconsented ambient chatter — reply nothing and log nothing
-	// (ADR 0012). The transport renders this as no reply.
+	// DecideSilent: reply nothing and log nothing — unconsented ambient chatter
+	// (ADR 0012), a directed message inside the nudge cooldown (ADR 0024), and
+	// every message from a user who declined (ADR 0025). The transport renders
+	// this as no reply.
 	DecideSilent
 )
 
@@ -219,9 +223,13 @@ func (g *Gate) Check(ctx context.Context, in GateInput) (Decision, error) {
 	}
 
 	// Consent gate (ADR 0012): consent is granted only via the DM flow, never
-	// inferred here. An unconsented user is nudged when they direct a message at
-	// the bot, at most once per cooldown (ADR 0024), and ignored otherwise.
-	// Nothing unconsented is recorded.
+	// inferred here. A user who declined is never nudged (ADR 0025); any other
+	// unconsented user is nudged when they direct a message at the bot, at most
+	// once per cooldown (ADR 0024), and ignored otherwise. Nothing unconsented is
+	// recorded.
+	if rec.Consent == ConsentDeclined {
+		return DecideSilent, nil
+	}
 	if rec.Consent != ConsentGranted {
 		if in.Directed {
 			return g.nudge(in.User.ID), nil
