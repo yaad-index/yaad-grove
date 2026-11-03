@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.25.0](https://github.com/yaad-index/yaad-grove/compare/v0.24.3...v0.25.0) (2026-11-03)
+
+
+### Features
+
+* **retrieval:** fuse each hybrid leg's deeper list before capping ([#247](https://github.com/yaad-index/yaad-grove/issues/247)) ([de459f2](https://github.com/yaad-index/yaad-grove/commit/de459f2768fb32c605527e03d7a1e1ca911307c1))
+
 ## [0.24.3](https://github.com/yaad-index/yaad-grove/compare/v0.24.2...v0.24.3) (2026-11-03)
 
 
