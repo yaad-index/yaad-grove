@@ -44,20 +44,43 @@ func TestReadQuestions(t *testing.T) {
 `)
 	qs, err := readQuestions(path)
 	require.NoError(t, err)
-	assert.Equal(t, []replayQuestion{{"q1", "سلام"}, {"q1@en", "hello"}, {"q2", "only one"}}, qs)
+	assert.Equal(t, []replayQuestion{{ID: "q1", Text: "سلام"}, {ID: "q1@en", Text: "hello"}, {ID: "q2", Text: "only one"}}, qs)
+}
+
+// A reply_to names the earlier question a question replies to; its query_en
+// replies to the earlier question's, when there is one.
+func TestReadQuestionsReplyTo(t *testing.T) {
+	path := writeFile(t, "q.jsonl", `{"id":"q1","query":"a","query_en":"a-en"}
+{"id":"q2","query":"b","query_en":"b-en","reply_to":"q1"}
+{"id":"q3","query":"c","query_en":"c-en","reply_to":"q2@en"}
+{"id":"q4","query":"d"}
+{"id":"q5","query":"e","query_en":"e-en","reply_to":"q4"}
+`)
+	qs, err := readQuestions(path)
+	require.NoError(t, err)
+	assert.Equal(t, []replayQuestion{
+		{ID: "q1", Text: "a"}, {ID: "q1@en", Text: "a-en"},
+		{ID: "q2", Text: "b", ReplyTo: "q1"}, {ID: "q2@en", Text: "b-en", ReplyTo: "q1@en"},
+		{ID: "q3", Text: "c", ReplyTo: "q2@en"}, {ID: "q3@en", Text: "c-en", ReplyTo: "q2@en"},
+		{ID: "q4", Text: "d"},
+		{ID: "q5", Text: "e", ReplyTo: "q4"}, {ID: "q5@en", Text: "e-en", ReplyTo: "q4"},
+	}, qs)
 }
 
 // A file a comparison could not join by id, or one with nothing to ask, is
 // refused before anything is spent.
 func TestReadQuestionsErrors(t *testing.T) {
 	cases := map[string]string{
-		"repeated id":     `{"id":"q1","query":"a"}` + "\n" + `{"id":"q1","query":"b"}`,
-		"repeated by @en": `{"id":"q1","query":"a","query_en":"b"}` + "\n" + `{"id":"q1@en","query":"c"}`,
-		"@en repeats":     `{"id":"q1@en","query":"a"}` + "\n" + `{"id":"q1","query":"b","query_en":"c"}`,
-		"no id":           `{"query":"a"}`,
-		"no query":        `{"id":"q1","query":"  "}`,
-		"not json":        `{"id":`,
-		"empty":           "\n\n",
+		"repeated id":      `{"id":"q1","query":"a"}` + "\n" + `{"id":"q1","query":"b"}`,
+		"repeated by @en":  `{"id":"q1","query":"a","query_en":"b"}` + "\n" + `{"id":"q1@en","query":"c"}`,
+		"@en repeats":      `{"id":"q1@en","query":"a"}` + "\n" + `{"id":"q1","query":"b","query_en":"c"}`,
+		"no id":            `{"query":"a"}`,
+		"no query":         `{"id":"q1","query":"  "}`,
+		"not json":         `{"id":`,
+		"empty":            "\n\n",
+		"unknown reply_to": `{"id":"q1","query":"a","reply_to":"q9"}`,
+		"later reply_to":   `{"id":"q1","query":"a","reply_to":"q2"}` + "\n" + `{"id":"q2","query":"b"}`,
+		"own reply_to":     `{"id":"q1","query":"a","reply_to":"q1"}`,
 	}
 	for name, body := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -111,7 +134,7 @@ func TestReplay(t *testing.T) {
 		calls:   map[string]int64{"a": 2, "b": 1, "c": 1, "cap": 5},
 		counter: &counter,
 	}
-	qs := []replayQuestion{{"1", "a"}, {"2", "b"}, {"3", "c"}, {"4", "slow"}, {"5", "a"}, {"6", "none"}, {"7", "cap"}}
+	qs := []replayQuestion{{ID: "1", Text: "a"}, {ID: "2", Text: "b"}, {ID: "3", Text: "c"}, {ID: "4", Text: "slow"}, {ID: "5", Text: "a"}, {ID: "6", Text: "none"}, {ID: "7", Text: "cap"}}
 	var out bytes.Buffer
 	run := replayRun{Label: "new", Model: "m1", Timeout: 50 * time.Millisecond, Calls: &counter}
 	require.NoError(t, replay(context.Background(), e, qs, &out, run, discard))
@@ -136,6 +159,30 @@ func TestReplay(t *testing.T) {
 	}
 }
 
+// A question with a reply_to is asked as a reply quoting the earlier
+// question's answer, and its line names the question it replied to. A reply
+// to a question that failed quotes nothing.
+func TestReplayAsksAReplyToAnEarlierAnswer(t *testing.T) {
+	e := &fakeEngine{
+		replies: map[string]core.Reply{"a": {Text: "answer a"}, "b": {Text: "answer b"}, "d": {Text: "answer d"}},
+		errs:    map[string]error{"c": errors.New("model down")},
+	}
+	qs := []replayQuestion{{ID: "1", Text: "a"}, {ID: "2", Text: "b", ReplyTo: "1"}, {ID: "3", Text: "c"}, {ID: "4", Text: "d", ReplyTo: "3"}}
+	var out bytes.Buffer
+	require.NoError(t, replay(context.Background(), e, qs, &out, replayRun{Timeout: time.Minute}, discard))
+
+	base := core.Query{User: core.User{ID: replayUser}, Surface: core.SurfaceGroup}
+	want := []core.Query{base, base, base, base}
+	want[0].Text, want[1].Text, want[2].Text, want[3].Text = "a", "b", "c", "d"
+	want[1].ReplyContext = "answer a"
+	assert.Equal(t, want, e.queries)
+
+	got, err := readAnswers(writeFile(t, "out.jsonl", out.String()))
+	require.NoError(t, err)
+	require.Len(t, got, 4)
+	assert.Equal(t, []string{"", "1", "", "3"}, []string{got[0].ReplyTo, got[1].ReplyTo, got[2].ReplyTo, got[3].ReplyTo})
+}
+
 // Ending the run's context stops it after the question in flight, keeping
 // what was already written.
 func TestReplayStops(t *testing.T) {
@@ -154,7 +201,7 @@ func TestReplayStops(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	err := replay(ctx, e, []replayQuestion{{"1", "a"}, {"2", "slow"}, {"3", "a"}}, &out, replayRun{Timeout: time.Minute}, discard)
+	err := replay(ctx, e, []replayQuestion{{ID: "1", Text: "a"}, {ID: "2", Text: "slow"}, {ID: "3", Text: "a"}}, &out, replayRun{Timeout: time.Minute}, discard)
 	require.ErrorIs(t, err, context.Canceled)
 	assert.Equal(t, 1, strings.Count(out.String(), "\n"), "the finished question is kept, the interrupted one is not written")
 	assert.Len(t, e.queries, 2, "nothing is asked after the stop")
@@ -175,7 +222,7 @@ func TestReplayStoppedBeforeStart(t *testing.T) {
 	cancel()
 	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
 	var out bytes.Buffer
-	require.ErrorIs(t, replay(ctx, e, []replayQuestion{{"1", "a"}}, &out, replayRun{Timeout: time.Minute}, discard), context.Canceled)
+	require.ErrorIs(t, replay(ctx, e, []replayQuestion{{ID: "1", Text: "a"}}, &out, replayRun{Timeout: time.Minute}, discard), context.Canceled)
 	assert.Empty(t, e.queries)
 	assert.Empty(t, out.String())
 }
@@ -188,7 +235,7 @@ func (failWriter) Write([]byte) (int, error) { return 0, errors.New("disk full")
 // A failed write stops the run, since what it answers would be lost.
 func TestReplayWriteError(t *testing.T) {
 	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
-	err := replay(context.Background(), e, []replayQuestion{{"1", "a"}, {"2", "a"}}, failWriter{}, replayRun{Timeout: time.Minute}, discard)
+	err := replay(context.Background(), e, []replayQuestion{{ID: "1", Text: "a"}, {ID: "2", Text: "a"}}, failWriter{}, replayRun{Timeout: time.Minute}, discard)
 	require.ErrorContains(t, err, "disk full")
 	assert.Len(t, e.queries, 1)
 }
@@ -320,6 +367,56 @@ func TestReplayRunEndToEnd(t *testing.T) {
 	assert.Equal(t, 1, requests)
 }
 
+// The two-turn case of #240, end to end over a real vault and keyword
+// retrieval: a follow-up that does not name its subject, asked as a reply to
+// the answer that does, is grounded on the subject's note. The same follow-up
+// asked standalone is the control: its own words reach only an unrelated note,
+// so the fixture tells the two apart.
+func TestReplayFollowUpRetrievesTheSubject(t *testing.T) {
+	const subject = "The track-laying auction drew the most praise"
+	var bodies []string
+	var mu sync.Mutex
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		mu.Lock()
+		bodies = append(bodies, string(b))
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"Episodes 1 and 2 review Acme Rail."},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	}))
+	defer srv.Close()
+
+	vault := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(vault, "acme-rail.md"), []byte("# Acme Rail\nEpisodes 1 and 2 review Acme Rail. "+subject+".\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(vault, "widget-wars.md"), []byte("# Widget Wars\nCan the hosts summarise what they said? They said little.\n"), 0o600))
+	dir := t.TempDir()
+	cmd := &ReplayRunCmd{
+		ServeCmd: ServeCmd{
+			VaultDir: vault, Scope: "board games", Language: "en", ModelBaseURL: srv.URL, ModelName: "m",
+			MaxOutputTokens: 100, SimilarityThreshold: 0.3, ContextSize: 8000,
+			SpendCeiling: 1000, SpendPeriod: time.Hour, BudgetDB: filepath.Join(dir, "budget.db"),
+		},
+		Questions: writeFile(t, "q.jsonl", `{"id":"ask","query":"Which episodes mention Acme Rail?"}
+{"id":"follow","query":"Can you summarise what they said about it?","reply_to":"ask"}
+{"id":"alone","query":"Can you summarise what they said about it?"}
+`),
+		Out:     filepath.Join(dir, "out.jsonl"),
+		Timeout: time.Minute,
+	}
+	t.Chdir(dir)
+	require.NoError(t, cmd.Run(discard))
+
+	got, err := readAnswers(cmd.Out)
+	require.NoError(t, err)
+	require.Len(t, got, 3)
+	assert.Equal(t, "ask", got[1].ReplyTo)
+	require.Len(t, bodies, 3)
+	assert.Contains(t, bodies[0], subject, "the question naming the subject retrieves its note")
+	assert.Contains(t, bodies[1], subject, "the follow-up replying to it does too")
+	assert.NotContains(t, bodies[2], subject, "the same words alone do not: the fixture tells the two apart")
+	assert.Contains(t, bodies[2], "They said little", "they reach the unrelated note")
+}
+
 // With --record-dir every question's run is recorded to a file of its own,
 // named on its line, holding the model's answer and scrubbed of every secret
 // the process holds, even one the question itself carries.
@@ -368,7 +465,7 @@ func TestReplayRunRecords(t *testing.T) {
 func TestReplayWithoutRecording(t *testing.T) {
 	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
 	var out bytes.Buffer
-	require.NoError(t, replay(context.Background(), e, []replayQuestion{{"1", "a"}}, &out, replayRun{Timeout: time.Minute}, discard))
+	require.NoError(t, replay(context.Background(), e, []replayQuestion{{ID: "1", Text: "a"}}, &out, replayRun{Timeout: time.Minute}, discard))
 	assert.NotContains(t, out.String(), "recording")
 }
 
@@ -379,7 +476,7 @@ func TestReplayRecordingFails(t *testing.T) {
 	e := &fakeEngine{replies: map[string]core.Reply{"a": {Text: "x"}}}
 	run := replayRun{Timeout: time.Minute, Record: &replayRecorder{dir: notADir, scrub: secret.NewResolver(secret.Env{}).Scrubber()}}
 	var out bytes.Buffer
-	require.ErrorContains(t, replay(context.Background(), e, []replayQuestion{{"1", "a"}}, &out, run, discard), "record 1")
+	require.ErrorContains(t, replay(context.Background(), e, []replayQuestion{{ID: "1", Text: "a"}}, &out, run, discard), "record 1")
 	assert.Empty(t, e.queries, "nothing is asked unrecorded")
 }
 

@@ -185,7 +185,10 @@ keeps the question file's text, so give it no real people's messages. `serve`
 never records.
 
 A question line is `{"id": "q1", "query": "…"}`; an optional `query_en` is
-asked too, as `q1@en`. Other fields are ignored.
+asked too, as `q1@en`. An optional `reply_to` names a question on an earlier
+line: the question is then asked as a reply to that question's answer, as a
+follow-up is (`q1@en` replies to the earlier question's `@en` when there is
+one). Other fields are ignored.
 
 ## Releases
 

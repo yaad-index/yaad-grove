@@ -383,6 +383,56 @@ func parseRefusal(text string) (reply string, refused bool) {
 	return text, false
 }
 
+// Where a retrieval query's text came from, for the grounding trace (#240).
+const (
+	querySourceMessage = "message"
+	querySourceReply   = "message+reply"
+	querySourceHistory = "message+history"
+)
+
+// retrievalQuery is the text retrieval runs on, and where it came from (#240).
+// A follow-up often does not name its subject ("what did they say about it?"),
+// so the message alone retrieves unrelated chunks. A reply adds the message it
+// replies to, which the asker pointed at; otherwise injected history adds the
+// previous exchange: the last turn and, when that is the bot's answer, the
+// person's turn before it. A query with neither is the message alone, as it
+// always was. Both keyword stores score any matching term, so the added text
+// widens what can match rather than narrowing it. No model call is made.
+//
+// The added text is joined on single spaces with every whitespace run
+// collapsed: a bot answer is multi-line, and the ladybug full-text index does
+// not split a word at a tab or a carriage return, so "what\tabout" would
+// match neither word.
+func retrievalQuery(q Query) (string, string) {
+	if q.ReplyContext != "" {
+		return words(q.Text, q.ReplyContext), querySourceReply
+	}
+	if len(q.History) == 0 {
+		return q.Text, querySourceMessage
+	}
+	last := len(q.History) - 1
+	from := last
+	if q.History[last].Bot {
+		for i := last - 1; i >= 0; i-- {
+			if !q.History[i].Bot {
+				from = i
+				break
+			}
+		}
+	}
+	parts := []string{q.Text}
+	if from != last {
+		parts = append(parts, q.History[from].Text)
+	}
+	parts = append(parts, q.History[last].Text)
+	return words(parts...), querySourceHistory
+}
+
+// words joins texts on single spaces, collapsing every whitespace run.
+func words(texts ...string) string {
+	return strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
+}
+
 // maxToolIterations caps the tool-call loop: the model may call tools up to this
 // many rounds before Answer gives up and refuses. It bounds a stuck or looping
 // model; the spend ceiling (ADR 0006) is the cost backstop across the rounds.
@@ -407,7 +457,8 @@ const maxToolIterations = 5
 // metered chat-model decorator (ADR 0006/0008) and the consent gate runs ahead of
 // Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
-	chunks, err := e.retriever.Retrieve(ctx, q.Text)
+	query, querySource := retrievalQuery(q)
+	chunks, err := e.retriever.Retrieve(ctx, query)
 	if err != nil {
 		return Reply{}, err
 	}
@@ -436,7 +487,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	// answer are recorded here instead — model-independent, straight from the
 	// retrieved chunks.
 	if len(chunks) > 0 {
-		slog.Info("grounding sources", "count", len(chunks), "sources", chunkSources(chunks))
+		slog.Info("grounding sources", "count", len(chunks), "sources", chunkSources(chunks), "query_source", querySource)
 	}
 	var tools []bmodel.ToolDef
 	if e.tools != nil {
