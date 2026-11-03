@@ -1,11 +1,13 @@
 package core_test
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -425,6 +427,60 @@ func TestAnswerWithHistoryReachesModel(t *testing.T) {
 	assert.Equal(t, 1, mdl.calls)
 	assert.False(t, reply.Refused)
 	assert.Contains(t, systemOf(mdl), "MAY summarize")
+}
+
+// queryRetriever records the query it is asked and returns chunks.
+type queryRetriever struct {
+	queries []string
+	chunks  []core.Chunk
+}
+
+func (r *queryRetriever) Retrieve(_ context.Context, query string) ([]core.Chunk, error) {
+	r.queries = append(r.queries, query)
+	return r.chunks, nil
+}
+
+// Retrieval runs on the message plus what it follows up on (#240): a reply adds
+// the replied-to message, otherwise history adds the previous exchange, the
+// bot's last answer and the person's turn before it. A standalone message is
+// retrieved on exactly its own text, and the grounding trace names the source.
+func TestTheRetrievalQueryIncludesWhatAFollowUpFollows(t *testing.T) {
+	now := time.Now()
+	exchange := []core.HistoryTurn{
+		{Speaker: "dana", Text: "an older turn", Time: now},
+		{Speaker: "erin", Text: "Which episodes mention Acme Rail?", Time: now},
+		{Bot: true, Text: "Episodes 1 and 2 review Acme Rail.", Time: now},
+	}
+	cases := []struct {
+		name   string
+		q      core.Query
+		query  string
+		source string
+	}{
+		{"standalone", core.Query{Text: "Which episodes mention Acme Rail?"},
+			"Which episodes mention Acme Rail?", "message"},
+		{"reply", core.Query{Text: "what did they say about it?", ReplyContext: "assistant: Episodes 1 and 2 review Acme Rail.", History: exchange},
+			"what did they say about it?\nassistant: Episodes 1 and 2 review Acme Rail.", "message+reply"},
+		{"history ending in the bot's answer", core.Query{Text: "what did they say about it?", History: exchange},
+			"what did they say about it?\nWhich episodes mention Acme Rail?\nEpisodes 1 and 2 review Acme Rail.", "message+history"},
+		{"history ending in a person's turn", core.Query{Text: "and the second one?", History: exchange[:2]},
+			"and the second one?\nWhich episodes mention Acme Rail?", "message+history"},
+		{"history of the bot alone", core.Query{Text: "tldr", History: exchange[2:]},
+			"tldr\nEpisodes 1 and 2 review Acme Rail.", "message+history"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var buf bytes.Buffer
+			prev := slog.Default()
+			slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+			t.Cleanup(func() { slog.SetDefault(prev) })
+			ret := &queryRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
+			_, err := newEngine(textModel("ok"), ret, nil, "SCOPE").Answer(context.Background(), tc.q)
+			require.NoError(t, err)
+			assert.Equal(t, []string{tc.query}, ret.queries)
+			assert.Contains(t, buf.String(), "query_source="+tc.source)
+		})
+	}
 }
 
 // A sentinel-led decline is a refusal and the persona-voiced note is shown.

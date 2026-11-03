@@ -35,14 +35,15 @@ type ReplayCmd struct {
 	Compare ReplayCompareCmd `cmd:"" help:"Print two runs side by side, flagging changed refusals, errors and empty answers."`
 }
 
-// ReplayRunCmd answers each question once, standalone: no history, no reply,
-// no asker, no consent gate and no long-term memory. It takes serve's flags,
-// and reads serve's section of the configuration file, so it answers with the
+// ReplayRunCmd answers each question once, with no history, no asker, no
+// consent gate and no long-term memory, and as a reply only when the question
+// names an earlier one with reply_to. It takes serve's flags, and reads
+// serve's section of the configuration file, so it answers with the
 // deployment's model, prompt and tools.
 type ReplayRunCmd struct {
 	ServeCmd `embed:""`
 
-	Questions string        `name:"questions" required:"" type:"existingfile" help:"Questions as JSON lines, each with an id and a query; a query_en, when present, is asked too, as <id>@en."`
+	Questions string        `name:"questions" required:"" type:"existingfile" help:"Questions as JSON lines, each with an id and a query; a query_en, when present, is asked too, as <id>@en. A reply_to names an earlier question, whose answer the question is asked as a reply to."`
 	Out       string        `name:"out" required:"" type:"path" help:"File the answers are written to, one JSON line each. It must not exist yet."`
 	Timeout   time.Duration `name:"timeout" default:"3m" help:"Longest one question may take before it is recorded as an error."`
 	Label     string        `name:"label" help:"Which side of a comparison this run is (e.g. the build's commit), written on every line."`
@@ -52,10 +53,12 @@ type ReplayRunCmd struct {
 // replayUser is the user every replayed question is asked as.
 const replayUser = "replay"
 
-// replayQuestion is one question to answer.
+// replayQuestion is one question to answer. ReplyTo is the id of an earlier
+// question it is asked as a reply to, quoting that question's answer.
 type replayQuestion struct {
-	ID   string
-	Text string
+	ID      string
+	Text    string
+	ReplyTo string
 }
 
 // replayAnswer is one line of a run's output. Reason says how a refusal came
@@ -73,6 +76,8 @@ type replayAnswer struct {
 	Calls       int64    `json:"calls"`
 	Error       string   `json:"error,omitempty"`
 	MS          int64    `json:"ms"`
+	// ReplyTo is the earlier question this one was asked as a reply to.
+	ReplyTo string `json:"reply_to,omitempty"`
 	// Recording is the file the question's run was recorded to, with
 	// --record-dir.
 	Recording string `json:"recording,omitempty"`
@@ -253,6 +258,7 @@ func (r *ReplayRunCmd) Run(log *slog.Logger) error {
 func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Writer, run replayRun, log *slog.Logger) error {
 	enc := json.NewEncoder(w)
 	enc.SetEscapeHTML(false)
+	answers := make(map[string]string, len(questions)) // id -> answer, for a reply_to
 	for i, q := range questions {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -268,7 +274,13 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 		}
 		qctx, cancel := context.WithTimeout(ctx, run.Timeout)
 		start := time.Now()
-		reply, err := e.Answer(qctx, core.Query{User: core.User{ID: replayUser}, Surface: core.SurfaceGroup, Text: q.Text})
+		query := core.Query{User: core.User{ID: replayUser}, Surface: core.SurfaceGroup, Text: q.Text}
+		if q.ReplyTo != "" {
+			// A reply to an answer that failed quotes nothing, as a reply to a
+			// message the platform did not inline.
+			query.ReplyContext = answers[q.ReplyTo]
+		}
+		reply, err := e.Answer(qctx, query)
 		elapsed := time.Since(start)
 		cancel()
 		var recording string
@@ -279,7 +291,7 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 			}
 			recording = path
 		}
-		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Temperature: run.Temperature, Question: q.Text, MS: elapsed.Milliseconds(), Recording: recording}
+		line := replayAnswer{ID: q.ID, Label: run.Label, Model: run.Model, Temperature: run.Temperature, Question: q.Text, ReplyTo: q.ReplyTo, MS: elapsed.Milliseconds(), Recording: recording}
 		if run.Calls != nil {
 			line.Calls = run.Calls.Load() - before
 		}
@@ -290,6 +302,7 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 			line.Error = err.Error()
 		default:
 			line.Answer, line.Refused = reply.Text, reply.Refused
+			answers[q.ID] = reply.Text
 			if reply.Refused {
 				line.Reason = refusalReason(reply.Text, line.Calls)
 			}
@@ -303,9 +316,11 @@ func replay(ctx context.Context, e answerer, questions []replayQuestion, w io.Wr
 }
 
 // readQuestions reads a JSON-lines question file. Every line needs an id and
-// a query; a query_en is asked as a second question with id <id>@en. Blank
-// lines are skipped, other fields ignored, and a repeated id is an error,
-// since the comparison joins two runs by id.
+// a query; a query_en is asked as a second question with id <id>@en. A
+// reply_to must name a question on an earlier line, and the <id>@en question
+// replies to <reply_to>@en when there is one. Blank lines are skipped, other
+// fields ignored, and a repeated id is an error, since the comparison joins
+// two runs by id.
 func readQuestions(path string) ([]replayQuestion, error) {
 	f, err := os.Open(path)
 	if err != nil {
@@ -314,12 +329,12 @@ func readQuestions(path string) ([]replayQuestion, error) {
 	defer func() { _ = f.Close() }()
 	var out []replayQuestion
 	seen := map[string]bool{}
-	add := func(id, text string) error {
+	add := func(id, text, replyTo string) error {
 		if seen[id] {
 			return fmt.Errorf("replay: %s: id %q appears twice", path, id)
 		}
 		seen[id] = true
-		out = append(out, replayQuestion{ID: id, Text: text})
+		out = append(out, replayQuestion{ID: id, Text: text, ReplyTo: replyTo})
 		return nil
 	}
 	sc := bufio.NewScanner(f)
@@ -333,6 +348,7 @@ func readQuestions(path string) ([]replayQuestion, error) {
 			ID      string `json:"id"`
 			Query   string `json:"query"`
 			QueryEN string `json:"query_en"`
+			ReplyTo string `json:"reply_to"`
 		}
 		if err := json.Unmarshal(line, &q); err != nil {
 			return nil, fmt.Errorf("replay: %s line %d: %w", path, n, err)
@@ -340,11 +356,18 @@ func readQuestions(path string) ([]replayQuestion, error) {
 		if q.ID == "" || strings.TrimSpace(q.Query) == "" {
 			return nil, fmt.Errorf("replay: %s line %d: needs an id and a query", path, n)
 		}
-		if err := add(q.ID, q.Query); err != nil {
+		if q.ReplyTo != "" && !seen[q.ReplyTo] {
+			return nil, fmt.Errorf("replay: %s line %d: reply_to %q names no earlier question", path, n, q.ReplyTo)
+		}
+		if err := add(q.ID, q.Query, q.ReplyTo); err != nil {
 			return nil, err
 		}
 		if strings.TrimSpace(q.QueryEN) != "" {
-			if err := add(q.ID+"@en", q.QueryEN); err != nil {
+			replyTo := q.ReplyTo
+			if replyTo != "" && seen[replyTo+"@en"] {
+				replyTo += "@en"
+			}
+			if err := add(q.ID+"@en", q.QueryEN, replyTo); err != nil {
 				return nil, err
 			}
 		}
