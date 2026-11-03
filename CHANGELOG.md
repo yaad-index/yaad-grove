@@ -1,5 +1,19 @@
 # Changelog
 
+## [0.24.2](https://github.com/yaad-index/yaad-grove/compare/v0.24.1...v0.24.2) (2026-11-03)
+
+
+### Bug Fixes
+
+* **ci:** re-pin the FTS extension to the 0.21.2 release build ([#237](https://github.com/yaad-index/yaad-grove/issues/237)) ([29b6e30](https://github.com/yaad-index/yaad-grove/commit/29b6e30611b5dcb2b133a768dac000ef5057f0ea))
+* **core:** retrieve on the message plus what a follow-up follows ([#241](https://github.com/yaad-index/yaad-grove/issues/241)) ([f2280ba](https://github.com/yaad-index/yaad-grove/commit/f2280ba9de9140f34d12a78ed158cff825b49fcb)), closes [#240](https://github.com/yaad-index/yaad-grove/issues/240)
+* never address the asker by their label or handle ([#231](https://github.com/yaad-index/yaad-grove/issues/231)) ([bcaa761](https://github.com/yaad-index/yaad-grove/commit/bcaa761d70fca274a678d208ececb1f2f7960727))
+
+
+### Reverts
+
+* never address the asker by their label or handle ([#234](https://github.com/yaad-index/yaad-grove/issues/234)) ([79d0e6c](https://github.com/yaad-index/yaad-grove/commit/79d0e6c1a4d9c2730fcbb0b39bce771702b4564f))
+
 ## [0.24.1](https://github.com/yaad-index/yaad-grove/compare/v0.24.0...v0.24.1) (2026-10-06)
 
 
