@@ -398,9 +398,14 @@ const (
 // person's turn before it. A query with neither is the message alone, as it
 // always was. Both keyword stores score any matching term, so the added text
 // widens what can match rather than narrowing it. No model call is made.
+//
+// The added text is joined on single spaces with every whitespace run
+// collapsed: a bot answer is multi-line, and the ladybug full-text index does
+// not split a word at a tab or a carriage return, so "what\tabout" would
+// match neither word.
 func retrievalQuery(q Query) (string, string) {
 	if q.ReplyContext != "" {
-		return q.Text + "\n" + q.ReplyContext, querySourceReply
+		return words(q.Text, q.ReplyContext), querySourceReply
 	}
 	if len(q.History) == 0 {
 		return q.Text, querySourceMessage
@@ -420,7 +425,12 @@ func retrievalQuery(q Query) (string, string) {
 		parts = append(parts, q.History[from].Text)
 	}
 	parts = append(parts, q.History[last].Text)
-	return strings.Join(parts, "\n"), querySourceHistory
+	return words(parts...), querySourceHistory
+}
+
+// words joins texts on single spaces, collapsing every whitespace run.
+func words(texts ...string) string {
+	return strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
 }
 
 // maxToolIterations caps the tool-call loop: the model may call tools up to this

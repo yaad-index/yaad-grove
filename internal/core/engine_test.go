@@ -460,13 +460,15 @@ func TestTheRetrievalQueryIncludesWhatAFollowUpFollows(t *testing.T) {
 		{"standalone", core.Query{Text: "Which episodes mention Acme Rail?"},
 			"Which episodes mention Acme Rail?", "message"},
 		{"reply", core.Query{Text: "what did they say about it?", ReplyContext: "assistant: Episodes 1 and 2 review Acme Rail.", History: exchange},
-			"what did they say about it?\nassistant: Episodes 1 and 2 review Acme Rail.", "message+reply"},
+			"what did they say about it? assistant: Episodes 1 and 2 review Acme Rail.", "message+reply"},
+		{"reply with line breaks and tabs", core.Query{Text: "and\tthis?", ReplyContext: "assistant: **Acme Rail**\r\n\n- Episode 1\n- Episode 2  "},
+			"and this? assistant: **Acme Rail** - Episode 1 - Episode 2", "message+reply"},
 		{"history ending in the bot's answer", core.Query{Text: "what did they say about it?", History: exchange},
-			"what did they say about it?\nWhich episodes mention Acme Rail?\nEpisodes 1 and 2 review Acme Rail.", "message+history"},
+			"what did they say about it? Which episodes mention Acme Rail? Episodes 1 and 2 review Acme Rail.", "message+history"},
 		{"history ending in a person's turn", core.Query{Text: "and the second one?", History: exchange[:2]},
-			"and the second one?\nWhich episodes mention Acme Rail?", "message+history"},
+			"and the second one? Which episodes mention Acme Rail?", "message+history"},
 		{"history of the bot alone", core.Query{Text: "tldr", History: exchange[2:]},
-			"tldr\nEpisodes 1 and 2 review Acme Rail.", "message+history"},
+			"tldr Episodes 1 and 2 review Acme Rail.", "message+history"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
