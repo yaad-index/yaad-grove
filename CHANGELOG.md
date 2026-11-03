@@ -1,5 +1,12 @@
 # Changelog
 
+## [0.24.3](https://github.com/yaad-index/yaad-grove/compare/v0.24.2...v0.24.3) (2026-11-03)
+
+
+### Bug Fixes
+
+* **store:** keep the semantic leg when a ladybug index is reopened ([#244](https://github.com/yaad-index/yaad-grove/issues/244)) ([6117858](https://github.com/yaad-index/yaad-grove/commit/6117858529f890fd160ff97a47cda1d6bfea4b79))
+
 ## [0.24.2](https://github.com/yaad-index/yaad-grove/compare/v0.24.1...v0.24.2) (2026-11-03)
 
 
