@@ -698,7 +698,21 @@ func buildRetriever(c *ServeCmd, log *slog.Logger, mx *metrics.Metrics) (core.Re
 		// one that is ordered correctly (ADR 0022).
 		attrs = append(attrs, "orderable_indexed", orderedIndexed(docs), "orderable_skipped", orderedSkipped(docs))
 	}
+	// What the semantic leg can search, so an index with no vectors to search is
+	// not silent (#243).
+	vectors := -1
+	if st, ok := kb.(store.SemanticStats); ok && embeddingsSet {
+		dim, n, err := st.SemanticStats(context.Background())
+		if err != nil {
+			return nil, nil, fmt.Errorf("serve: read the semantic index: %w", err)
+		}
+		vectors = n
+		attrs = append(attrs, "semantic_dim", dim, "semantic_vectors", n)
+	}
 	log.Info("retrieval index built", attrs...)
+	if vectors >= 0 && vectors < chunks {
+		log.Warn("retrieval: some chunks have no embedding, so the semantic leg cannot find them", "semantic_vectors", vectors, "chunks_indexed", chunks)
+	}
 
 	var r core.Retriever = retrieval.NewPlanner(kb, embedder, mode, retrievalMaxChunks)
 	if mx != nil {

@@ -245,6 +245,69 @@ func TestLadybugConcurrentReindexAndQuery(t *testing.T) {
 	wg.Wait()
 }
 
+// A restart reopens the persisted index on an unchanged vault: Index embeds
+// nothing, so the semantic leg must still search the vectors already stored
+// (#243). Semantic is asked both straight after the reopen and after the
+// boot-time Index, the two moments a restarted bot can query.
+func TestLadybugReopenedIndexStillAnswersSemantic(t *testing.T) {
+	path := t.TempDir() + "/db"
+	vectors := map[string][]float32{"install the widget": {1, 0, 0}, "reset the gadget": {0, 1, 0}}
+	docs := []Doc{
+		{Ref: DocRef{Path: "ep01.md", Title: "Ep 1"}, Chunks: []core.Chunk{{Source: "ep01.md", Text: "install the widget"}}},
+		{Ref: DocRef{Path: "ep02.md", Title: "Ep 2"}, Chunks: []core.Chunk{{Source: "ep02.md", Text: "reset the gadget"}}},
+	}
+	first, err := NewLadybug(path, &fakeEmb{byText: vectors}, 0)
+	require.NoError(t, err)
+	require.NoError(t, first.Index(context.Background(), docs))
+	require.NoError(t, first.Close())
+
+	fe := &fakeEmb{byText: vectors}
+	l, err := NewLadybug(path, fe, 0)
+	require.NoError(t, err)
+	defer l.Close()
+
+	sem, err := l.Semantic(context.Background(), []float32{1, 0, 0}, 5)
+	require.NoError(t, err)
+	require.NotEmpty(t, sem, "the reopened index searches its stored vectors")
+	assert.Equal(t, "install the widget", sem[0].Text)
+
+	require.NoError(t, l.Index(context.Background(), docs))
+	require.Zero(t, fe.calls, "an unchanged vault is not re-embedded")
+	sem, err = l.Semantic(context.Background(), []float32{0, 1, 0}, 5)
+	require.NoError(t, err)
+	require.NotEmpty(t, sem, "the semantic leg survives a reindex that embedded nothing")
+	assert.Equal(t, "reset the gadget", sem[0].Text)
+
+	dim, n, err := l.(*Ladybug).SemanticStats(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, 3, dim)
+	assert.Equal(t, 2, n)
+}
+
+// An index built without an embedder has no vectors to search. Reopening it
+// with one configured fails, rather than serving a semantic leg that can only
+// ever be empty (#243).
+func TestLadybugReopeningAKeywordOnlyIndexWithAnEmbedderFails(t *testing.T) {
+	path := t.TempDir() + "/db"
+	docs := []Doc{{Ref: DocRef{Path: "ep01.md", Title: "Ep 1"}, Chunks: []core.Chunk{{Source: "ep01.md", Text: "install the widget"}}}}
+	first, err := NewLadybug(path, nil, 0)
+	require.NoError(t, err)
+	require.NoError(t, first.Index(context.Background(), docs))
+	require.NoError(t, first.Close())
+
+	_, err = NewLadybug(path, &fakeEmb{}, 0)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "no embeddings")
+
+	l, err := NewLadybug(path, nil, 0)
+	require.NoError(t, err, "keyword-only still opens it")
+	defer l.Close()
+	dim, n, err := l.(*Ladybug).SemanticStats(context.Background())
+	require.NoError(t, err)
+	assert.Zero(t, dim)
+	assert.Zero(t, n)
+}
+
 // Ordered recall on the graph backend (ADR 0022). The sort and the cap are pushed
 // into the database, so this is the only place their behaviour can be confirmed —
 // the memory backend's tests say nothing about a Cypher ORDER BY.
