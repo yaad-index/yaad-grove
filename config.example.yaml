@@ -61,6 +61,12 @@ serve:
   # lexical leg every query, so exact-name / "which episode" queries (semantic's
   # blind spot) are matched lexically even when the semantic leg clears nothing.
   # retrieval-mode: hybrid
+  # How many chunks one retrieval returns at most, before the context-size guard
+  # trims them (issue #246). Unset or 0 uses 10.
+  # retrieval-max-chunks: 10
+  # How many chunks each leg hands to hybrid fusion before the fused list is cut
+  # to retrieval-max-chunks (issue #246). Unset or 0 uses 30.
+  # retrieval-fusion-depth: 30
   #
   # Embedding endpoint for semantic/hybrid retrieval (OpenAI-compatible /embeddings).
   # Both must be set together; the key comes from YAADGROVE_EMBEDDING_API_KEY

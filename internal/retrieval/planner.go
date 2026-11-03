@@ -31,6 +31,15 @@ const defaultMaxChunks = 8
 // it bounds any single leg's influence so no one retriever dominates the fusion.
 const rrfK = 60
 
+// DefaultFusionDepth is how many chunks hybrid takes from each leg before fusing
+// (#246). Fusion only sees what the legs hand it, so capping each leg at the
+// final chunk count drops a chunk that ranks just below the cap in both legs,
+// while a chunk that wins one leg outright keeps its slot. 30 is from a sweep on
+// a real vault's retrieval eval set: with a 10-chunk cap, no query lost an
+// expected source against the earlier 8-and-8, and an entity section ranked
+// 11th and 24th by the two legs entered the result.
+const DefaultFusionDepth = 30
+
 // Planner is the engine-layer query step (ADR 0019): it implements core.Retriever
 // over a Store, owning the two things that are NOT a backend's business — query
 // embedding (done once, the vector passed to Store.Semantic) and rank fusion. The
@@ -43,24 +52,48 @@ const rrfK = 60
 //     skipped and the rest fuse, only all-legs-error fails, and an empty-but-ok
 //     leg flows through fusion unchanged (a lexical-only hit still surfaces).
 type Planner struct {
-	store     store.Store
-	embedder  embed.Embedder
-	mode      string
-	maxChunks int
+	store       store.Store
+	embedder    embed.Embedder
+	mode        string
+	maxChunks   int
+	fusionDepth int
+}
+
+// Option configures a Planner.
+type Option func(*Planner)
+
+// WithFusionDepth sets how many chunks hybrid takes from each leg before fusing
+// and capping at maxChunks. A depth below maxChunks fuses maxChunks per leg.
+func WithFusionDepth(n int) Option {
+	return func(p *Planner) { p.fusionDepth = n }
 }
 
 // NewPlanner builds the query step over st for the given mode. embedder may be nil
 // only in keyword mode (semantic/hybrid embed the query). maxChunks <= 0 uses the
-// default cap.
-func NewPlanner(st store.Store, embedder embed.Embedder, mode string, maxChunks int) *Planner {
+// default cap. Hybrid fuses DefaultFusionDepth chunks per leg unless an option
+// says otherwise.
+func NewPlanner(st store.Store, embedder embed.Embedder, mode string, maxChunks int, opts ...Option) *Planner {
 	if maxChunks <= 0 {
 		maxChunks = defaultMaxChunks
 	}
-	return &Planner{store: st, embedder: embedder, mode: mode, maxChunks: maxChunks}
+	p := &Planner{store: st, embedder: embedder, mode: mode, maxChunks: maxChunks, fusionDepth: DefaultFusionDepth}
+	for _, o := range opts {
+		o(p)
+	}
+	if p.fusionDepth < p.maxChunks {
+		p.fusionDepth = p.maxChunks
+	}
+	return p
 }
 
 // Mode reports the configured retrieval mode (keyword / semantic / hybrid).
 func (p *Planner) Mode() string { return p.mode }
+
+// MaxChunks reports how many chunks a retrieval returns at most.
+func (p *Planner) MaxChunks() int { return p.maxChunks }
+
+// FusionDepth reports how many chunks hybrid takes from each leg before fusing.
+func (p *Planner) FusionDepth() int { return p.fusionDepth }
 
 // Retrieve returns the ranked chunks to ground on for query, per the configured
 // mode. An empty result is a valid "nothing relevant" (the engine's grounding
@@ -83,7 +116,7 @@ func (p *Planner) Retrieve(ctx context.Context, query string) ([]core.Chunk, err
 // empty semantic result is a valid refusal and is returned as-is, so the grounding
 // block still fires rather than silently widening to a lexical match.
 func (p *Planner) semanticWithFallback(ctx context.Context, query string) ([]core.Chunk, error) {
-	chunks, err := p.semanticLeg(ctx, query)
+	chunks, err := p.semanticLeg(ctx, query, p.maxChunks)
 	if err != nil {
 		slog.Warn("retrieval: semantic leg failed; falling back to keyword", "err", err)
 		return p.store.Keyword(ctx, query, p.maxChunks)
@@ -96,20 +129,21 @@ func (p *Planner) semanticWithFallback(ctx context.Context, query string) ([]cor
 // remaining legs fuse. Only when EVERY leg errors does it fail — a silent empty
 // would be misread by the engine as a legitimate refusal. An empty-but-ok leg
 // contributes nothing yet counts as consulted, so a lexical-only hit surfaces even
-// when the semantic leg cleared nothing.
+// when the semantic leg cleared nothing. Each leg hands fusion its top fusionDepth
+// chunks, and only the fused list is capped at maxChunks (#246).
 func (p *Planner) hybrid(ctx context.Context, query string) ([]core.Chunk, error) {
 	var legs [][]core.Chunk
 	var anyOK bool
 	var lastErr error
 
-	if kw, err := p.store.Keyword(ctx, query, p.maxChunks); err != nil {
+	if kw, err := p.store.Keyword(ctx, query, p.fusionDepth); err != nil {
 		slog.Warn("retrieval: keyword leg failed; fusing the remaining legs", "err", err)
 		lastErr = err
 	} else {
 		anyOK = true
 		legs = append(legs, kw)
 	}
-	if sem, err := p.semanticLeg(ctx, query); err != nil {
+	if sem, err := p.semanticLeg(ctx, query, p.fusionDepth); err != nil {
 		slog.Warn("retrieval: semantic leg failed; fusing the remaining legs", "err", err)
 		lastErr = err
 	} else {
@@ -129,7 +163,7 @@ func (p *Planner) hybrid(ctx context.Context, query string) ([]core.Chunk, error
 // this stays a no-op where the pre-store semantic retriever was. An embed failure
 // is returned so the caller can decide to fall back (semantic mode) or skip the
 // leg (hybrid mode).
-func (p *Planner) semanticLeg(ctx context.Context, query string) ([]core.Chunk, error) {
+func (p *Planner) semanticLeg(ctx context.Context, query string, k int) ([]core.Chunk, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -140,7 +174,7 @@ func (p *Planner) semanticLeg(ctx context.Context, query string) ([]core.Chunk, 
 	if len(qv) != 1 {
 		return nil, fmt.Errorf("retrieval: query embed returned %d vectors", len(qv))
 	}
-	return p.store.Semantic(ctx, qv[0], p.maxChunks)
+	return p.store.Semantic(ctx, qv[0], k)
 }
 
 // rrfFuse merges the legs' ranked lists with Reciprocal Rank Fusion: a chunk's

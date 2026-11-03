@@ -3,6 +3,7 @@ package retrieval_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -20,18 +21,27 @@ type fakeStore struct {
 	kw, sem         []core.Chunk
 	kwErr, semErr   error
 	kwCalled, semOK bool
+	kwK, semK       int // the k each leg was last asked for
+}
+
+// top returns the first k chunks, as a store's top-k does.
+func top(chunks []core.Chunk, k int) []core.Chunk {
+	if k < len(chunks) {
+		return chunks[:k]
+	}
+	return chunks
 }
 
 func (f *fakeStore) Index(context.Context, []store.Doc) error { return nil }
 
-func (f *fakeStore) Semantic(_ context.Context, _ []float32, _ int) ([]core.Chunk, error) {
-	f.semOK = true
-	return f.sem, f.semErr
+func (f *fakeStore) Semantic(_ context.Context, _ []float32, k int) ([]core.Chunk, error) {
+	f.semOK, f.semK = true, k
+	return top(f.sem, k), f.semErr
 }
 
-func (f *fakeStore) Keyword(_ context.Context, _ string, _ int) ([]core.Chunk, error) {
-	f.kwCalled = true
-	return f.kw, f.kwErr
+func (f *fakeStore) Keyword(_ context.Context, _ string, k int) ([]core.Chunk, error) {
+	f.kwCalled, f.kwK = true, k
+	return top(f.kw, k), f.kwErr
 }
 
 func (f *fakeStore) Enumerate(context.Context, string, string) ([]store.DocRef, error) {
@@ -223,6 +233,61 @@ func TestPlannerHybridCapsAtMaxChunks(t *testing.T) {
 	got, err := retrieval.NewPlanner(st, emb, retrieval.ModeHybrid, 2).Retrieve(context.Background(), "q")
 	require.NoError(t, err)
 	assert.Len(t, got, 2, "the fused result is capped at maxChunks")
+}
+
+// A chunk ranked just below the cap by both legs is what fusion exists to find
+// (#246). Each leg here is led by eleven chunks the other leg never returns, and
+// M is tenth in both. Capping each leg at the 8 chunks the answer gets, before
+// fusing, never lets M reach fusion; fusing each leg's deeper list first puts M,
+// the only chunk both legs agree on, at the top.
+func TestPlannerHybridFusesBeforeCapping(t *testing.T) {
+	leg := func(prefix string) []core.Chunk {
+		var out []core.Chunk
+		for i := 1; i <= 12; i++ {
+			if i == 10 {
+				out = append(out, ch("M"))
+				continue
+			}
+			out = append(out, ch(fmt.Sprintf("%s%d", prefix, i)))
+		}
+		return out
+	}
+	emb := &fakeEmb{vec: []float32{1, 0}}
+
+	st := &fakeStore{kw: leg("kw"), sem: leg("sem")}
+	got, err := retrieval.NewPlanner(st, emb, retrieval.ModeHybrid, 8, retrieval.WithFusionDepth(8)).Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	assert.Len(t, got, 8)
+	assert.NotContains(t, names(got), "M", "capped before fusing, M never reaches fusion")
+
+	st = &fakeStore{kw: leg("kw"), sem: leg("sem")}
+	got, err = retrieval.NewPlanner(st, emb, retrieval.ModeHybrid, 8).Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	require.Len(t, got, 8, "the fused list is still capped at maxChunks")
+	assert.Equal(t, "M", got[0].Text, "fused before capping, the chunk both legs rank is first")
+	assert.Equal(t, retrieval.DefaultFusionDepth, st.kwK)
+	assert.Equal(t, retrieval.DefaultFusionDepth, st.semK)
+}
+
+// The fusion depth is hybrid's alone: keyword and semantic modes return the
+// store's top maxChunks, and a depth below maxChunks fuses maxChunks per leg.
+func TestPlannerFusionDepthBounds(t *testing.T) {
+	emb := &fakeEmb{vec: []float32{1, 0}}
+	st := &fakeStore{}
+	_, err := retrieval.NewPlanner(st, emb, retrieval.ModeKeyword, 8, retrieval.WithFusionDepth(30)).Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	assert.Equal(t, 8, st.kwK)
+	_, err = retrieval.NewPlanner(st, emb, retrieval.ModeSemantic, 8, retrieval.WithFusionDepth(30)).Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	assert.Equal(t, 8, st.semK)
+
+	p := retrieval.NewPlanner(st, emb, retrieval.ModeHybrid, 8, retrieval.WithFusionDepth(3))
+	assert.Equal(t, 8, p.FusionDepth())
+	_, err = p.Retrieve(context.Background(), "q")
+	require.NoError(t, err)
+	assert.Equal(t, 8, st.kwK)
+	assert.Equal(t, 8, st.semK)
+	assert.Equal(t, 30, retrieval.NewPlanner(st, emb, retrieval.ModeHybrid, 8, retrieval.WithFusionDepth(30)).FusionDepth())
 }
 
 // An unknown mode is a loud error, not a silent empty.
