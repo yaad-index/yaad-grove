@@ -506,3 +506,50 @@ func TestServeLogsWhatTheSemanticLegSearches(t *testing.T) {
 		})
 	}
 }
+
+// --retrieval-fusion-depth and --retrieval-max-chunks reach the planner and the
+// boot line; unset is each default, and a negative value is a startup error
+// (#246).
+func TestServeRetrievalFusionDepthAndMaxChunks(t *testing.T) {
+	embeddings := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Input []string `json:"input"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&req)
+		data := make([]string, len(req.Input))
+		for i := range req.Input {
+			data[i] = fmt.Sprintf(`{"index":%d,"embedding":[1,0]}`, i)
+		}
+		_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(data, ","))
+	}))
+	defer embeddings.Close()
+	build := func(depth, maxChunks int) (*retrieval.Planner, string, error) {
+		var logs bytes.Buffer
+		c := &ServeCmd{VaultDir: tempVault(t), EmbeddingBaseURL: embeddings.URL, EmbeddingModel: "embed-model", RetrievalFusionDepth: depth, RetrievalMaxChunks: maxChunks}
+		r, _, err := buildRetriever(c, slog.New(slog.NewTextHandler(&logs, nil)), nil)
+		if err != nil {
+			return nil, "", err
+		}
+		p, ok := r.(*retrieval.Planner)
+		require.True(t, ok)
+		return p, logs.String(), nil
+	}
+
+	p, logs, err := build(0, 0)
+	require.NoError(t, err)
+	assert.Equal(t, retrieval.ModeHybrid, p.Mode())
+	assert.Equal(t, 30, p.FusionDepth())
+	assert.Equal(t, 10, p.MaxChunks())
+	assert.Contains(t, logs, "max_chunks=10 fusion_depth=30")
+
+	p, logs, err = build(20, 6)
+	require.NoError(t, err)
+	assert.Equal(t, 20, p.FusionDepth())
+	assert.Equal(t, 6, p.MaxChunks())
+	assert.Contains(t, logs, "max_chunks=6 fusion_depth=20")
+
+	_, _, err = build(-1, 0)
+	assert.ErrorContains(t, err, "retrieval-fusion-depth")
+	_, _, err = build(0, -1)
+	assert.ErrorContains(t, err, "retrieval-max-chunks")
+}

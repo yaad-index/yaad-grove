@@ -111,6 +111,14 @@ type ServeCmd struct {
 	// embeddings are configured, else keyword. semantic/hybrid require embeddings.
 	RetrievalMode string `name:"retrieval-mode" help:"How lexical + semantic retrieval combine: 'keyword', 'semantic', or 'hybrid' (RRF fusion). Default: hybrid when embeddings are set, else keyword. semantic/hybrid require --embedding-*."`
 
+	// RetrievalFusionDepth (#246) is how many chunks hybrid takes from each leg
+	// before fusing; the fused list is still capped at the retrieval's chunk count.
+	RetrievalFusionDepth int `name:"retrieval-fusion-depth" help:"Hybrid only: how many chunks each leg (keyword, semantic) hands to RRF fusion before the fused list is capped. 0 uses the default (30); a value below the chunk cap uses the cap."`
+
+	// RetrievalMaxChunks (#246) caps how many chunks one retrieval returns; the
+	// context-size guard still trims them to the model's budget afterwards.
+	RetrievalMaxChunks int `name:"retrieval-max-chunks" help:"How many chunks one retrieval returns at most, before the context-size guard. 0 uses the default (10)."`
+
 	// StoreDimensions (ADR 0019) names the frontmatter fields to index for
 	// structured lookup (e.g. games, hosts). Declaring any enables the kb_enumerate
 	// tool over them: the model can list EVERY document whose dimension carries a
@@ -602,8 +610,9 @@ func loadPromptTemplate(path string) (*template.Template, error) {
 	return t, nil
 }
 
-// retrievalMaxChunks caps how many chunks a retrieval returns per query.
-const retrievalMaxChunks = 8
+// defaultRetrievalMaxChunks caps how many chunks a retrieval returns per query
+// when --retrieval-max-chunks is unset (#246).
+const defaultRetrievalMaxChunks = 10
 
 // buildRetriever builds the retrieval query step over a config-selected Store
 // (ADR 0001/0017/0019). It reads the curated vault into documents, indexes them
@@ -637,6 +646,12 @@ func buildRetriever(c *ServeCmd, log *slog.Logger, mx *metrics.Metrics) (core.Re
 	}
 	if mode != retrieval.ModeKeyword && mode != retrieval.ModeSemantic && mode != retrieval.ModeHybrid {
 		return nil, nil, fmt.Errorf("serve: unknown --retrieval-mode %q (want keyword, semantic, or hybrid)", mode)
+	}
+	if c.RetrievalFusionDepth < 0 {
+		return nil, nil, fmt.Errorf("serve: --retrieval-fusion-depth %d is negative (0 uses the default)", c.RetrievalFusionDepth)
+	}
+	if c.RetrievalMaxChunks < 0 {
+		return nil, nil, fmt.Errorf("serve: --retrieval-max-chunks %d is negative (0 uses the default)", c.RetrievalMaxChunks)
 	}
 	if mode != retrieval.ModeKeyword && !embeddingsSet {
 		return nil, nil, fmt.Errorf("serve: --retrieval-mode %q requires --embedding-base-url and --embedding-model", mode)
@@ -709,12 +724,25 @@ func buildRetriever(c *ServeCmd, log *slog.Logger, mx *metrics.Metrics) (core.Re
 		vectors = n
 		attrs = append(attrs, "semantic_dim", dim, "semantic_vectors", n)
 	}
+	var opts []retrieval.Option
+	if c.RetrievalFusionDepth > 0 {
+		opts = append(opts, retrieval.WithFusionDepth(c.RetrievalFusionDepth))
+	}
+	maxChunks := c.RetrievalMaxChunks
+	if maxChunks == 0 {
+		maxChunks = defaultRetrievalMaxChunks
+	}
+	planner := retrieval.NewPlanner(kb, embedder, mode, maxChunks, opts...)
+	attrs = append(attrs, "max_chunks", planner.MaxChunks())
+	if mode == retrieval.ModeHybrid {
+		attrs = append(attrs, "fusion_depth", planner.FusionDepth())
+	}
 	log.Info("retrieval index built", attrs...)
 	if vectors >= 0 && vectors < chunks {
 		log.Warn("retrieval: some chunks have no embedding, so the semantic leg cannot find them", "semantic_vectors", vectors, "chunks_indexed", chunks)
 	}
 
-	var r core.Retriever = retrieval.NewPlanner(kb, embedder, mode, retrievalMaxChunks)
+	var r core.Retriever = planner
 	if mx != nil {
 		r = timedRetriever{inner: r, mode: mode, metrics: mx}
 	}
