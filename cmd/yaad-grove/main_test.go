@@ -3,16 +3,24 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/alecthomas/kong"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/yaad-index/bonyan/secret"
 
+	"github.com/yaad-index/yaad-grove/internal/budget"
 	"github.com/yaad-index/yaad-grove/internal/core"
 	"github.com/yaad-index/yaad-grove/internal/metrics/metricstest"
 	"github.com/yaad-index/yaad-grove/internal/retrieval"
@@ -446,4 +454,55 @@ func TestRetrievalIsTimed(t *testing.T) {
 	require.Len(t, points, 1)
 	assert.Equal(t, map[string]string{"grove.retrieval.mode": "keyword"}, points[0].Attrs)
 	assert.Equal(t, int64(1), points[0].Value)
+}
+
+// The boot log says what the semantic leg can search, and warns when chunks
+// have no vector, so a semantic leg that can find nothing is not silent (#243).
+func TestServeLogsWhatTheSemanticLegSearches(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		embedding string
+		want      []string
+		warn      bool
+	}{
+		{"every chunk embedded", "[1,0]", []string{"semantic_dim=2", "semantic_vectors=1", "chunks_indexed=1"}, false},
+		{"no chunk embedded", "[]", []string{"semantic_dim=0", "semantic_vectors=0", "chunks_indexed=1"}, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			embeddings := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				var req struct {
+					Input []string `json:"input"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&req)
+				data := make([]string, len(req.Input))
+				for i := range req.Input {
+					data[i] = fmt.Sprintf(`{"index":%d,"embedding":%s}`, i, tc.embedding)
+				}
+				_, _ = fmt.Fprintf(w, `{"data":[%s]}`, strings.Join(data, ","))
+			}))
+			defer embeddings.Close()
+			c := &ServeCmd{
+				VaultDir: tempVault(t), Scope: "notes", Language: "en", ModelBaseURL: "http://127.0.0.1:1", ModelName: "m",
+				MaxOutputTokens: 100, ContextSize: 8000,
+				EmbeddingBaseURL: embeddings.URL, EmbeddingModel: "embed-model",
+			}
+			meter, err := budget.New(budget.Config{Ceiling: 1000, Period: time.Hour}, &budget.MemoryStore{})
+			require.NoError(t, err)
+			var logs bytes.Buffer
+			_, err = c.buildAnswering(slog.New(slog.NewTextHandler(&logs, nil)), meter, secret.NewResolver(secret.Env{}), nil, nil, nil)
+			require.NoError(t, err)
+
+			var built string
+			for _, line := range strings.Split(logs.String(), "\n") {
+				if strings.Contains(line, `msg="retrieval index built"`) {
+					built = line
+				}
+			}
+			require.NotEmpty(t, built, logs.String())
+			for _, w := range tc.want {
+				assert.Contains(t, built, w)
+			}
+			assert.Equal(t, tc.warn, strings.Contains(logs.String(), "level=WARN msg=\"retrieval: some chunks have no embedding"), logs.String())
+		})
+	}
 }

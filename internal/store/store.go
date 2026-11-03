@@ -123,6 +123,13 @@ func ParseOrderedValue(v any) (float64, OrderKind, bool) {
 	}
 }
 
+// SemanticStats is implemented by a backend that can report what its semantic
+// leg searches: the embedding dimension and how many chunks carry a vector. Serve
+// logs it at boot, so a semantic leg with nothing to search is visible (#243).
+type SemanticStats interface {
+	SemanticStats(ctx context.Context) (dim, vectors int, err error)
+}
+
 // Store is the retrieval backend port. The engine's query step holds only this;
 // backends are config-selected adapters. All methods are read-mostly after Index.
 // Semantic and Keyword return the top-k chunks for their mode, score-free — the

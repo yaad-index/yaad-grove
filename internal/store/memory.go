@@ -199,6 +199,20 @@ func (m *Memory) embedChunks(ctx context.Context, chunks []core.Chunk) ([][]floa
 	return vecs, nil
 }
 
+// SemanticStats reports the embedding dimension and how many chunks carry a
+// vector; zero means Semantic can only return nothing.
+func (m *Memory) SemanticStats(_ context.Context) (dim, vectors int, err error) {
+	for _, v := range m.load().vectors {
+		if len(v) > 0 {
+			if dim == 0 {
+				dim = len(v)
+			}
+			vectors++
+		}
+	}
+	return dim, vectors, nil
+}
+
 // Semantic returns up to k chunks whose cosine similarity to queryEmbedding clears
 // the floor, ranked by similarity (desc). threshold <= 0 is "no floor" — every
 // chunk reaches the model, ranked, even a negative-cosine one — so a non-empty

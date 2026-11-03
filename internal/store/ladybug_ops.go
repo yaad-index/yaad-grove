@@ -263,6 +263,41 @@ func (l *Ladybug) Semantic(_ context.Context, queryEmbedding []float32, k int) (
 	return out, nil
 }
 
+// SemanticStats reports the embedding dimension the semantic leg searches and
+// how many stored chunks carry a vector. A zero dimension means Semantic can
+// only return nothing.
+func (l *Ladybug) SemanticStats(_ context.Context) (dim, vectors int, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.poisoned {
+		return 0, 0, errStorePoisoned
+	}
+	if l.dim == 0 {
+		return 0, 0, nil
+	}
+	r, err := l.conn.Query("MATCH (c:Chunk) WHERE c.embedding IS NOT NULL RETURN count(*);")
+	if err != nil {
+		return 0, 0, err
+	}
+	defer r.Close()
+	if !r.HasNext() {
+		return l.dim, 0, nil
+	}
+	row, err := r.Next()
+	if err != nil {
+		return 0, 0, err
+	}
+	v, err := row.GetValue(0)
+	if err != nil {
+		return 0, 0, err
+	}
+	n, ok := v.(int64)
+	if !ok {
+		return 0, 0, fmt.Errorf("store: ladybug vector count is a %T", v)
+	}
+	return l.dim, int(n), nil
+}
+
 // Keyword returns up to k chunks by BM25 full-text score.
 func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk, error) {
 	l.mu.Lock()

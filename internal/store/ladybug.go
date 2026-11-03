@@ -41,7 +41,7 @@ type Ladybug struct {
 	conn      *ladybug.Connection
 	embedder  embed.Embedder
 	threshold float32
-	dim       int  // embedding dimension, fixed at first index
+	dim       int  // embedding dimension: from the stored schema on open, else the first embed
 	poisoned  bool // set when an index write blocked past the deadline (#141); the
 	// wedged cgo call can't be reclaimed, so the connection is unusable — every
 	// method fails fast rather than issuing a query on a connection with a query
@@ -90,7 +90,46 @@ func NewLadybug(path string, embedder embed.Embedder, threshold float32) (Store,
 		l.Close()
 		return nil, err
 	}
+	// A reopened index embeds only changed chunks, so the dimension the semantic
+	// leg needs comes from the stored schema, not from an embed call (#243).
+	if err := l.loadDim(); err != nil {
+		l.Close()
+		return nil, fmt.Errorf("store: ladybug at %s: %w", path, err)
+	}
 	return l, nil
+}
+
+// loadDim sets dim from the stored Chunk table's embedding column, when there is
+// one. A table without that column holds no vectors, which is an error when an
+// embedder is configured: the semantic leg could only ever return nothing.
+func (l *Ladybug) loadDim() error {
+	if !l.chunkTableExists() {
+		return nil
+	}
+	r, err := l.conn.Query("CALL TABLE_INFO('Chunk') RETURN name, type;")
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	for r.HasNext() {
+		row, err := r.Next()
+		if err != nil {
+			return err
+		}
+		vals, err := row.GetAsSlice()
+		if err != nil || len(vals) < 2 || asString(vals[0]) != "embedding" {
+			continue
+		}
+		typ := asString(vals[1])
+		if _, err := fmt.Sscanf(typ, "FLOAT[%d]", &l.dim); err != nil || l.dim <= 0 {
+			return fmt.Errorf("unreadable embedding column type %q", typ)
+		}
+		return nil
+	}
+	if l.embedder != nil {
+		return errors.New("the index holds no embeddings but an embedder is configured; remove it so it is rebuilt with them")
+	}
+	return nil
 }
 
 // loadExtensions makes the vector + FTS extensions available. It tries LOAD first
