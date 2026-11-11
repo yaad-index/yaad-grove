@@ -552,7 +552,7 @@ func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 		// own budgets are set wide so they never trim it further.
 		Context:       assemble.Budgets{Instructions: wide, Memory: wide, Material: wide, History: wide, Tools: wide},
 		LoopThreshold: -1, // the step cap bounds a repeating model, as before
-		Instructions:  content.Instruction(renderInstructions(e.prompt, e.persona, e.scope, e.language, q.History, q.ReplyContext, len(tools) > 0)),
+		Instructions:  content.Instruction(renderInstructions(e.prompt, e.persona, e.scope, e.language, q.History, q.ReplyContext, len(tools) > 0) + coverageInstructions(len(tools) > 0)),
 		Material:      material(chunks, q.ReplyContext),
 		History:       historyMessages(q.History),
 	}

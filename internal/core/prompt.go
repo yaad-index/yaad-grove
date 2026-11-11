@@ -107,6 +107,27 @@ func renderInstructions(tmpl *template.Template, persona, scope, language string
 	return b.String()
 }
 
+// coverageNote keeps a question about the vault's coverage ("was X discussed?",
+// "do we have a note on Y?") from being answered with a flat negative (#250). The
+// documents in the material are the closest matches to this one message, a sample
+// of the vault, so a topic missing from them is a miss of the sample, not
+// evidence the vault never covered it. It is the engine's own framing, appended
+// after the template, so an operator's custom template cannot drop it.
+const coverageNote = "\n\nCOVERAGE QUESTIONS — the documents in the material are only the closest matches to this one message, a sample of the vault and not all of it. When the user asks whether something was discussed, covered or exists (an episode, a game, a topic), never answer that it was not, was never discussed, or does not exist: a topic missing from these documents is not evidence it is missing from the vault. If the documents do not mention it, say you could not find it in what you have, and do not assert that it is absent."
+
+// coverageInstructions is the coverage framing for a run, with the lookup clause
+// when the run has tools.
+func coverageInstructions(hasTools bool) string {
+	if hasTools {
+		return coverageNote + coverageToolNote
+	}
+	return coverageNote
+}
+
+// coverageToolNote adds, when the run has tools, that a lookup comes before any
+// statement about what the vault does not hold (#250).
+const coverageToolNote = " Use the tools to look for it first; say you could not find it only after a lookup that could have found it came back without it."
+
 // historyNote frames the recent conversation, which reaches the model as the
 // run's history (ADR 0014): context for continuity, never a fact source.
 const historyNote = "\n\nRECENT CONVERSATION — the turns before the user's message are the recent turns of this chat, for continuity. You MAY summarize, continue, or refer to them when the user makes a meta or follow-up request (\"tldr\", \"more\", \"what did you mean\"): that is in-scope and needs no grounding citation. But they are conversation context, NOT external facts — never assert their contents as factual claims about the world; factual answers still come only from the documents. A partial record: only consented participants appear, so a gap or a reply to \"a message not shown\" means not shown / not consented, not that no one spoke."
