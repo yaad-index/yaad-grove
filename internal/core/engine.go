@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -428,6 +429,56 @@ func retrievalQuery(q Query) (string, string) {
 	return words(parts...), querySourceHistory
 }
 
+// rrfK is the rank offset of the reciprocal-rank fusion that merges a history-
+// blended retrieval with the message's own (#250). It is the usual constant; the
+// chunk lists carry no scores, so the fusion works on ranks alone.
+const rrfK = 60
+
+// retrieve runs retrieval for a query. When history was blended into it, the
+// message is also retrieved on its own and the two ranked lists are fused, so
+// history can add candidates but never displace the message's own (#250): the
+// blend that rescues "and which episode?" pulls a self-contained question
+// about a new subject toward the previous topic, and a miss on the blended
+// query was never retried. A chunk both lists return ranks highest, and on a
+// tie the message's own list wins. Every other query is retrieved once.
+func (e *Engine) retrieve(ctx context.Context, message, query, source string) ([]Chunk, error) {
+	if source != querySourceHistory {
+		return e.retriever.Retrieve(ctx, query)
+	}
+	bare, err := e.retriever.Retrieve(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+	blended, err := e.retriever.Retrieve(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	return fuseRanked(bare, blended), nil
+}
+
+// fuseRanked merges ranked chunk lists by reciprocal rank, identifying a chunk
+// by its source and text. Earlier lists win ties, and a list's own order is kept.
+func fuseRanked(lists ...[]Chunk) []Chunk {
+	type key struct{ source, text string }
+	score := map[key]float64{}
+	seen := map[key]bool{}
+	var order []Chunk
+	for _, list := range lists {
+		for rank, c := range list {
+			k := key{c.Source, c.Text}
+			if !seen[k] {
+				seen[k] = true
+				order = append(order, c)
+			}
+			score[k] += 1 / float64(rrfK+rank+1)
+		}
+	}
+	sort.SliceStable(order, func(i, j int) bool {
+		return score[key{order[i].Source, order[i].Text}] > score[key{order[j].Source, order[j].Text}]
+	})
+	return order
+}
+
 // words joins texts on single spaces, collapsing every whitespace run.
 func words(texts ...string) string {
 	return strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
@@ -458,7 +509,7 @@ const maxToolIterations = 5
 // Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	query, querySource := retrievalQuery(q)
-	chunks, err := e.retriever.Retrieve(ctx, query)
+	chunks, err := e.retrieve(ctx, q.Text, query, querySource)
 	if err != nil {
 		return Reply{}, err
 	}
