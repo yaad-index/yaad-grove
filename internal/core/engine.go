@@ -428,6 +428,30 @@ func retrievalQuery(q Query) (string, string) {
 	return words(parts...), querySourceHistory
 }
 
+// retrieve runs retrieval for a query. When history was blended into it, the
+// message is also retrieved on its own and the two ranked lists are fused, so
+// history can add candidates but never displace the message's own (#250): the
+// blend that rescues "and which episode?" pulls a self-contained question
+// about a new subject toward the previous topic, and a miss on the blended
+// query was never retried. A chunk both lists return ranks highest, and on a
+// tie the message's own list wins. Every other query is retrieved once.
+func (e *Engine) retrieve(ctx context.Context, message, query, source string) ([]Chunk, error) {
+	if source != querySourceHistory {
+		return e.retriever.Retrieve(ctx, query)
+	}
+	bare, err := e.retriever.Retrieve(ctx, message)
+	if err != nil {
+		return nil, err
+	}
+	blended, err := e.retriever.Retrieve(ctx, query)
+	if err != nil {
+		return nil, err
+	}
+	// Uncapped: both lists are already capped by the retriever, and the context-
+	// size guard trims the tail, so a follow-up keeps its blended hits.
+	return FuseRanked([][]Chunk{bare, blended}, 0), nil
+}
+
 // words joins texts on single spaces, collapsing every whitespace run.
 func words(texts ...string) string {
 	return strings.Join(strings.Fields(strings.Join(texts, " ")), " ")
@@ -458,7 +482,7 @@ const maxToolIterations = 5
 // Answer at the runtime boundary (ADR 0007) — neither lives here.
 func (e *Engine) Answer(ctx context.Context, q Query) (Reply, error) {
 	query, querySource := retrievalQuery(q)
-	chunks, err := e.retriever.Retrieve(ctx, query)
+	chunks, err := e.retrieve(ctx, q.Text, query, querySource)
 	if err != nil {
 		return Reply{}, err
 	}

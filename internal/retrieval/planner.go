@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sort"
 	"strings"
 
 	"github.com/yaad-index/yaad-grove/internal/core"
@@ -24,12 +23,6 @@ const (
 // defaultMaxChunks caps a retrieval when maxChunks is unset (<= 0): retrieval
 // feeds a bounded prompt, so it is capped rather than unbounded by default.
 const defaultMaxChunks = 8
-
-// rrfK is the Reciprocal Rank Fusion damping constant. 60 is the value from the
-// original RRF paper and the de-facto default: large enough that a document's
-// contribution decays gently with rank (so a solid top-10 hit still matters), and
-// it bounds any single leg's influence so no one retriever dominates the fusion.
-const rrfK = 60
 
 // DefaultFusionDepth is how many chunks hybrid takes from each leg before fusing
 // (#246). Fusion only sees what the legs hand it, so capping each leg at the
@@ -155,7 +148,7 @@ func (p *Planner) hybrid(ctx context.Context, query string) ([]core.Chunk, error
 		// Every leg errored — surface it rather than a silent empty.
 		return nil, lastErr
 	}
-	return rrfFuse(legs, p.maxChunks), nil
+	return core.FuseRanked(legs, p.maxChunks), nil
 }
 
 // semanticLeg embeds the query once and returns Store.Semantic's ranked chunks. An
@@ -175,51 +168,6 @@ func (p *Planner) semanticLeg(ctx context.Context, query string, k int) ([]core.
 		return nil, fmt.Errorf("retrieval: query embed returned %d vectors", len(qv))
 	}
 	return p.store.Semantic(ctx, qv[0], k)
-}
-
-// rrfFuse merges the legs' ranked lists with Reciprocal Rank Fusion: a chunk's
-// fused score is the sum, across legs that returned it, of 1/(rrfK + rank). Chunks
-// are deduped by source+text, sorted by fused score (ties broken by first-seen
-// order for determinism), and capped at k.
-func rrfFuse(legs [][]core.Chunk, k int) []core.Chunk {
-	type agg struct {
-		chunk core.Chunk
-		score float64
-		order int // first-seen order, for a deterministic tie-break
-	}
-	byKey := map[string]*agg{}
-	var seen int
-	for _, chunks := range legs {
-		for rank, c := range chunks {
-			key := c.Source + "\x00" + c.Text
-			a := byKey[key]
-			if a == nil {
-				a = &agg{chunk: c, order: seen}
-				byKey[key] = a
-				seen++
-			}
-			a.score += 1.0 / float64(rrfK+rank) // rank is 0-based
-		}
-	}
-
-	fused := make([]*agg, 0, len(byKey))
-	for _, a := range byKey {
-		fused = append(fused, a)
-	}
-	sort.SliceStable(fused, func(i, j int) bool {
-		if fused[i].score != fused[j].score {
-			return fused[i].score > fused[j].score
-		}
-		return fused[i].order < fused[j].order
-	})
-	if k > 0 && len(fused) > k {
-		fused = fused[:k]
-	}
-	out := make([]core.Chunk, len(fused))
-	for i, a := range fused {
-		out[i] = a.chunk
-	}
-	return out
 }
 
 // compile-time assertion that Planner satisfies core.Retriever.

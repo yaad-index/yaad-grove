@@ -479,10 +479,76 @@ func TestTheRetrievalQueryIncludesWhatAFollowUpFollows(t *testing.T) {
 			ret := &queryRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
 			_, err := newEngine(textModel("ok"), ret, nil, "SCOPE").Answer(context.Background(), tc.q)
 			require.NoError(t, err)
-			assert.Equal(t, []string{tc.query}, ret.queries)
+			want := []string{tc.query}
+			if tc.source == "message+history" {
+				// The message is also retrieved on its own, first (#250).
+				want = []string{tc.q.Text, tc.query}
+			}
+			assert.Equal(t, want, ret.queries)
 			assert.Contains(t, buf.String(), "query_source="+tc.source)
 		})
 	}
+}
+
+// byQueryRetriever answers each query with its own ranked list, by exact text.
+type byQueryRetriever map[string][]core.Chunk
+
+func (r byQueryRetriever) Retrieve(_ context.Context, query string) ([]core.Chunk, error) {
+	return r[query], nil
+}
+
+// History blended into the query must not displace what the message itself
+// retrieves (#250). A self-contained question about X after an exchange about
+// Y: the blended query ranks Y first, the message alone ranks X first, and X's
+// note must come out on top of the fused list while Y's stays available. The
+// grounding sources are read from the prompt the model receives.
+func TestHistoryCannotDisplaceTheMessagesOwnRetrieval(t *testing.T) {
+	now := time.Now()
+	history := []core.HistoryTurn{
+		{Speaker: "erin", Text: "Tell me about Gamma", Time: now},
+		{Bot: true, Text: "Gamma is a game.", Time: now},
+	}
+	q := core.Query{Text: "was Xenon discussed?", History: history}
+	blended := "was Xenon discussed? Tell me about Gamma Gamma is a game."
+	xNote := core.Chunk{Source: "xenon.md", Text: "Xenon note"}
+	yNote := core.Chunk{Source: "gamma.md", Text: "Gamma note"}
+	notes := core.Chunk{Source: "notes.md", Text: "generic notes"}
+	ret := byQueryRetriever{
+		q.Text:  {xNote, notes},
+		blended: {yNote, notes},
+	}
+	mdl := textModel("ok")
+	_, err := newEngine(mdl, ret, nil, "SCOPE").Answer(context.Background(), q)
+	require.NoError(t, err)
+	// Both lists return the generic notes, so it ranks first; the message's own
+	// top chunk comes before the one only the blended query found.
+	assert.Equal(t, []string{"generic notes", "Xenon note", "Gamma note"}, raws(itemsIn(mdl, "material")))
+}
+
+// A genuine follow-up still resolves against the previous turn (#250): the
+// message alone retrieves nothing, so the blended query's chunks are the result.
+func TestFollowUpStillResolvesAgainstHistory(t *testing.T) {
+	now := time.Now()
+	history := []core.HistoryTurn{
+		{Speaker: "erin", Text: "Which episodes mention Acme Rail?", Time: now},
+		{Bot: true, Text: "Episodes 1 and 2 review Acme Rail.", Time: now},
+	}
+	q := core.Query{Text: "and which episode?", History: history}
+	blended := "and which episode? Which episodes mention Acme Rail? Episodes 1 and 2 review Acme Rail."
+	acme := core.Chunk{Source: "acme.md", Text: "Acme Rail episode note"}
+	ret := byQueryRetriever{blended: {acme}}
+	mdl := textModel("ok")
+	reply, err := newEngine(mdl, ret, nil, "SCOPE").Answer(context.Background(), q)
+	require.NoError(t, err)
+	assert.False(t, reply.Refused)
+	assert.Equal(t, []string{"Acme Rail episode note"}, raws(itemsIn(mdl, "material")))
+}
+
+// A failure of either retrieval propagates.
+func TestHistoryRetrievalErrorPropagates(t *testing.T) {
+	q := core.Query{Text: "q", History: []core.HistoryTurn{{Speaker: "a", Text: "t", Time: time.Now()}}}
+	_, err := newEngine(textModel(""), mockRetriever{err: errors.New("scan failed")}, nil, "scope").Answer(context.Background(), q)
+	require.ErrorContains(t, err, "scan failed")
 }
 
 // A sentinel-led decline is a refusal and the persona-voiced note is shown.
