@@ -305,7 +305,11 @@ func (l *Ladybug) Keyword(_ context.Context, query string, k int) ([]core.Chunk,
 	if l.poisoned {
 		return nil, errStorePoisoned
 	}
-	if strings.TrimSpace(query) == "" {
+	// The full-text index does not split a word at a tab, a carriage return or
+	// a line break, so a message with one would lose the words on either side of
+	// it from this leg (#242). Collapse every whitespace run to one space.
+	query = strings.Join(strings.Fields(query), " ")
+	if query == "" {
 		return nil, nil
 	}
 	q := fmt.Sprintf(

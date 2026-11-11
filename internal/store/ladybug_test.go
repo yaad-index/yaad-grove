@@ -467,3 +467,32 @@ func TestLadybugOrderedTieBreakMatchesTheMemoryBackend(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"x.md"}, paths(top))
 }
+
+// Regression for #242: the full-text index does not split a word at a tab or a
+// carriage return, so a standalone message with one lost the words on either
+// side of it from the keyword leg. Whitespace is collapsed before the query.
+func TestLadybugKeywordSplitsOnTabAndCarriageReturn(t *testing.T) {
+	l, err := NewLadybug(t.TempDir()+"/db", nil, 0)
+	require.NoError(t, err)
+	defer l.Close()
+	require.NoError(t, l.Index(context.Background(), []Doc{
+		{Ref: DocRef{Path: "a.md", Title: "A"}, Chunks: []core.Chunk{{Source: "a.md", Text: "install the widget"}}},
+	}))
+	for name, q := range map[string]string{
+		"space":        "install widget",
+		"tab":          "install\twidget",
+		"crlf":         "install\r\nwidget",
+		"mixed runs":   " \tinstall \r\n\t widget\r\n",
+		"newline only": "install\nwidget",
+	} {
+		t.Run(name, func(t *testing.T) {
+			kw, err := l.Keyword(context.Background(), q, 5)
+			require.NoError(t, err)
+			require.NotEmpty(t, kw, "the words on either side of the whitespace are searched")
+			assert.Contains(t, kw[0].Text, "widget")
+		})
+	}
+	kw, err := l.Keyword(context.Background(), " \t\r\n", 5)
+	require.NoError(t, err)
+	assert.Empty(t, kw, "a whitespace-only query matches nothing")
+}
