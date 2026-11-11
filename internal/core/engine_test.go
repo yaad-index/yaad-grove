@@ -703,6 +703,42 @@ func TestAnswerEmptyChunksWithToolsCallsModel(t *testing.T) {
 	assert.Contains(t, systemOf(mdl), "tools available to you")
 }
 
+// A coverage question ("was X discussed?") whose retrieval holds nothing about X
+// reaches the model with the instruction not to state a negative from that (#250).
+// The retrieval here is the failure's shape: chunks about another topic, no hit
+// for the asked one, history from an unrelated exchange.
+func TestCoverageQuestionIsNotAnsweredWithANegativeFromZeroHits(t *testing.T) {
+	hist := []core.HistoryTurn{{Speaker: "Al", Text: "tell me about Y", Time: time.Now()}}
+	ret := mockRetriever{chunks: []core.Chunk{{Source: "notes/y.md", Text: "Y is discussed here."}}}
+	q := core.Query{Text: "was X ever discussed?", History: hist}
+
+	mdl := textModel("I could not find it.")
+	_, err := newEngine(mdl, ret, nil, "scope").Answer(context.Background(), q)
+	require.NoError(t, err)
+	sys := systemOf(mdl)
+	assert.Contains(t, sys, "COVERAGE QUESTIONS")
+	assert.Contains(t, sys, "never answer that it was not, was never discussed")
+	assert.Contains(t, sys, "say you could not find it")
+	assert.NotContains(t, sys, "Use the tools to look for it first", "no tools, so no lookup to require")
+
+	withTools := textModel("I could not find it.")
+	_, err = newEngine(withTools, ret, toolRegistry(), "scope").Answer(context.Background(), q)
+	require.NoError(t, err)
+	assert.Contains(t, systemOf(withTools), "Use the tools to look for it first")
+}
+
+// The note is the engine's own framing, so an operator's custom template cannot
+// drop it, and it carries nothing a user wrote.
+func TestCoverageNoteSurvivesACustomTemplate(t *testing.T) {
+	tmpl, err := core.ParsePromptTemplate("{{.Scope}} CUSTOM")
+	require.NoError(t, err)
+	mdl := textModel("ok")
+	_, err = newEngine(mdl, mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "t"}}}, nil, "scope", core.WithPromptTemplate(tmpl)).Answer(context.Background(), core.Query{Text: "was X discussed?"})
+	require.NoError(t, err)
+	assert.Contains(t, systemOf(mdl), "CUSTOM")
+	assert.Contains(t, systemOf(mdl), "COVERAGE QUESTIONS")
+}
+
 // The reply cap reaches every model call.
 func TestTheReplyCapReachesTheModel(t *testing.T) {
 	ret := mockRetriever{chunks: []core.Chunk{{Source: "a.md", Text: "x"}}}
