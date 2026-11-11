@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.25.1](https://github.com/yaad-index/yaad-grove/compare/v0.25.0...v0.25.1) (2026-11-11)
+
+
+### Bug Fixes
+
+* **core:** never answer a coverage question with a negative from missing hits ([#254](https://github.com/yaad-index/yaad-grove/issues/254)) ([14ba552](https://github.com/yaad-index/yaad-grove/commit/14ba552a1c1fa0c4e51d39350058ee080df32571))
+* **retrieval:** fuse the message's own retrieval with the history-blended one ([#251](https://github.com/yaad-index/yaad-grove/issues/251)) ([1fdb186](https://github.com/yaad-index/yaad-grove/commit/1fdb18613639c2495070a0ffeefacf47bde5a4f1))
+* **store:** collapse whitespace before the ladybug keyword leg ([#252](https://github.com/yaad-index/yaad-grove/issues/252)) ([05b9626](https://github.com/yaad-index/yaad-grove/commit/05b9626a820c1f679856098b2edd65f13422d22c))
+
 ## [0.25.0](https://github.com/yaad-index/yaad-grove/compare/v0.24.3...v0.25.0) (2026-11-03)
 
 
